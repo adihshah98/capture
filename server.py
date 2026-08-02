@@ -9,10 +9,13 @@ a single box — the wire format stays the same.
 Run: .venv/bin/uvicorn server:app --port 3000
 """
 
+import asyncio
 import gzip
 import json
+import os
 import random
 import re
+import shutil
 import string
 import time
 from pathlib import Path
@@ -41,6 +44,10 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_BODY_BYTES = 50 * 1024 * 1024
+
+# Sessions whose newest chunk is older than this are deleted by the daily
+# retention sweep. Set RETENTION_DAYS=0 to keep everything forever.
+RETENTION_DAYS = float(os.environ.get("RETENTION_DAYS", "30"))
 
 
 def error(status: int, message: str) -> JSONResponse:
@@ -152,6 +159,41 @@ def session_events(session_id: str):
     events.sort(key=lambda e: e.get("timestamp", 0))
 
     return {"session_id": session_id, "url": url, "count": len(events), "events": events}
+
+
+# ---------------------------------------------------------------------------
+# Retention
+# ---------------------------------------------------------------------------
+
+
+def sweep_expired_sessions() -> int:
+    """Delete session directories whose newest chunk is past retention.
+    Empty directories (no chunks) are treated as expired."""
+    if RETENTION_DAYS <= 0:
+        return 0
+    cutoff_ms = (time.time() - RETENTION_DAYS * 86400) * 1000
+    removed = 0
+    for entry in DATA_DIR.iterdir():
+        if not entry.is_dir():
+            continue
+        chunks = sorted(entry.glob("*.json"), key=chunk_timestamp)
+        newest = chunk_timestamp(chunks[-1]) if chunks else 0
+        if newest < cutoff_ms:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+    return removed
+
+
+@app.on_event("startup")
+async def start_retention_loop():
+    async def loop():
+        while True:
+            removed = await asyncio.to_thread(sweep_expired_sessions)
+            if removed:
+                print(f"retention: removed {removed} expired session(s)")
+            await asyncio.sleep(24 * 3600)
+
+    asyncio.create_task(loop())
 
 
 # Registered last so /ingest and /api/* win; serves index.html at "/".

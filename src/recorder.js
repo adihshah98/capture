@@ -23,6 +23,13 @@ const config = Object.assign(
     endpoint: '/ingest',
     flushIntervalMs: 5000,
     maxBatchSize: 50,
+    // Also flush when the serialized batch reaches this size — event count
+    // is a weak proxy, a single full snapshot can be most of a megabyte.
+    maxBatchBytes: 900 * 1024,
+    // After this long without user interaction the recorder goes idle:
+    // non-interactive events (mutations from animations, timers, background
+    // tabs) are dropped instead of recorded until the user comes back.
+    idleThresholdMs: 5 * 60 * 1000,
     checkoutEveryNms: 5 * 60 * 1000, // periodic full snapshots so replay can seek
     sessionIdleTimeoutMs: 30 * 60 * 1000,
     sessionMaxLengthMs: 24 * 60 * 60 * 1000,
@@ -155,7 +162,9 @@ function pushEvent(event) {
   buffer.push(event);
   bufferBytes += JSON.stringify(event).length;
   if (status === 'active') {
-    if (buffer.length >= config.maxBatchSize) flush(false);
+    if (buffer.length >= config.maxBatchSize || bufferBytes >= config.maxBatchBytes) {
+      flush(false);
+    }
   } else if (bufferBytes > config.maxBufferBytes) {
     // Trimming old events from the front could drop the full snapshot and
     // leave the buffer unreplayable, so restart from a fresh snapshot instead.
@@ -294,16 +303,54 @@ function onSessionRotated(next) {
   checkUrlTriggers();
 }
 
+// rrweb IncrementalSource values that represent real user interaction:
+// MouseMove(1), MouseInteraction(2), Scroll(3), Input(5), TouchMove(6).
+const INTERACTIVE_SOURCES = new Set([1, 2, 3, 5, 6]);
+const isInteractive = (event) =>
+  event.type === 3 && INTERACTIVE_SOURCES.has(event.data && event.data.source);
+
+let idle = false;
+let lastUserActivity = Date.now();
+
+/** Marker events pushed directly (addCustomEvent would recurse through emit). */
+function pushMarker(tag) {
+  pushEvent({ type: 5, data: { tag, payload: {} }, timestamp: Date.now() });
+}
+
 function startRecording() {
   // A session that already fired a trigger stays active across page loads.
   status = config.triggers && !readSession()?.triggered ? 'buffering' : 'active';
+  idle = false;
+  lastUserActivity = Date.now();
   stopFn = record({
     emit(event) {
-      // Keep the session alive + detect idle rotation on real activity.
-      const current = getSession();
-      if (current.rotated) {
-        onSessionRotated(current);
-        if (status === 'disabled') return;
+      if (isInteractive(event)) {
+        lastUserActivity = Date.now();
+        // Only real activity keeps the session alive / detects rotation —
+        // background mutations must not stop a session from ever rotating.
+        const current = getSession();
+        if (current.rotated) {
+          onSessionRotated(current);
+          if (status === 'disabled') return;
+        }
+        if (idle) {
+          // Waking up: mark it and take a fresh snapshot so replay resumes
+          // from current reality rather than a stale pre-idle DOM.
+          idle = false;
+          pushMarker('capture-idle-end');
+          record.takeFullSnapshot(true);
+        }
+        pushEvent(event);
+        return;
+      }
+
+      // Non-interactive event (mutations, media, console/network plugins…)
+      if (idle) return; // dropped: nobody is watching
+      if (Date.now() - lastUserActivity > config.idleThresholdMs) {
+        idle = true;
+        pushMarker('capture-idle');
+        flush(false); // ship what we have; the stream pauses here
+        return;
       }
       pushEvent(event);
     },

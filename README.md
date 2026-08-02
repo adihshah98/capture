@@ -32,6 +32,8 @@ Optional config, before the tag:
     recorderUrl: '/recorder.bundle.js',
     flushIntervalMs: 5000,
     maxBatchSize: 50,
+    maxBatchBytes: 900 * 1024,    // flush on payload size, not just count
+    idleThresholdMs: 5 * 60 * 1000, // drop background events past this idle time
 
     // Ingestion controls (all optional):
     sampleRate: 1,                // keep this fraction of sessions (sticky per session)
@@ -68,10 +70,17 @@ Optional config, before the tag:
 - **Session identity** — a session id in `localStorage`, rotated after 30 min idle or
   24 h max; a per-tab window id in `sessionStorage`. On rotation the recorder takes a
   fresh full snapshot so every session is independently replayable.
-- **Batching + compression** — events buffer in memory and flush every 5 s or 50
-  events, gzipped with `CompressionStream` and POSTed with `fetch`. On `pagehide` /
+- **Batching + compression** — events buffer in memory and flush every 5 s, at 50
+  events, or at ~0.9 MB of payload (a single full snapshot can dwarf dozens of small
+  events), gzipped with `CompressionStream` and POSTed with `fetch`. On `pagehide` /
   tab-hidden a final flush uses `keepalive` so it survives navigation. Failed flushes
   are re-buffered (bounded at 1000 events).
+- **Idle detection** — after 5 min without real interaction (mouse, scroll, input,
+  touch) the recorder goes idle: background noise (animation/timer mutations,
+  plugin events) is dropped instead of recorded, marked by a `capture-idle` event.
+  Interaction wakes it with a `capture-idle-end` marker plus a fresh full snapshot
+  so replay resumes from current reality. Only real interaction extends the
+  session's lifetime — a tab left open on an animating page still rotates.
 - **Privacy (on by default)** — `maskAllInputs: true` (all input text becomes `*`
   before leaving the browser), `class="capture-block"` redacts an element entirely,
   `class="capture-mask"` masks text content. Verified: raw form values never appear
@@ -116,5 +125,7 @@ npm run dev     # build + server
 The wire format is stable, so the upgrade path is swapping storage, not clients:
 put `/ingest` behind a queue (Kafka/SQS), write chunks to S3 instead of disk, index
 session metadata in a database (ClickHouse/Postgres), and stream chunks to the
-player instead of concatenating them in memory. Retention = deleting session
-directories older than N days.
+player instead of concatenating them in memory.
+
+Retention is built in: a daily sweep deletes sessions whose newest chunk is older
+than `RETENTION_DAYS` (default 30; `RETENTION_DAYS=0` keeps everything forever).
