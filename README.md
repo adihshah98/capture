@@ -40,6 +40,14 @@ Optional config, before the tag:
       onException: true,          // uncaught error / unhandled rejection
     },
     maxBufferBytes: 2 * 1024 * 1024, // pre-trigger rolling buffer bound
+
+    // Network capture (URLs/method/status/timings by default; false disables):
+    network: {
+      captureHeaders: false,      // opt-in; sensitive headers always redacted
+      captureBody: false,         // opt-in; capped at 64 KB
+      captureResources: true,     // img/script/css from the Performance API
+      ignoreUrls: [],             // regexes; ingest endpoint always ignored
+    },
   };
 </script>
 ```
@@ -74,6 +82,14 @@ Optional config, before the tag:
 - **Console capture** — `@rrweb/rrweb-plugin-console-record` embeds console
   log/info/warn/error into the event stream (type 6 plugin events); the replay UI
   renders them in a panel under the player.
+- **Network capture** — `src/network-plugin.js` wraps `fetch` + `XMLHttpRequest`
+  (method, status, duration, failures) and reads buffered PerformanceObserver
+  resource entries (scripts, images, styles — including ones loaded before the
+  recorder), emitted as `capture/network@1` plugin events. Privacy-first: URLs
+  and timings only by default; headers/bodies are opt-in, sensitive headers
+  (authorization, cookie, …) are always redacted, URL credentials are stripped,
+  and the ingest endpoint itself is never captured. The replay UI shows a
+  Network tab beside Console with per-request rows and error highlighting.
 - **Ingestion controls (PostHog-style)** — `sampleRate` rolls a sticky per-session
   keep/skip decision at session creation, so a session is wholly recorded or never
   leaves the browser. With `triggers` configured, the recorder starts in a

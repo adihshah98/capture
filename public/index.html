@@ -48,6 +48,8 @@
         <button type="submit" class="primary">Submit</button>
         <button type="button" id="log-something">Log to console</button>
         <button type="button" id="throw-error">Trigger an error</button>
+        <button type="button" id="fetch-ok">Fetch API (200)</button>
+        <button type="button" id="fetch-404">Fetch API (404)</button>
       </div>
     </form>
 
@@ -81,6 +83,12 @@
     });
     document.getElementById('throw-error').addEventListener('click', () => {
       console.error('simulated error: payment failed', { code: 'DEMO_42' });
+    });
+    document.getElementById('fetch-ok').addEventListener('click', () => {
+      fetch('/api/sessions').then((r) => console.log('fetch ok:', r.status));
+    });
+    document.getElementById('fetch-404').addEventListener('click', () => {
+      fetch('/api/sessions/does-not-exist/events').then((r) => console.log('fetch 404:', r.status));
     });
     function alertBanner(text) {
       const el = document.createElement('div');

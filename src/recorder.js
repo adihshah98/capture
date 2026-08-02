@@ -16,6 +16,7 @@
  */
 import { record } from 'rrweb';
 import { getRecordConsolePlugin } from '@rrweb/rrweb-plugin-console-record';
+import { getRecordNetworkPlugin } from './network-plugin.js';
 
 const config = Object.assign(
   {
@@ -36,6 +37,16 @@ const config = Object.assign(
     triggers: null,
     // Bound on the pre-trigger rolling buffer (approx. serialized bytes).
     maxBufferBytes: 2 * 1024 * 1024,
+
+    // Network capture: URLs, method, status and timings by default;
+    // headers/bodies are opt-in (sensitive headers always redacted).
+    // Set to false to disable entirely.
+    network: {
+      captureHeaders: false,
+      captureBody: false,
+      captureResources: true,
+      ignoreUrls: [],
+    },
   },
   window.CAPTURE_CONFIG || {}
 );
@@ -319,6 +330,21 @@ function startRecording() {
         lengthThreshold: 1000,
         stringifyOptions: { stringLengthLimit: 1000, numOfKeysLimit: 100, depthOfLimit: 3 },
       }),
+      ...(config.network === false
+        ? []
+        : [
+            getRecordNetworkPlugin({
+              ...config.network,
+              ignoreUrls: [
+                // Never capture our own ingest traffic (feedback loop).
+                new URL(config.endpoint, location.href).href.replace(
+                  /[.*+?^${}()|[\]\\]/g,
+                  '\\$&'
+                ),
+                ...((config.network && config.network.ignoreUrls) || []),
+              ],
+            }),
+          ]),
     ],
   });
   scheduleFlush();

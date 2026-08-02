@@ -11,7 +11,22 @@ import 'rrweb-player/dist/style.css';
 const sessionListEl = document.getElementById('session-list');
 const playerHostEl = document.getElementById('player-host');
 const consoleListEl = document.getElementById('console-list');
+const networkListEl = document.getElementById('network-list');
 const sessionTitleEl = document.getElementById('session-title');
+
+// Console/Network tab switching
+const tabs = [
+  { btn: document.getElementById('tab-console'), list: consoleListEl },
+  { btn: document.getElementById('tab-network'), list: networkListEl },
+];
+for (const tab of tabs) {
+  tab.btn.addEventListener('click', () => {
+    for (const t of tabs) {
+      t.btn.classList.toggle('active', t === tab);
+      t.list.hidden = t !== tab;
+    }
+  });
+}
 
 let player = null;
 
@@ -56,6 +71,7 @@ function renderConsole(events) {
     .filter((e) => e.type === 6 && e.data && e.data.plugin === 'rrweb/console@1')
     .map((e) => ({ timestamp: e.timestamp, ...e.data.payload }));
 
+  document.getElementById('console-count').textContent = logs.length ? `(${logs.length})` : '';
   consoleListEl.innerHTML = '';
   if (logs.length === 0) {
     consoleListEl.innerHTML = '<li class="empty">No console output captured.</li>';
@@ -76,6 +92,47 @@ function renderConsole(events) {
     li.innerHTML = `<span class="ts">${new Date(log.timestamp).toLocaleTimeString()}</span><span class="lvl">${log.level}</span><span class="msg"></span>`;
     li.querySelector('.msg').textContent = args;
     consoleListEl.appendChild(li);
+  }
+}
+
+function renderNetwork(events) {
+  const t0 = events.length ? events[0].timestamp : 0;
+  const requests = events
+    .filter((e) => e.type === 6 && e.data && e.data.plugin === 'capture/network@1')
+    .map((e) => e.data.payload)
+    .sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
+
+  document.getElementById('network-count').textContent = requests.length
+    ? `(${requests.length})`
+    : '';
+  networkListEl.innerHTML = '';
+  if (requests.length === 0) {
+    networkListEl.innerHTML = '<li class="empty">No network requests captured.</li>';
+    return;
+  }
+  for (const req of requests) {
+    const li = document.createElement('li');
+    const failed = req.status === 0 || req.status >= 400;
+    if (failed) li.className = 'net-error';
+    const rel = Math.max(0, (req.startMs || t0) - t0) / 1000;
+    li.innerHTML = `
+      <span class="ts"></span>
+      <span class="method"></span>
+      <span class="st"></span>
+      <span class="url"></span>
+      <span class="kind"></span>
+      <span class="dur"></span>
+    `;
+    li.querySelector('.ts').textContent = `+${rel.toFixed(1)}s`;
+    li.querySelector('.method').textContent = req.method || req.initiatorType || '—';
+    li.querySelector('.st').textContent = req.status != null ? req.status : '·';
+    const url = li.querySelector('.url');
+    url.textContent = req.url;
+    url.title = req.url + (req.error ? ` — ${req.error}` : '');
+    li.querySelector('.kind').textContent = req.type === 'resource' ? req.initiatorType : req.type;
+    li.querySelector('.dur').textContent =
+      req.durationMs != null ? `${req.durationMs} ms` : '';
+    networkListEl.appendChild(li);
   }
 }
 
@@ -104,6 +161,7 @@ async function loadSession(sessionId) {
   });
 
   renderConsole(events);
+  renderNetwork(events);
 }
 
 document.getElementById('refresh').addEventListener('click', loadSessions);
