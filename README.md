@@ -32,6 +32,14 @@ Optional config, before the tag:
     recorderUrl: '/recorder.bundle.js',
     flushIntervalMs: 5000,
     maxBatchSize: 50,
+
+    // Ingestion controls (all optional):
+    sampleRate: 1,                // keep this fraction of sessions (sticky per session)
+    triggers: {                   // omit to record unconditionally
+      urls: ['/checkout'],        // regexes matched against location.href (SPA-aware)
+      onException: true,          // uncaught error / unhandled rejection
+    },
+    maxBufferBytes: 2 * 1024 * 1024, // pre-trigger rolling buffer bound
   };
 </script>
 ```
@@ -66,6 +74,18 @@ Optional config, before the tag:
 - **Console capture** — `@rrweb/rrweb-plugin-console-record` embeds console
   log/info/warn/error into the event stream (type 6 plugin events); the replay UI
   renders them in a panel under the player.
+- **Ingestion controls (PostHog-style)** — `sampleRate` rolls a sticky per-session
+  keep/skip decision at session creation, so a session is wholly recorded or never
+  leaves the browser. With `triggers` configured, the recorder starts in a
+  `buffering` state: events accumulate in a bounded in-memory rolling buffer
+  (`maxBufferBytes`, replayability-safe — it restarts from a fresh full snapshot
+  rather than trimming past one) and nothing is sent until a trigger fires — a URL
+  regex match (SPA navigations included), an uncaught exception, or a manual
+  `window.capture.trigger('reason')`. Activation flushes the buffered lead-up, stamps
+  a `capture-trigger` custom event into the stream, and persists the decision on the
+  session so later page loads stay active. Untriggered sessions are discarded on
+  unload. `window.capture.status()` reports `disabled | buffering | active`.
+  Try it: **/demo-triggers.html** buffers until you fire one of its three triggers.
 
 ## Commands
 

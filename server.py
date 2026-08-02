@@ -24,6 +24,17 @@ from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="capture")
 
+
+@app.middleware("http")
+async def revalidate_bundles(request: Request, call_next):
+    """Browsers cache script bundles indefinitely by default, so instrumented
+    pages would keep running a stale recorder after a deploy. no-cache forces
+    a revalidation (cheap 304 when unchanged) on every load."""
+    response = await call_next(request)
+    if request.url.path.endswith((".js", ".css")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
