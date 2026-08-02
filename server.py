@@ -49,6 +49,11 @@ MAX_BODY_BYTES = 50 * 1024 * 1024
 # retention sweep. Set RETENTION_DAYS=0 to keep everything forever.
 RETENTION_DAYS = float(os.environ.get("RETENTION_DAYS", "30"))
 
+# Remote recording config served to clients (PostHog's remote-config analog).
+# Edit this file to change recording behavior fleet-wide — clients re-fetch
+# after their cache TTL (1 h) without any page redeploy.
+CONFIG_PATH = BASE_DIR / "data" / "config.json"
+
 
 def error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
@@ -100,6 +105,29 @@ async def ingest(
     )
 
     return {"status": "ok", "stored": len(events)}
+
+
+# ---------------------------------------------------------------------------
+# Remote config
+# ---------------------------------------------------------------------------
+
+
+@app.get("/config")
+def remote_config():
+    """Recording settings for the client, from data/config.json. Missing or
+    invalid file degrades to {} — a bad config must never stop recording."""
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text())
+        if not isinstance(cfg, dict):
+            raise ValueError("config.json must be a JSON object")
+    except FileNotFoundError:
+        cfg = {}
+    except Exception as exc:
+        print(f"config: serving defaults, data/config.json unusable: {exc}")
+        cfg = {}
+    response = JSONResponse(cfg)
+    response.headers["Cache-Control"] = "no-cache"  # clients cache via their own TTL
+    return response
 
 
 # ---------------------------------------------------------------------------

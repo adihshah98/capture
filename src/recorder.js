@@ -13,14 +13,24 @@
  *   trigger-based recording (triggers: {urls, onException} + capture.trigger())
  *   with a pre-trigger rolling buffer, so a fired trigger keeps the lead-up
  *   and untriggered sessions never leave the browser
+ * - remote config: recording settings are fetched from the server before
+ *   recording starts (cached 1 h in localStorage), so recording behavior can
+ *   change fleet-wide without redeploying instrumented pages. Precedence:
+ *   defaults < remote config < inline window.CAPTURE_CONFIG (page wins).
  */
 import { record } from 'rrweb';
 import { getRecordConsolePlugin } from '@rrweb/rrweb-plugin-console-record';
 import { getRecordNetworkPlugin } from './network-plugin.js';
 
-const config = Object.assign(
-  {
-    endpoint: '/ingest',
+const DEFAULTS = {
+  endpoint: '/ingest',
+
+  // Remote config: fetched from configUrl before recording starts and cached
+  // in localStorage for remoteConfigTtlMs. Set remoteConfig: false to run
+  // from local config only.
+  remoteConfig: true,
+  configUrl: '/config',
+  remoteConfigTtlMs: 60 * 60 * 1000,
     flushIntervalMs: 5000,
     maxBatchSize: 50,
     // Also flush when the serialized batch reaches this size — event count
@@ -54,9 +64,45 @@ const config = Object.assign(
       captureResources: true,
       ignoreUrls: [],
     },
-  },
-  window.CAPTURE_CONFIG || {}
-);
+};
+
+// Local-only merge so helpers work before init; main() swaps in the full
+// defaults < remote < inline merge before anything records.
+let config = Object.assign({}, DEFAULTS, window.CAPTURE_CONFIG || {});
+
+const REMOTE_CONFIG_KEY = 'capture_remote_config';
+
+async function resolveConfig() {
+  const inline = window.CAPTURE_CONFIG || {};
+  if (config.remoteConfig === false) return Object.assign({}, DEFAULTS, inline);
+
+  let remote = null;
+  try {
+    const cached = JSON.parse(localStorage.getItem(REMOTE_CONFIG_KEY));
+    if (cached && Date.now() - cached.fetchedAt < config.remoteConfigTtlMs) {
+      remote = cached.config;
+    }
+  } catch {
+    /* corrupt cache — refetch */
+  }
+  if (!remote) {
+    try {
+      const res = await fetch(config.configUrl);
+      if (res.ok) {
+        remote = await res.json();
+        localStorage.setItem(
+          REMOTE_CONFIG_KEY,
+          JSON.stringify({ config: remote, fetchedAt: Date.now() })
+        );
+      }
+    } catch {
+      /* server unreachable — record with local config rather than not at all */
+    }
+  }
+  // Precedence: defaults < remote < inline (the page always wins). Shallow
+  // merge: to override one key of e.g. `network`, remote must send the object.
+  return Object.assign({}, DEFAULTS, remote || {}, inline);
+}
 
 // ---------------------------------------------------------------------------
 // Session / window identity
@@ -126,9 +172,11 @@ function getWindowId() {
   return id;
 }
 
-let session = getSession();
-let sessionId = session.id;
-const windowId = getWindowId();
+// Assigned in main() once config is resolved — the sampling decision
+// depends on the effective sampleRate.
+let session = null;
+let sessionId = null;
+let windowId = null;
 
 // ---------------------------------------------------------------------------
 // Recording state machine (PostHog's ingestion controls, in miniature)
@@ -225,9 +273,7 @@ function scheduleFlush() {
 // Triggers
 // ---------------------------------------------------------------------------
 
-const urlTriggers = ((config.triggers && config.triggers.urls) || []).map(
-  (pattern) => new RegExp(pattern)
-);
+let urlTriggers = [];
 
 /** buffering → active: fire the buffered lead-up at the server. */
 function activate(reason) {
@@ -251,31 +297,39 @@ function checkUrlTriggers() {
   if (urlTriggers.some((re) => re.test(location.href))) activate('url');
 }
 
-if (urlTriggers.length) {
-  // SPA route changes don't reload the page; wrap history so URL triggers
-  // see them.
-  for (const method of ['pushState', 'replaceState']) {
-    const original = history[method].bind(history);
-    history[method] = (...args) => {
-      const result = original(...args);
-      checkUrlTriggers();
-      return result;
-    };
+/** Wire trigger listeners + the page-facing API. Called once from main(). */
+function setupTriggers() {
+  urlTriggers = ((config.triggers && config.triggers.urls) || []).map(
+    (pattern) => new RegExp(pattern)
+  );
+
+  if (urlTriggers.length) {
+    // SPA route changes don't reload the page; wrap history so URL triggers
+    // see them.
+    for (const method of ['pushState', 'replaceState']) {
+      const original = history[method].bind(history);
+      history[method] = (...args) => {
+        const result = original(...args);
+        checkUrlTriggers();
+        return result;
+      };
+    }
+    window.addEventListener('popstate', checkUrlTriggers);
+    window.addEventListener('hashchange', checkUrlTriggers);
   }
-  window.addEventListener('popstate', checkUrlTriggers);
-  window.addEventListener('hashchange', checkUrlTriggers);
-}
 
-if (config.triggers && config.triggers.onException) {
-  window.addEventListener('error', () => activate('exception'));
-  window.addEventListener('unhandledrejection', () => activate('exception'));
-}
+  if (config.triggers && config.triggers.onException) {
+    window.addEventListener('error', () => activate('exception'));
+    window.addEventListener('unhandledrejection', () => activate('exception'));
+  }
 
-// Manual API: capture.trigger('saw-bug') from the host page.
-window.capture = Object.assign(window.capture || {}, {
-  trigger: (reason) => activate(reason || 'manual'),
-  status: () => status,
-});
+  // Manual API: capture.trigger('saw-bug') from the host page.
+  window.capture = Object.assign(window.capture || {}, {
+    trigger: (reason) => activate(reason || 'manual'),
+    status: () => status,
+    config: () => ({ ...config }), // effective (merged) config, for debugging
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Recording
@@ -424,17 +478,30 @@ function watchForNextSession() {
   }
 }
 
-if (session.sampled) {
-  startRecording();
-} else {
-  watchForNextSession();
+async function main() {
+  // Nothing records until the effective config is known — remote settings
+  // (sampleRate, triggers, …) must not race the first events.
+  config = await resolveConfig();
+
+  session = getSession();
+  sessionId = session.id;
+  windowId = getWindowId();
+  setupTriggers();
+
+  if (session.sampled) {
+    startRecording();
+  } else {
+    watchForNextSession();
+  }
+
+  // Final flush when the tab is hidden or closed. pagehide + visibilitychange
+  // covers desktop and mobile; keepalive lets the request outlive the page.
+  // A still-buffering session is discarded here by design: no trigger fired,
+  // so it was never worth keeping (flush() is a no-op unless 'active').
+  window.addEventListener('pagehide', () => flush(true));
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flush(true);
+  });
 }
 
-// Final flush when the tab is hidden or closed. pagehide + visibilitychange
-// covers desktop and mobile; keepalive lets the request outlive the page.
-// A still-buffering session is discarded here by design: no trigger fired,
-// so it was never worth keeping (flush() is a no-op unless 'active').
-window.addEventListener('pagehide', () => flush(true));
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') flush(true);
-});
+main();

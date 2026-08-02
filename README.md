@@ -30,6 +30,9 @@ Optional config, before the tag:
   window.CAPTURE_CONFIG = {
     endpoint: '/ingest',          // where batches are POSTed
     recorderUrl: '/recorder.bundle.js',
+    remoteConfig: true,           // fetch settings from the server first
+    configUrl: '/config',
+    remoteConfigTtlMs: 60 * 60 * 1000,
     flushIntervalMs: 5000,
     maxBatchSize: 50,
     maxBatchBytes: 900 * 1024,    // flush on payload size, not just count
@@ -61,12 +64,21 @@ Optional config, before the tag:
 | `public/capture.js` (~0.4 KB) | Loader snippet; lazy-loads the recorder after page idle | `array.js` snippet lazy-loading the recorder bundle |
 | `src/recorder.js` → `recorder.bundle.js` | rrweb `record()` + console plugin, session/window ids, batching, gzip, keepalive flush | posthog-js session recording module (vendored rrweb) |
 | `server.py` — `POST /ingest?compression=gzip-js` | FastAPI endpoint receiving gzipped JSON event batches | `/s/` endpoint with `compression=gzip-js` (Django, later Rust) |
+| `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts | remote config endpoint (1 h TTL in the client) |
 | `data/sessions/<id>/<ts>-<rand>.json` | Immutable chunk per batch | Kafka → session-recording blob files in S3 |
 | `GET /api/sessions`, `GET /api/sessions/:id/events` | Read API for the player | Recording metadata (ClickHouse) + blob fetch |
 | `public/replay.html` + `replay.bundle.js` | rrweb-player + console panel | PostHog player with synced DevTools panel |
 
 ## Client behavior
 
+- **Remote config** — before recording starts, the client fetches `/config`
+  (served from `data/config.json`) and caches it in `localStorage` for 1 h, so
+  recording behavior — sample rate, triggers, idle threshold, network options —
+  can change fleet-wide by editing one server file, no page redeploys. Merge
+  precedence: built-in defaults < remote config < inline `window.CAPTURE_CONFIG`
+  (the page always wins). A missing/invalid config file or unreachable endpoint
+  degrades gracefully to local settings. Inspect the effective merge with
+  `window.capture.config()`.
 - **Session identity** — a session id in `localStorage`, rotated after 30 min idle or
   24 h max; a per-tab window id in `sessionStorage`. On rotation the recorder takes a
   fresh full snapshot so every session is independently replayable.
