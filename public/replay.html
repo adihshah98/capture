@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Capture — Replay</title>
+  <link rel="stylesheet" href="/replay.bundle.css" />
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f6f8; color: #1c1e21; }
+    header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; background: #fff; border-bottom: 1px solid #e3e5e8; }
+    header h1 { font-size: 16px; margin: 0; }
+    header button { margin-left: auto; border: 1px solid #d0d3d8; background: #fff; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+    .layout { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px 20px; height: calc(100vh - 53px); }
+    aside { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; overflow-y: auto; }
+    aside h2, section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; padding: 12px 14px 4px; margin: 0; }
+    #session-list { list-style: none; margin: 0; padding: 6px; }
+    #session-list li { padding: 10px 8px; border-radius: 6px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+    #session-list li:hover { background: #f0f2f5; }
+    #session-list li.active { background: #e8eefb; }
+    #session-list .sid { font-weight: 600; font-size: 13px; }
+    #session-list .meta { font-size: 11px; color: #6b7280; }
+    main { display: flex; flex-direction: column; gap: 12px; min-width: 0; overflow-y: auto; }
+    #session-title { font-size: 14px; font-weight: 600; }
+    #player-host { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; padding: 8px; }
+    .console-panel { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; }
+    #console-list { list-style: none; margin: 0; padding: 6px 0; max-height: 220px; overflow-y: auto; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    #console-list li { display: flex; gap: 10px; padding: 4px 14px; border-bottom: 1px solid #f0f2f5; }
+    #console-list .ts { color: #9ca3af; flex-shrink: 0; }
+    #console-list .lvl { flex-shrink: 0; width: 42px; font-weight: 600; }
+    #console-list .level-error .lvl, #console-list .level-error .msg { color: #dc2626; }
+    #console-list .level-warn .lvl, #console-list .level-warn .msg { color: #d97706; }
+    #console-list .msg { white-space: pre-wrap; word-break: break-word; }
+    .empty { color: #9ca3af; padding: 12px 14px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📼 Capture — Session Replay</h1>
+    <button id="refresh">Refresh</button>
+  </header>
+  <div class="layout">
+    <aside>
+      <h2>Sessions</h2>
+      <ul id="session-list"></ul>
+    </aside>
+    <main>
+      <div id="session-title">Select a session</div>
+      <div id="player-host"></div>
+      <section class="console-panel">
+        <h2>Console</h2>
+        <ul id="console-list"><li class="empty">Console output appears here.</li></ul>
+      </section>
+    </main>
+  </div>
+  <script src="/replay.bundle.js"></script>
+</body>
+</html>

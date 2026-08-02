@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Capture — Demo Page</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1c1e21; }
+    .hero { padding: 72px 24px; text-align: center; background: linear-gradient(135deg, #4f46e5, #7c3aed); color: #fff; }
+    .hero h1 { font-size: 40px; margin: 0 0 12px; }
+    .hero p { font-size: 18px; opacity: 0.9; margin: 0 0 28px; }
+    .hero button { font-size: 16px; padding: 12px 28px; border: none; border-radius: 8px; background: #fff; color: #4f46e5; font-weight: 600; cursor: pointer; }
+    section { max-width: 640px; margin: 0 auto; padding: 48px 24px; }
+    h2 { font-size: 24px; }
+    label { display: block; margin: 16px 0 6px; font-weight: 600; font-size: 14px; }
+    input, textarea { width: 100%; padding: 10px 12px; border: 1px solid #d0d3d8; border-radius: 8px; font-size: 15px; }
+    .actions { margin-top: 20px; display: flex; gap: 12px; }
+    .actions button { padding: 10px 20px; border-radius: 8px; border: 1px solid #d0d3d8; background: #fff; cursor: pointer; font-size: 15px; }
+    .actions button.primary { background: #4f46e5; color: #fff; border-color: #4f46e5; }
+    .capture-block { background: #fef2f2; border: 1px dashed #fca5a5; padding: 16px; border-radius: 8px; margin-top: 24px; }
+    .capture-mask { background: #fffbeb; padding: 16px; border-radius: 8px; margin-top: 12px; }
+    #counter { font-variant-numeric: tabular-nums; }
+    footer { text-align: center; padding: 24px; color: #6b7280; font-size: 13px; }
+    footer a { color: #4f46e5; }
+  </style>
+  <script src="/capture.js"></script>
+</head>
+<body>
+  <div class="hero">
+    <h1>Capture Demo</h1>
+    <p>Every interaction on this page is being recorded with rrweb.</p>
+    <button id="cta">Clicked <span id="counter">0</span> times</button>
+  </div>
+
+  <section>
+    <h2>Try the form (inputs are masked)</h2>
+    <form id="signup">
+      <label for="name">Name</label>
+      <input id="name" type="text" placeholder="Ada Lovelace" />
+      <label for="email">Email</label>
+      <input id="email" type="email" placeholder="ada@example.com" />
+      <label for="password">Password</label>
+      <input id="password" type="password" placeholder="••••••••" />
+      <label for="notes">Notes</label>
+      <textarea id="notes" rows="3" placeholder="Anything else?"></textarea>
+      <div class="actions">
+        <button type="submit" class="primary">Submit</button>
+        <button type="button" id="log-something">Log to console</button>
+        <button type="button" id="throw-error">Trigger an error</button>
+      </div>
+    </form>
+
+    <div class="capture-block">
+      🚫 This block has <code>class="capture-block"</code> — it is fully redacted in the recording.
+    </div>
+    <div class="capture-mask">
+      🔒 This text has <code>class="capture-mask"</code> — its characters are masked in the recording.
+    </div>
+  </section>
+
+  <footer>
+    Watch the recordings in the <a href="/replay.html">replay UI</a>.
+  </footer>
+
+  <script>
+    let clicks = 0;
+    document.getElementById('cta').addEventListener('click', () => {
+      clicks += 1;
+      document.getElementById('counter').textContent = clicks;
+      console.log('CTA clicked', { clicks });
+    });
+    document.getElementById('signup').addEventListener('submit', (e) => {
+      e.preventDefault();
+      console.info('form submitted');
+      alertBanner('Form submitted (fake) — check the replay!');
+    });
+    document.getElementById('log-something').addEventListener('click', () => {
+      console.warn('a warning from the demo page', { at: Date.now() });
+    });
+    document.getElementById('throw-error').addEventListener('click', () => {
+      console.error('simulated error: payment failed', { code: 'DEMO_42' });
+    });
+    function alertBanner(text) {
+      const el = document.createElement('div');
+      el.textContent = text;
+      el.style.cssText =
+        'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#111;color:#fff;padding:10px 18px;border-radius:8px;font-size:14px;z-index:999';
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 2500);
+    }
+  </script>
+</body>
+</html>
