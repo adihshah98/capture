@@ -22,10 +22,22 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="capture")
+
+# The snippet runs on other people's pages, so ingest/config/bundles must be
+# reachable cross-origin (PostHog's capture endpoints are CORS-open the same
+# way). Recording data flows one direction — into this server — so a
+# wildcard origin holds nothing back that the endpoints don't already give.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 
 
 @app.middleware("http")
