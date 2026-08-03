@@ -14,6 +14,7 @@ const consoleListEl = document.getElementById('console-list');
 const networkListEl = document.getElementById('network-list');
 const sessionTitleEl = document.getElementById('session-title');
 const loadProgressEl = document.getElementById('load-progress');
+const windowTabsEl = document.getElementById('window-tabs');
 
 // Console/Network tab switching
 const tabs = [
@@ -192,19 +193,58 @@ async function loadSession(sessionId) {
   const seq = ++loadSeq;
   sessionTitleEl.textContent = `Session ${sessionId}`;
 
-  // Lazy loading: fetch the chunk manifest, start the player on the first
-  // chunk (it always begins with a full snapshot), then stream the rest in
-  // via player.addEvent() — playback starts without waiting for, or the
-  // server ever assembling, the whole session.
   const res = await fetch(`/api/sessions/${sessionId}/chunks`);
   if (seq !== loadSeq) return;
-  const { chunks, url } = await res.json();
-  if (url) sessionTitleEl.textContent = `Session ${sessionId.slice(0, 8)}… — ${url}`;
+  const manifest = await res.json();
+  if (manifest.url) {
+    sessionTitleEl.textContent = `Session ${sessionId.slice(0, 8)}… — ${manifest.url}`;
+  }
 
+  // A multi-tab session is several independent rrweb streams (one full
+  // snapshot + incrementals per tab); interleaving them would garble the
+  // DOM, so each window plays separately behind a tab picker.
+  const byWindow = new Map();
+  for (const chunk of manifest.chunks) {
+    const key = chunk.window ?? 'default';
+    if (!byWindow.has(key)) byWindow.set(key, []);
+    byWindow.get(key).push(chunk);
+  }
+  const bytesOf = (chunks) => chunks.reduce((n, c) => n + c.bytes, 0);
+  const defaultWindow = [...byWindow.entries()].sort(
+    (a, b) => bytesOf(b[1]) - bytesOf(a[1])
+  )[0][0];
+
+  windowTabsEl.innerHTML = '';
+  if (byWindow.size > 1) {
+    let n = 0;
+    for (const [key, chunks] of byWindow) {
+      n += 1;
+      const btn = document.createElement('button');
+      btn.textContent = `Tab ${n}`;
+      btn.title = `${chunks.length} chunks · ${formatBytes(bytesOf(chunks))}`;
+      btn.dataset.window = key;
+      btn.addEventListener('click', () => {
+        playWindow(sessionId, byWindow.get(key), key, ++loadSeq);
+      });
+      windowTabsEl.appendChild(btn);
+    }
+  }
+
+  playWindow(sessionId, byWindow.get(defaultWindow), defaultWindow, seq);
+}
+
+async function playWindow(sessionId, chunks, windowKey, seq) {
+  for (const btn of windowTabsEl.querySelectorAll('button')) {
+    btn.classList.toggle('active', btn.dataset.window === windowKey);
+  }
   playerHostEl.innerHTML = '';
   player = null;
   const allEvents = [];
 
+  // Lazy loading: start the player on the first chunk (it always begins
+  // with a full snapshot), then stream the rest in via player.addEvent() —
+  // playback starts without waiting for, or the server ever assembling,
+  // the whole stream.
   for (let i = 0; i < chunks.length; i++) {
     const chunkRes = await fetch(`/api/sessions/${sessionId}/chunks/${chunks[i].name}`);
     if (seq !== loadSeq) return;

@@ -110,6 +110,12 @@ Optional config, before the tag:
 - **Console capture** — `@rrweb/rrweb-plugin-console-record` embeds console
   log/info/warn/error into the event stream (type 6 plugin events); the replay UI
   renders them in a panel under the player.
+- **Multi-tab replay** — each browser tab records its own independent rrweb
+  stream (own window id, own full snapshot) into the shared session; the ingest
+  server encodes the window id into chunk filenames so the manifest groups
+  chunks per tab without opening a single file. Multi-tab sessions get a tab
+  picker in the player (largest stream plays first); single-tab and legacy
+  sessions look exactly as before.
 - **Playhead-synced inspector** — the Console and Network panels track the
   replay position: rows the playhead hasn't reached yet are dimmed, the
   latest-fired row is highlighted and kept scrolled into view, and clicking any

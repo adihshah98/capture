@@ -45,7 +45,14 @@ DATA_DIR = BASE_DIR / "data" / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-SAFE_CHUNK = re.compile(r"^\d{1,16}-[a-z0-9]{6}\.json$")
+# Old style: <ts>-<rand>.json; new style: <ts>-<window8>-<rand>.json
+SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
+
+
+def chunk_window(path) -> Optional[str]:
+    """Window-id prefix from a chunk filename (None for pre-window chunks)."""
+    parts = path.name.rsplit(".", 1)[0].split("-")
+    return parts[1] if len(parts) == 3 else None
 MAX_BODY_BYTES = 50 * 1024 * 1024
 
 # Sessions whose newest chunk is older than this are deleted by the daily
@@ -93,9 +100,14 @@ async def ingest(
     session_dir = DATA_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    # Immutable chunk per batch; timestamp prefix keeps chunks ordered.
+    # Immutable chunk per batch; timestamp prefix keeps chunks ordered, and
+    # the window-id prefix lets the manifest group chunks per tab without
+    # opening any chunk file (a multi-tab session is several independent
+    # rrweb streams — replaying them interleaved would garble the DOM).
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    chunk_path = session_dir / f"{int(time.time() * 1000)}-{suffix}.json"
+    window_prefix = re.sub(r"[^a-f0-9]", "", str(payload.get("window_id") or ""))[:8]
+    parts = [str(int(time.time() * 1000)), window_prefix, suffix]
+    chunk_path = session_dir / ("-".join(p for p in parts if p) + ".json")
     chunk_path.write_text(
         json.dumps(
             {
@@ -184,11 +196,22 @@ def session_chunks(session_id: str):
             url = json.loads(chunks[0].read_text()).get("url")
         except Exception:
             pass
+    windows = []  # ordered by first appearance; None = pre-window chunks
+    for c in chunks:
+        w = chunk_window(c)
+        if w not in windows:
+            windows.append(w)
     return {
         "session_id": session_id,
         "url": url,
+        "windows": windows,
         "chunks": [
-            {"name": c.name, "timestamp": chunk_timestamp(c), "bytes": c.stat().st_size}
+            {
+                "name": c.name,
+                "timestamp": chunk_timestamp(c),
+                "bytes": c.stat().st_size,
+                "window": chunk_window(c),
+            }
             for c in chunks
         ],
     }
