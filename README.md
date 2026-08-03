@@ -45,6 +45,7 @@ Optional config, before the tag:
       onException: true,          // uncaught error / unhandled rejection
     },
     maxBufferBytes: 2 * 1024 * 1024, // pre-trigger rolling buffer bound
+    minDurationMs: 0,             // sessions shorter than this are never sent
 
     // Network capture (URLs/method/status/timings by default; false disables):
     network: {
@@ -140,7 +141,9 @@ Optional config, before the tag:
   (`maxBufferBytes`, replayability-safe — it restarts from a fresh full snapshot
   rather than trimming past one) and nothing is sent until a trigger fires — a URL
   regex match (SPA navigations included), an uncaught exception, or a manual
-  `window.capture.trigger('reason')`. Activation flushes the buffered lead-up, stamps
+  `window.capture.trigger('reason')`. `minDurationMs` adds a second gate — quick
+  bounces are never sent, and combined with triggers every configured gate must
+  pass before activation. Activation flushes the buffered lead-up, stamps
   a `capture-trigger` custom event into the stream, and persists the decision on the
   session so later page loads stay active. Untriggered sessions are discarded on
   unload. `window.capture.status()` reports `disabled | buffering | active`.

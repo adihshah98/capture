@@ -52,6 +52,10 @@ const DEFAULTS = {
     //   { urls: ['/checkout'], onException: true }
     // plus window.capture.trigger('reason') for manual activation.
     triggers: null,
+    // Sessions shorter than this never leave the browser — quick bounces
+    // buffer client-side and are discarded on unload. Composes with
+    // triggers: every configured gate must pass before events are sent.
+    minDurationMs: 0,
     // Bound on the pre-trigger rolling buffer (approx. serialized bytes).
     maxBufferBytes: 2 * 1024 * 1024,
 
@@ -213,7 +217,12 @@ function pushEvent(event) {
     if (buffer.length >= config.maxBatchSize || bufferBytes >= config.maxBatchBytes) {
       flush(false);
     }
-  } else if (bufferBytes > config.maxBufferBytes) {
+    return;
+  }
+  // Buffering: the duration gate is time-based, so re-check it as events
+  // arrive rather than on a timer of its own.
+  if (status === 'buffering' && config.minDurationMs) tryTransition('min-duration');
+  if (status === 'buffering' && bufferBytes > config.maxBufferBytes) {
     // Trimming old events from the front could drop the full snapshot and
     // leave the buffer unreplayable, so restart from a fresh snapshot instead.
     resetBuffer();
@@ -275,21 +284,45 @@ function scheduleFlush() {
 
 let urlTriggers = [];
 
-/** buffering → active: fire the buffered lead-up at the server. */
+/**
+ * All configured gates must pass before a buffering session starts
+ * sending: a fired trigger (when triggers are configured) and the
+ * minimum session duration (when set).
+ */
+function gatesSatisfied() {
+  const current = readSession();
+  const triggerOk = !config.triggers || Boolean(current && current.triggered);
+  const durationOk =
+    !config.minDurationMs ||
+    (current && Date.now() - current.started >= config.minDurationMs);
+  return triggerOk && durationOk;
+}
+
+/** buffering → active once every gate passes: fire the buffered lead-up. */
+function tryTransition(reason) {
+  if (status !== 'buffering' || !gatesSatisfied()) return;
+  status = 'active';
+  const current = readSession();
+  // Stamp the reason into the event stream so replay shows why this
+  // session was kept (custom events are ignored by the player itself).
+  record.addCustomEvent('capture-trigger', {
+    reason: (current && current.triggerReason) || reason,
+  });
+  flush(false);
+}
+
+/** A trigger fired: persist the per-session decision, then try to send. */
 function activate(reason) {
   if (status !== 'buffering') return;
-  status = 'active';
   // The decision is per session, like sampling: persist it so page
   // navigations within a triggered session keep recording immediately.
   const current = readSession();
-  if (current) {
+  if (current && !current.triggered) {
     current.triggered = true;
+    current.triggerReason = reason;
     writeSession(current);
   }
-  // Stamp the reason into the event stream so replay shows why this
-  // session was kept (custom events are ignored by the player itself).
-  record.addCustomEvent('capture-trigger', { reason });
-  flush(false);
+  tryTransition(reason);
 }
 
 function checkUrlTriggers() {
@@ -351,7 +384,7 @@ function onSessionRotated(next) {
     }, 0);
     return;
   }
-  status = config.triggers ? 'buffering' : 'active';
+  status = gatesSatisfied() ? 'active' : 'buffering';
   // A new session must start with a fresh full snapshot to be replayable.
   record.takeFullSnapshot(true);
   checkUrlTriggers();
@@ -372,8 +405,9 @@ function pushMarker(tag) {
 }
 
 function startRecording() {
-  // A session that already fired a trigger stays active across page loads.
-  status = config.triggers && !readSession()?.triggered ? 'buffering' : 'active';
+  // Gate state is per session and persisted, so a session that already
+  // passed its gates stays active across page loads.
+  status = gatesSatisfied() ? 'active' : 'buffering';
   idle = false;
   lastUserActivity = Date.now();
   stopFn = record({
