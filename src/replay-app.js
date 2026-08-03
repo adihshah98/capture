@@ -13,6 +13,7 @@ const playerHostEl = document.getElementById('player-host');
 const consoleListEl = document.getElementById('console-list');
 const networkListEl = document.getElementById('network-list');
 const sessionTitleEl = document.getElementById('session-title');
+const loadProgressEl = document.getElementById('load-progress');
 
 // Console/Network tab switching
 const tabs = [
@@ -136,32 +137,65 @@ function renderNetwork(events) {
   }
 }
 
+// Guards the async chunk loop: bumped whenever the user picks a session,
+// so a stale load loop stops instead of feeding events to the wrong player.
+let loadSeq = 0;
+
 async function loadSession(sessionId) {
+  const seq = ++loadSeq;
   sessionTitleEl.textContent = `Session ${sessionId}`;
-  const res = await fetch(`/api/sessions/${sessionId}/events`);
-  const { events, url } = await res.json();
+
+  // Lazy loading: fetch the chunk manifest, start the player on the first
+  // chunk (it always begins with a full snapshot), then stream the rest in
+  // via player.addEvent() — playback starts without waiting for, or the
+  // server ever assembling, the whole session.
+  const res = await fetch(`/api/sessions/${sessionId}/chunks`);
+  if (seq !== loadSeq) return;
+  const { chunks, url } = await res.json();
   if (url) sessionTitleEl.textContent = `Session ${sessionId.slice(0, 8)}… — ${url}`;
 
-  if (events.length < 2) {
-    playerHostEl.innerHTML = '<p class="empty">Not enough events to replay yet.</p>';
-    return;
+  playerHostEl.innerHTML = '';
+  player = null;
+  const allEvents = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkRes = await fetch(`/api/sessions/${sessionId}/chunks/${chunks[i].name}`);
+    if (seq !== loadSeq) return;
+    let events;
+    try {
+      events = (await chunkRes.json()).events || [];
+    } catch {
+      continue; // skip corrupt chunk, same policy as the server
+    }
+    events.sort((a, b) => a.timestamp - b.timestamp);
+    allEvents.push(...events);
+
+    if (!player && allEvents.length >= 2) {
+      player = new rrwebPlayer({
+        target: playerHostEl,
+        props: {
+          events: allEvents.slice(),
+          autoPlay: true,
+          skipInactive: true,
+          showController: true,
+          width: playerHostEl.clientWidth,
+          height: Math.max(420, Math.round(playerHostEl.clientWidth * 0.56)),
+        },
+      });
+    } else if (player) {
+      for (const event of events) player.addEvent(event);
+    }
+
+    loadProgressEl.textContent =
+      i + 1 < chunks.length ? `loading ${i + 1}/${chunks.length} chunks…` : '';
   }
 
-  playerHostEl.innerHTML = '';
-  player = new rrwebPlayer({
-    target: playerHostEl,
-    props: {
-      events,
-      autoPlay: true,
-      skipInactive: true,
-      showController: true,
-      width: playerHostEl.clientWidth,
-      height: Math.max(420, Math.round(playerHostEl.clientWidth * 0.56)),
-    },
-  });
-
-  renderConsole(events);
-  renderNetwork(events);
+  if (seq !== loadSeq) return;
+  if (!player) {
+    playerHostEl.innerHTML = '<p class="empty">Not enough events to replay yet.</p>';
+  }
+  renderConsole(allEvents);
+  renderNetwork(allEvents);
 }
 
 document.getElementById('refresh').addEventListener('click', loadSessions);

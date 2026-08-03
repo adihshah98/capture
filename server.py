@@ -22,19 +22,21 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="capture")
 
 
 @app.middleware("http")
-async def revalidate_bundles(request: Request, call_next):
-    """Browsers cache script bundles indefinitely by default, so instrumented
-    pages would keep running a stale recorder after a deploy. no-cache forces
-    a revalidation (cheap 304 when unchanged) on every load."""
+async def revalidate_static(request: Request, call_next):
+    """Browsers heuristically cache static assets with no Cache-Control, so
+    pages would keep running stale bundles/markup after a deploy. no-cache
+    forces a revalidation (cheap 304 when unchanged) on every load. Endpoints
+    that set their own Cache-Control (immutable chunks) are left alone."""
     response = await call_next(request)
-    if request.url.path.endswith((".js", ".css")):
+    is_static = request.url.path.endswith((".js", ".css", ".html")) or request.url.path == "/"
+    if is_static and "cache-control" not in response.headers:
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -43,6 +45,7 @@ DATA_DIR = BASE_DIR / "data" / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SAFE_CHUNK = re.compile(r"^\d{1,16}-[a-z0-9]{6}\.json$")
 MAX_BODY_BYTES = 50 * 1024 * 1024
 
 # Sessions whose newest chunk is older than this are deleted by the daily
@@ -162,6 +165,48 @@ def list_sessions():
         )
     sessions.sort(key=lambda s: s["last_seen"], reverse=True)
     return {"sessions": sessions}
+
+
+@app.get("/api/sessions/{session_id}/chunks")
+def session_chunks(session_id: str):
+    """Ordered chunk manifest for lazy loading — the player fetches chunks
+    one by one instead of the server concatenating the whole session."""
+    if not SAFE_ID.match(session_id):
+        return error(400, "invalid session_id")
+    session_dir = DATA_DIR / session_id
+    if not session_dir.is_dir():
+        return error(404, "not found")
+
+    chunks = sorted(session_dir.glob("*.json"), key=chunk_timestamp)
+    url = None
+    if chunks:  # only the first chunk is opened; the rest stay on disk
+        try:
+            url = json.loads(chunks[0].read_text()).get("url")
+        except Exception:
+            pass
+    return {
+        "session_id": session_id,
+        "url": url,
+        "chunks": [
+            {"name": c.name, "timestamp": chunk_timestamp(c), "bytes": c.stat().st_size}
+            for c in chunks
+        ],
+    }
+
+
+@app.get("/api/sessions/{session_id}/chunks/{chunk_name}")
+def session_chunk(session_id: str, chunk_name: str):
+    """A single immutable chunk, served straight from disk."""
+    if not SAFE_ID.match(session_id) or not SAFE_CHUNK.match(chunk_name):
+        return error(400, "invalid id")
+    path = DATA_DIR / session_id / chunk_name
+    if not path.is_file():
+        return error(404, "not found")
+    # Chunks are immutable (timestamp + random suffix names), so let the
+    # browser cache them for replay scrubbing across visits.
+    return FileResponse(
+        path, media_type="application/json", headers={"Cache-Control": "max-age=86400"}
+    )
 
 
 @app.get("/api/sessions/{session_id}/events")

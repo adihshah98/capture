@@ -66,7 +66,7 @@ Optional config, before the tag:
 | `server.py` — `POST /ingest?compression=gzip-js` | FastAPI endpoint receiving gzipped JSON event batches | `/s/` endpoint with `compression=gzip-js` (Django, later Rust) |
 | `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts | remote config endpoint (1 h TTL in the client) |
 | `data/sessions/<id>/<ts>-<rand>.json` | Immutable chunk per batch | Kafka → session-recording blob files in S3 |
-| `GET /api/sessions`, `GET /api/sessions/:id/events` | Read API for the player | Recording metadata (ClickHouse) + blob fetch |
+| `GET /api/sessions`, `/:id/chunks`, `/:id/chunks/:name` | Read API: session list, chunk manifest, single immutable chunk | Recording metadata (ClickHouse) + lazy blob fetch |
 | `public/replay.html` + `replay.bundle.js` | rrweb-player + console panel | PostHog player with synced DevTools panel |
 
 ## Client behavior
@@ -100,6 +100,13 @@ Optional config, before the tag:
 - **Sampling** — mousemove throttled to 50 ms, scroll to 100 ms, input `last`-value
   only; full snapshot checkout every 5 min so replay can seek without reading the
   whole stream.
+- **Lazy replay loading** — the player fetches the chunk manifest, starts
+  playback from the first chunk (every session opens with a full snapshot), and
+  streams the remaining chunks in via `player.addEvent()` while you watch — the
+  server never assembles a whole session in memory, and long sessions start
+  playing immediately. Chunks are immutable, so they're served with
+  `max-age=86400` and scrubbing re-visits hit the browser cache.
+  (`GET /api/sessions/:id/events` remains for one-shot exports.)
 - **Console capture** — `@rrweb/rrweb-plugin-console-record` embeds console
   log/info/warn/error into the event stream (type 6 plugin events); the replay UI
   renders them in a panel under the player.
@@ -135,9 +142,10 @@ npm run dev     # build + server
 ## Scaling it beyond one box
 
 The wire format is stable, so the upgrade path is swapping storage, not clients:
-put `/ingest` behind a queue (Kafka/SQS), write chunks to S3 instead of disk, index
-session metadata in a database (ClickHouse/Postgres), and stream chunks to the
-player instead of concatenating them in memory.
+put `/ingest` behind a queue (Kafka/SQS), write chunks to S3 instead of disk, and
+index session metadata in a database (ClickHouse/Postgres). The player already
+streams chunks lazily, so swapping the chunk endpoint for signed S3 URLs changes
+nothing client-side.
 
 Retention is built in: a daily sweep deletes sessions whose newest chunk is older
 than `RETENTION_DAYS` (default 30; `RETENTION_DAYS=0` keeps everything forever).

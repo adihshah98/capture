@@ -21,7 +21,9 @@
     #session-list .sid { font-weight: 600; font-size: 13px; }
     #session-list .meta { font-size: 11px; color: #6b7280; }
     main { display: flex; flex-direction: column; gap: 12px; min-width: 0; overflow-y: auto; }
+    .title-row { display: flex; align-items: baseline; gap: 8px; }
     #session-title { font-size: 14px; font-weight: 600; }
+    #load-progress { font-size: 12px; font-weight: 400; color: #6b7280; }
     #player-host { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; padding: 8px; }
     .devtools-panel { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; }
     .devtools-tabs { display: flex; gap: 4px; padding: 8px 10px 0; border-bottom: 1px solid #e3e5e8; }
@@ -57,7 +59,10 @@
       <ul id="session-list"></ul>
     </aside>
     <main>
-      <div id="session-title">Select a session</div>
+      <div class="title-row">
+        <div id="session-title">Select a session</div>
+        <span id="load-progress"></span>
+      </div>
       <div id="player-host"></div>
       <section class="devtools-panel">
         <div class="devtools-tabs">
