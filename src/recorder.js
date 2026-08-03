@@ -25,6 +25,10 @@ import { getRecordNetworkPlugin } from './network-plugin.js';
 const DEFAULTS = {
   endpoint: '/ingest',
 
+  // Project token (multi-tenant servers): identifies which brand/site this
+  // recording belongs to. Usually set via data-token on the snippet tag.
+  token: null,
+
   // Remote config: fetched from configUrl before recording starts and cached
   // in localStorage for remoteConfigTtlMs. Set remoteConfig: false to run
   // from local config only.
@@ -91,7 +95,10 @@ async function resolveConfig() {
   }
   if (!remote) {
     try {
-      const res = await fetch(config.configUrl);
+      const configUrl = config.token
+        ? `${config.configUrl}${config.configUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(config.token)}`
+        : config.configUrl;
+      const res = await fetch(configUrl);
       if (res.ok) {
         remote = await res.json();
         localStorage.setItem(
@@ -256,6 +263,7 @@ async function flush(useKeepalive) {
   try {
     const { body, compressed } = await gzipBody(payload);
     const params = new URLSearchParams({ session_id: sessionId, window_id: windowId });
+    if (config.token) params.set('token', config.token);
     if (compressed) params.set('compression', 'gzip-js');
     await fetch(`${config.endpoint}?${params}`, {
       method: 'POST',

@@ -8,6 +8,7 @@
 import rrwebPlayer from 'rrweb-player';
 import 'rrweb-player/dist/style.css';
 
+const projectSelectEl = document.getElementById('project-select');
 const sessionListEl = document.getElementById('session-list');
 const playerHostEl = document.getElementById('player-host');
 const consoleListEl = document.getElementById('console-list');
@@ -42,8 +43,38 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+// Multi-tenant servers scope every read to a project token; single-tenant
+// servers return no projects and the selector stays hidden.
+let currentProject = '';
+
+function projectQuery() {
+  return currentProject ? `?project=${encodeURIComponent(currentProject)}` : '';
+}
+
+async function loadProjects() {
+  let projects = [];
+  try {
+    projects = (await (await fetch('/api/projects')).json()).projects || [];
+  } catch {
+    /* older server without /api/projects — single-tenant behavior */
+  }
+  if (projects.length === 0) return;
+  projectSelectEl.hidden = false;
+  for (const project of projects) {
+    const option = document.createElement('option');
+    option.value = project.token;
+    option.textContent = project.name;
+    projectSelectEl.appendChild(option);
+  }
+  currentProject = projects[0].token;
+  projectSelectEl.addEventListener('change', () => {
+    currentProject = projectSelectEl.value;
+    loadSessions();
+  });
+}
+
 async function loadSessions() {
-  const res = await fetch('/api/sessions');
+  const res = await fetch(`/api/sessions${projectQuery()}`);
   const { sessions } = await res.json();
 
   sessionListEl.innerHTML = '';
@@ -248,7 +279,7 @@ async function loadSession(sessionId) {
   const seq = ++loadSeq;
   sessionTitleEl.textContent = `Session ${sessionId}`;
 
-  const res = await fetch(`/api/sessions/${sessionId}/chunks`);
+  const res = await fetch(`/api/sessions/${sessionId}/chunks${projectQuery()}`);
   if (seq !== loadSeq) return;
   const manifest = await res.json();
   if (manifest.url) {
@@ -301,7 +332,9 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
   // playback starts without waiting for, or the server ever assembling,
   // the whole stream.
   for (let i = 0; i < chunks.length; i++) {
-    const chunkRes = await fetch(`/api/sessions/${sessionId}/chunks/${chunks[i].name}`);
+    const chunkRes = await fetch(
+      `/api/sessions/${sessionId}/chunks/${chunks[i].name}${projectQuery()}`
+    );
     if (seq !== loadSeq) return;
     let events;
     try {
@@ -355,4 +388,4 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
 }
 
 document.getElementById('refresh').addEventListener('click', loadSessions);
-loadSessions();
+loadProjects().then(loadSessions);

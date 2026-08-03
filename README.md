@@ -23,12 +23,57 @@ To instrument any page served by this server, add one tag:
 <script src="/capture.js"></script>
 ```
 
-Optional config, before the tag:
+## Instrumenting a brand's site (PostHog-style)
+
+The snippet is self-configuring: it derives the capture server's location
+from its own `src` and reads the project token from `data-token`, so an
+external site's entire integration is one tag.
+
+1. Create a project (a brand) on the server:
+
+   ```bash
+   python server.py add-project "Acme Brand"
+   # project 'Acme Brand' created — token: cap_xxxxxxxxxxxxxxxxxxxxxxxx
+   ```
+
+2. The brand adds the printed tag anywhere on their site:
+
+   ```html
+   <script src="https://capture.yourdomain.com/capture.js" data-token="cap_xxx"></script>
+   ```
+
+That's it — recordings land under `data/projects/<token>/sessions/` and the
+replay UI grows a project selector. Notes:
+
+- **Creating the first project switches ingest to token-required**: batches
+  without a known token are rejected with 401 (so strangers can't fill your
+  disk). With no projects configured the server is single-tenant and tokens
+  are ignored — the quick-start demo needs no setup.
+- Tokens identify, they don't authenticate — like PostHog's `phc_` keys
+  they're visible in page source, and that's fine: they only grant the
+  ability to *send* recordings, never to read them.
+- Per-project remote config: `data/projects/<token>/config.json` (falls back
+  to the global `data/config.json`), so each brand can have its own sample
+  rate, triggers, etc.
+- Protect the replay side in production:
+
+  ```bash
+  REPLAY_PASSWORD=... .venv/bin/uvicorn server:app --port 3000
+  ```
+
+  `/replay.html` and `/api/*` then require the password (HTTP Basic, any
+  username). `/ingest`, `/config` and the bundles stay open — the snippet
+  runs on other people's pages. Serve everything over HTTPS (any reverse
+  proxy in front of uvicorn); browsers block plain-HTTP ingest from HTTPS
+  pages.
+
+Optional config, before the tag (inline values win over the derived ones):
 
 ```html
 <script>
   window.CAPTURE_CONFIG = {
     endpoint: '/ingest',          // where batches are POSTed
+    token: null,                  // project token (usually via data-token)
     recorderUrl: '/recorder.bundle.js',
     remoteConfig: true,           // fetch settings from the server first
     configUrl: '/config',
@@ -62,7 +107,9 @@ Optional config, before the tag:
 
 | This project | What it does | PostHog equivalent |
 |---|---|---|
-| `public/capture.js` (~0.4 KB) | Loader snippet; lazy-loads the recorder after page idle | `array.js` snippet lazy-loading the recorder bundle |
+| `public/capture.js` (~0.7 KB) | Loader snippet; derives server URL + token from its own tag, lazy-loads the recorder after page idle | `array.js` snippet + `phc_` project API key |
+| `data/projects.json` + `?token=` on ingest/config | Per-brand projects: token-gated ingest, isolated storage, per-project config | Project API keys / multi-project ingestion |
+| `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you | PostHog app login |
 | `src/recorder.js` → `recorder.bundle.js` | rrweb `record()` + console plugin, session/window ids, batching, gzip, keepalive flush | posthog-js session recording module (vendored rrweb) |
 | `server.py` — `POST /ingest?compression=gzip-js` | FastAPI endpoint receiving gzipped JSON event batches | `/s/` endpoint with `compression=gzip-js` (Django, later Rust) |
 | `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts | remote config endpoint (1 h TTL in the client) |

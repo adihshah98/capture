@@ -11,6 +11,7 @@
     header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; background: #fff; border-bottom: 1px solid #e3e5e8; }
     header h1 { font-size: 16px; margin: 0; }
     header button { margin-left: auto; border: 1px solid #d0d3d8; background: #fff; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+    #project-select { border: 1px solid #d0d3d8; background: #fff; border-radius: 6px; padding: 6px 8px; font-size: 13px; }
     .layout { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px 20px; height: calc(100vh - 53px); }
     aside { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; overflow-y: auto; }
     aside h2, section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; padding: 12px 14px 4px; margin: 0; }
@@ -58,6 +59,7 @@
 <body>
   <header>
     <h1>📼 Capture — Session Replay</h1>
+    <select id="project-select" hidden></select>
     <button id="refresh">Refresh</button>
   </header>
   <div class="layout">
