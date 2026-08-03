@@ -1,7 +1,8 @@
-# Capture — rrweb session replay, PostHog-style
+# Capture — self-hosted session replay
 
-Self-hosted session recording and replay built on [rrweb](https://github.com/rrweb-io/rrweb),
-following the same client architecture PostHog uses for its session replay product.
+Self-hosted session recording and replay built on [rrweb](https://github.com/rrweb-io/rrweb):
+watch real user sessions on your sites as DOM-accurate replays, with synced
+console and network panels.
 
 The client SDK is JavaScript (rrweb runs in the browser); the server is Python
 (FastAPI). Node is only needed at build time to bundle the client.
@@ -23,7 +24,7 @@ To instrument any page served by this server, add one tag:
 <script src="/capture.js"></script>
 ```
 
-## Instrumenting a brand's site (PostHog-style)
+## Instrumenting a brand's site
 
 The snippet is self-configuring: it derives the capture server's location
 from its own `src` and reads the project token from `data-token`, so an
@@ -36,22 +37,27 @@ external site's entire integration is one tag.
    # project 'Acme Brand' created — token: cap_xxxxxxxxxxxxxxxxxxxxxxxx
    ```
 
-2. The brand adds the printed tag anywhere on their site:
+2. Send the brand [docs/integration.md](docs/integration.md) — the complete
+   brand-facing guide — along with their token and your server address.
+   Their side of the integration is the printed tag:
 
    ```html
    <script src="https://capture.yourdomain.com/capture.js" data-token="cap_xxx"></script>
    ```
 
+   (The guide also covers what the tag costs their page, the privacy
+   defaults, Google Tag Manager, CSP, and how they verify it's working.)
+
 That's it — recordings land under `data/projects/<token>/sessions/` and the
-replay UI grows a project selector. Notes:
+replay UI grows a project selector. Operator notes:
 
 - **Creating the first project switches ingest to token-required**: batches
   without a known token are rejected with 401 (so strangers can't fill your
   disk). With no projects configured the server is single-tenant and tokens
   are ignored — the quick-start demo needs no setup.
-- Tokens identify, they don't authenticate — like PostHog's `phc_` keys
-  they're visible in page source, and that's fine: they only grant the
-  ability to *send* recordings, never to read them.
+- Tokens identify, they don't authenticate — they're visible in page
+  source, and that's fine: they only grant the ability to *send*
+  recordings, never to read them.
 - Per-project remote config: `data/projects/<token>/config.json` (falls back
   to the global `data/config.json`), so each brand can have its own sample
   rate, triggers, etc.
@@ -103,19 +109,19 @@ Optional config, before the tag (inline values win over the derived ones):
 </script>
 ```
 
-## Architecture (and the PostHog analog)
+## Architecture
 
-| This project | What it does | PostHog equivalent |
-|---|---|---|
-| `public/capture.js` (~0.7 KB) | Loader snippet; derives server URL + token from its own tag, lazy-loads the recorder after page idle | `array.js` snippet + `phc_` project API key |
-| `data/projects.json` + `?token=` on ingest/config | Per-brand projects: token-gated ingest, isolated storage, per-project config | Project API keys / multi-project ingestion |
-| `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you | PostHog app login |
-| `src/recorder.js` → `recorder.bundle.js` | rrweb `record()` + console plugin, session/window ids, batching, gzip, keepalive flush | posthog-js session recording module (vendored rrweb) |
-| `server.py` — `POST /ingest?compression=gzip-js` | FastAPI endpoint receiving gzipped JSON event batches | `/s/` endpoint with `compression=gzip-js` (Django, later Rust) |
-| `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts | remote config endpoint (1 h TTL in the client) |
-| `data/sessions/<id>/<ts>-<rand>.json` | Immutable chunk per batch | Kafka → session-recording blob files in S3 |
-| `GET /api/sessions`, `/:id/chunks`, `/:id/chunks/:name` | Read API: session list, chunk manifest, single immutable chunk | Recording metadata (ClickHouse) + lazy blob fetch |
-| `public/replay.html` + `replay.bundle.js` | rrweb-player + console panel | PostHog player with synced DevTools panel |
+| Component | What it does |
+|---|---|
+| `public/capture.js` (~0.7 KB) | Loader snippet; derives server URL + token from its own tag, lazy-loads the recorder after page idle |
+| `data/projects.json` + `?token=` on ingest/config | Per-brand projects: token-gated ingest, isolated storage, per-project config |
+| `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you |
+| `src/recorder.js` → `recorder.bundle.js` | rrweb `record()` + console plugin, session/window ids, batching, gzip, keepalive flush |
+| `server.py` — `POST /ingest?compression=gzip-js` | FastAPI endpoint receiving gzipped JSON event batches |
+| `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts |
+| `data/sessions/<id>/<ts>-<rand>.json` | Immutable chunk per batch |
+| `GET /api/sessions`, `/:id/chunks`, `/:id/chunks/:name` | Read API: session list, chunk manifest, single immutable chunk |
+| `public/replay.html` + `replay.bundle.js` | rrweb-player + synced Console/Network panels |
 
 ## Client behavior
 
@@ -171,8 +177,7 @@ Optional config, before the tag (inline values win over the derived ones):
 - **Playhead-synced inspector** — the Console and Network panels track the
   replay position: rows the playhead hasn't reached yet are dimmed, the
   latest-fired row is highlighted and kept scrolled into view, and clicking any
-  row seeks the player to that moment (the lightweight version of PostHog's
-  inspector timeline).
+  row seeks the player to that moment.
 - **Network capture** — `src/network-plugin.js` wraps `fetch` + `XMLHttpRequest`
   (method, status, duration, failures) and reads buffered PerformanceObserver
   resource entries (scripts, images, styles — including ones loaded before the
@@ -181,7 +186,7 @@ Optional config, before the tag (inline values win over the derived ones):
   (authorization, cookie, …) are always redacted, URL credentials are stripped,
   and the ingest endpoint itself is never captured. The replay UI shows a
   Network tab beside Console with per-request rows and error highlighting.
-- **Ingestion controls (PostHog-style)** — `sampleRate` rolls a sticky per-session
+- **Ingestion controls** — `sampleRate` rolls a sticky per-session
   keep/skip decision at session creation, so a session is wholly recorded or never
   leaves the browser. With `triggers` configured, the recorder starts in a
   `buffering` state: events accumulate in a bounded in-memory rolling buffer

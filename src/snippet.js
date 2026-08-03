@@ -1,17 +1,8 @@
 /**
- * capture.js — tiny loader snippet (the equivalent of PostHog's array.js).
- *
- * Self-configuring: the snippet derives the capture server's location from
- * its own script src and reads the project token from data-token, so a
- * brand's entire integration is one tag:
+ * capture.js — loader snippet. Derives the server URL and project token
+ * from its own <script> tag, then lazy-loads the recorder bundle:
  *
  *   <script src="https://capture.example.com/capture.js" data-token="cap_xxx"></script>
- *
- * It stays small so instrumented pages pay almost nothing up front: the
- * real rrweb recorder bundle is lazy-loaded once the page is idle.
- *
- * Optional overrides, before the script tag (inline config always wins):
- *   window.CAPTURE_CONFIG = { endpoint: '...', recorderUrl: '...', token: '...' }
  */
 (function () {
   if (window.__captureLoaded) return;
@@ -30,8 +21,8 @@
       derived.token = script.getAttribute('data-token');
     }
   }
-  // Publish the merged config so the recorder bundle picks up the derived
-  // endpoints; anything the page set inline stays untouched.
+  // Published globally for the recorder bundle; inline page config wins
+  // over the derived values.
   var config = (window.CAPTURE_CONFIG = Object.assign(derived, window.CAPTURE_CONFIG || {}));
 
   function loadRecorder() {
@@ -41,8 +32,7 @@
     document.head.appendChild(script);
   }
 
-  // Defer the heavy bundle until the browser is idle so recording never
-  // competes with the host page's own load.
+  // Idle-deferred so recording never competes with the host page's load.
   function schedule() {
     if ('requestIdleCallback' in window) {
       requestIdleCallback(loadRecorder, { timeout: 3000 });

@@ -1,22 +1,6 @@
 /**
- * recorder.bundle.js — the lazy-loaded rrweb recorder.
- *
- * Mirrors PostHog's session-recording client architecture:
- * - records DOM via rrweb with masking on by default (privacy-first)
- * - captures console logs via the official rrweb console plugin
- * - manages a session id (30 min idle / 24 h max rotation) + per-tab window id
- * - batches events, gzips them with CompressionStream, POSTs to /ingest
- *   with ?compression=gzip-js (the same convention PostHog uses)
- * - flushes on an interval, on batch-size threshold, and on pagehide
- *   using fetch keepalive so unload flushes survive navigation
- * - ingestion controls: per-session sticky sampling (sampleRate) and
- *   trigger-based recording (triggers: {urls, onException} + capture.trigger())
- *   with a pre-trigger rolling buffer, so a fired trigger keeps the lead-up
- *   and untriggered sessions never leave the browser
- * - remote config: recording settings are fetched from the server before
- *   recording starts (cached 1 h in localStorage), so recording behavior can
- *   change fleet-wide without redeploying instrumented pages. Precedence:
- *   defaults < remote config < inline window.CAPTURE_CONFIG (page wins).
+ * recorder.bundle.js — the lazy-loaded rrweb recorder: records the DOM
+ * (inputs masked), batches + gzips event chunks, and ships them to /ingest.
  */
 import { record } from 'rrweb';
 import { getRecordConsolePlugin } from '@rrweb/rrweb-plugin-console-record';
@@ -24,54 +8,40 @@ import { getRecordNetworkPlugin } from './network-plugin.js';
 
 const DEFAULTS = {
   endpoint: '/ingest',
+  token: null, // project token, usually set via data-token on the snippet tag
 
-  // Project token (multi-tenant servers): identifies which brand/site this
-  // recording belongs to. Usually set via data-token on the snippet tag.
-  token: null,
-
-  // Remote config: fetched from configUrl before recording starts and cached
-  // in localStorage for remoteConfigTtlMs. Set remoteConfig: false to run
-  // from local config only.
   remoteConfig: true,
   configUrl: '/config',
   remoteConfigTtlMs: 60 * 60 * 1000,
-    flushIntervalMs: 5000,
-    maxBatchSize: 50,
-    // Also flush when the serialized batch reaches this size — event count
-    // is a weak proxy, a single full snapshot can be most of a megabyte.
-    maxBatchBytes: 900 * 1024,
-    // After this long without user interaction the recorder goes idle:
-    // non-interactive events (mutations from animations, timers, background
-    // tabs) are dropped instead of recorded until the user comes back.
-    idleThresholdMs: 5 * 60 * 1000,
-    checkoutEveryNms: 5 * 60 * 1000, // periodic full snapshots so replay can seek
-    sessionIdleTimeoutMs: 30 * 60 * 1000,
-    sessionMaxLengthMs: 24 * 60 * 60 * 1000,
 
-    // Ingestion controls. sampleRate keeps a session with probability 0..1;
-    // the decision is made once per session and sticks for its lifetime.
-    sampleRate: 1,
-    // triggers: null records unconditionally. Set to an object to buffer
-    // events client-side and only send once a trigger fires:
-    //   { urls: ['/checkout'], onException: true }
-    // plus window.capture.trigger('reason') for manual activation.
-    triggers: null,
-    // Sessions shorter than this never leave the browser — quick bounces
-    // buffer client-side and are discarded on unload. Composes with
-    // triggers: every configured gate must pass before events are sent.
-    minDurationMs: 0,
-    // Bound on the pre-trigger rolling buffer (approx. serialized bytes).
-    maxBufferBytes: 2 * 1024 * 1024,
+  flushIntervalMs: 5000,
+  maxBatchSize: 50,
+  // Also flush on serialized size — event count is a weak proxy when a
+  // single full snapshot can be most of a megabyte.
+  maxBatchBytes: 900 * 1024,
+  // Past this much time without user interaction, non-interactive events
+  // (animation/timer mutations, background tabs) are dropped, not recorded.
+  idleThresholdMs: 5 * 60 * 1000,
+  checkoutEveryNms: 5 * 60 * 1000, // periodic full snapshots so replay can seek
+  sessionIdleTimeoutMs: 30 * 60 * 1000,
+  sessionMaxLengthMs: 24 * 60 * 60 * 1000,
 
-    // Network capture: URLs, method, status and timings by default;
-    // headers/bodies are opt-in (sensitive headers always redacted).
-    // Set to false to disable entirely.
-    network: {
-      captureHeaders: false,
-      captureBody: false,
-      captureResources: true,
-      ignoreUrls: [],
-    },
+  // Ingestion gates; every configured gate must pass before events are sent.
+  sampleRate: 1, // sticky per-session keep probability
+  // null records unconditionally; an object buffers client-side until a
+  // trigger fires: { urls: ['/checkout'], onException: true }, or a manual
+  // window.capture.trigger('reason').
+  triggers: null,
+  minDurationMs: 0, // sessions shorter than this never leave the browser
+  maxBufferBytes: 2 * 1024 * 1024, // pre-trigger rolling buffer bound
+
+  // false disables network capture entirely.
+  network: {
+    captureHeaders: false,
+    captureBody: false,
+    captureResources: true,
+    ignoreUrls: [],
+  },
 };
 
 // Local-only merge so helpers work before init; main() swaps in the full
@@ -115,10 +85,6 @@ async function resolveConfig() {
   return Object.assign({}, DEFAULTS, remote || {}, inline);
 }
 
-// ---------------------------------------------------------------------------
-// Session / window identity
-// ---------------------------------------------------------------------------
-
 const SESSION_STORAGE_KEY = 'capture_session';
 const WINDOW_STORAGE_KEY = 'capture_window_id';
 
@@ -143,12 +109,9 @@ function writeSession(session) {
 }
 
 /**
- * Returns the current session, rotating it when the visitor has been
- * idle past the timeout or the session exceeds its max length.
- *
- * The sampling decision is rolled once at session creation and persisted,
- * so a session is either wholly recorded or wholly skipped — never a
- * fragment (PostHog's per-session sticky sampling).
+ * Current session, rotated after idle timeout or max length. The sampling
+ * decision is rolled once at creation and persisted, so a session is
+ * wholly recorded or wholly skipped — never a fragment.
  */
 function getSession() {
   const now = Date.now();
@@ -189,23 +152,11 @@ let session = null;
 let sessionId = null;
 let windowId = null;
 
-// ---------------------------------------------------------------------------
-// Recording state machine (PostHog's ingestion controls, in miniature)
-//
-//   'disabled'  — session sampled out; nothing recorded, nothing sent.
-//   'buffering' — recording into a rolling in-memory buffer, nothing sent;
-//                 waiting for a trigger. Discarded on unload if none fires.
-//   'active'    — events flush to the server.
-//
-// With no triggers configured, a sampled-in session is 'active' immediately.
-// ---------------------------------------------------------------------------
-
+// 'disabled' (sampled out) | 'buffering' (recording into a rolling buffer,
+// nothing sent until a trigger fires; discarded on unload) | 'active'
+// (events flush to the server).
 let status = 'disabled';
 let stopFn = null; // rrweb's cleanup function while recording
-
-// ---------------------------------------------------------------------------
-// Transport: batch + gzip + keepalive fetch
-// ---------------------------------------------------------------------------
 
 let buffer = [];
 let bufferBytes = 0;
@@ -286,17 +237,9 @@ function scheduleFlush() {
   flushTimer = setInterval(() => flush(false), config.flushIntervalMs);
 }
 
-// ---------------------------------------------------------------------------
-// Triggers
-// ---------------------------------------------------------------------------
-
 let urlTriggers = [];
 
-/**
- * All configured gates must pass before a buffering session starts
- * sending: a fired trigger (when triggers are configured) and the
- * minimum session duration (when set).
- */
+/** Every configured gate — a fired trigger, the minimum duration — must pass. */
 function gatesSatisfied() {
   const current = readSession();
   const triggerOk = !config.triggers || Boolean(current && current.triggered);
@@ -311,19 +254,19 @@ function tryTransition(reason) {
   if (status !== 'buffering' || !gatesSatisfied()) return;
   status = 'active';
   const current = readSession();
-  // Stamp the reason into the event stream so replay shows why this
-  // session was kept (custom events are ignored by the player itself).
+  // Stamped into the event stream so replay shows why the session was kept.
   record.addCustomEvent('capture-trigger', {
     reason: (current && current.triggerReason) || reason,
   });
   flush(false);
 }
 
-/** A trigger fired: persist the per-session decision, then try to send. */
+/**
+ * A trigger fired: persist the decision on the session so later page loads
+ * within it start recording immediately, then try to send.
+ */
 function activate(reason) {
   if (status !== 'buffering') return;
-  // The decision is per session, like sampling: persist it so page
-  // navigations within a triggered session keep recording immediately.
   const current = readSession();
   if (current && !current.triggered) {
     current.triggered = true;
@@ -338,7 +281,6 @@ function checkUrlTriggers() {
   if (urlTriggers.some((re) => re.test(location.href))) activate('url');
 }
 
-/** Wire trigger listeners + the page-facing API. Called once from main(). */
 function setupTriggers() {
   urlTriggers = ((config.triggers && config.triggers.urls) || []).map(
     (pattern) => new RegExp(pattern)
@@ -364,17 +306,12 @@ function setupTriggers() {
     window.addEventListener('unhandledrejection', () => activate('exception'));
   }
 
-  // Manual API: capture.trigger('saw-bug') from the host page.
   window.capture = Object.assign(window.capture || {}, {
     trigger: (reason) => activate(reason || 'manual'),
     status: () => status,
     config: () => ({ ...config }), // effective (merged) config, for debugging
   });
 }
-
-// ---------------------------------------------------------------------------
-// Recording
-// ---------------------------------------------------------------------------
 
 /** Handle an idle/max-length rotation observed mid-page. */
 function onSessionRotated(next) {
@@ -440,7 +377,6 @@ function startRecording() {
         return;
       }
 
-      // Non-interactive event (mutations, media, console/network plugins…)
       if (idle) return; // dropped: nobody is watching
       if (Date.now() - lastUserActivity > config.idleThresholdMs) {
         idle = true;
@@ -452,19 +388,15 @@ function startRecording() {
     },
     checkoutEveryNms: config.checkoutEveryNms,
 
-    // Privacy defaults: mask every input before it leaves the browser; block
-    // whole elements with class="capture-block"; mask text with
-    // class="capture-mask".
     maskAllInputs: true,
     blockClass: 'capture-block',
     maskTextClass: 'capture-mask',
 
-    // Trim high-frequency noise.
     sampling: {
-      mousemove: 50, // ms between mousemove events
+      mousemove: 50, // ms between events
       scroll: 100,
       media: 800,
-      input: 'last', // only record final value of rapid input bursts
+      input: 'last', // only the final value of rapid input bursts
     },
 
     plugins: [
@@ -496,9 +428,8 @@ function startRecording() {
 
 /**
  * Sampled-out sessions record nothing, but the page stays instrumented:
- * lightweight activity listeners keep the stored session alive, and when it
- * eventually rotates (idle timeout / max length) the new session re-rolls
- * the sampling dice and may start recording.
+ * lightweight activity listeners keep the stored session alive, and the
+ * eventual rotation re-rolls the sampling dice and may start recording.
  */
 function watchForNextSession() {
   let lastCheck = 0;
@@ -522,7 +453,7 @@ function watchForNextSession() {
 
 async function main() {
   // Nothing records until the effective config is known — remote settings
-  // (sampleRate, triggers, …) must not race the first events.
+  // must not race the first events.
   config = await resolveConfig();
 
   session = getSession();

@@ -20,14 +20,12 @@
     footer a { color: #0f766e; }
   </style>
   <script>
-    // Trigger mode: nothing is sent to the server until a trigger fires.
-    // Events buffer in memory so the trigger keeps the lead-up.
     // Override any option via ?config={"sampleRate":0} for experimenting.
     window.CAPTURE_CONFIG = Object.assign(
       {
         triggers: {
-          urls: ['#record$'],   // navigating to #record starts sending
-          onException: true,    // an uncaught error starts sending
+          urls: ['#record$'],
+          onException: true,
         },
       },
       JSON.parse(new URLSearchParams(location.search).get('config') || '{}')

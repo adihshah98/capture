@@ -1,17 +1,9 @@
 /**
- * Network capture plugin for rrweb — the lightweight analog of PostHog's
- * network recording (posthog-js network-plugin.ts).
- *
- * Wraps fetch + XMLHttpRequest for method/status/duration, and reads
- * PerformanceObserver resource entries for everything else (images,
- * scripts, styles), so the replay UI can show a request waterfall.
- *
- * Privacy defaults, applied before anything leaves the browser:
- * - URLs, method, status and timings only; headers and bodies are opt-in
- * - sensitive headers (authorization, cookie, x-api-key, …) are always
- *   dropped even when header capture is on
- * - credentials embedded in URLs (user:pass@host) are stripped
- * - the recorder's own ingest endpoint is never captured (feedback loop)
+ * Network capture plugin for rrweb: wraps fetch + XMLHttpRequest, and reads
+ * PerformanceObserver resource entries for everything else (images, scripts,
+ * styles). Privacy-first: URLs/method/status/timings only by default —
+ * headers and bodies are opt-in, and sensitive headers are redacted even
+ * when opted in.
  */
 
 export const NETWORK_PLUGIN_NAME = 'capture/network@1';
@@ -27,17 +19,10 @@ const REDACTED_HEADERS = new Set([
 ]);
 
 const DEFAULTS = {
-  // Regex strings; matching URLs are never captured. The recorder adds the
-  // ingest endpoint automatically.
-  ignoreUrls: [],
-  // Capture request/response headers (minus REDACTED_HEADERS). Opt-in.
+  ignoreUrls: [], // regex strings; the recorder adds its own ingest endpoint
   captureHeaders: false,
-  // Capture request/response bodies for fetch, capped. Opt-in.
   captureBody: false,
   maxBodyBytes: 64 * 1024,
-  // Include non-fetch/XHR resources (img, script, css, …) from the
-  // Performance API. buffered:true also reports resources loaded before
-  // the recorder itself, so page-load requests aren't lost.
   captureResources: true,
 };
 
@@ -79,7 +64,6 @@ function initNetworkObserver(cb, win, options) {
   const shouldIgnore = (url) => ignore.some((re) => re.test(url));
   const cleanups = [];
 
-  // --- fetch ---------------------------------------------------------------
   const originalFetch = win.fetch;
   win.fetch = async function (input, init) {
     const url = sanitizeUrl(
@@ -130,7 +114,6 @@ function initNetworkObserver(cb, win, options) {
     win.fetch = originalFetch;
   });
 
-  // --- XMLHttpRequest ------------------------------------------------------
   const XHR = win.XMLHttpRequest;
   const originalOpen = XHR.prototype.open;
   const originalSend = XHR.prototype.send;
@@ -173,14 +156,12 @@ function initNetworkObserver(cb, win, options) {
     XHR.prototype.send = originalSend;
   });
 
-  // --- other resources (img, script, css, …) -------------------------------
   if (opts.captureResources && typeof PerformanceObserver !== 'undefined') {
-    // Epoch anchor for converting performance timestamps.
-    const timeOrigin = Date.now() - performance.now();
+    const timeOrigin = Date.now() - performance.now(); // performance.now() → epoch ms
     const seen = new Set();
     const observer = new PerformanceObserver((list) => {
       for (const e of list.getEntries()) {
-        // fetch/xhr are covered by the wrappers above (with status codes).
+        // fetch/xhr already come from the wrappers above, with status codes.
         if (e.initiatorType === 'fetch' || e.initiatorType === 'xmlhttprequest') continue;
         const url = sanitizeUrl(e.name);
         if (shouldIgnore(url) || seen.has(e.name + e.startTime)) continue;
@@ -196,6 +177,8 @@ function initNetworkObserver(cb, win, options) {
         });
       }
     });
+    // buffered: true replays entries from before the recorder loaded, so
+    // page-load resources aren't lost to the lazy-loaded bundle.
     observer.observe({ type: 'resource', buffered: true });
     cleanups.push(() => observer.disconnect());
   }

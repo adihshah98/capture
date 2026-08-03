@@ -1,9 +1,6 @@
 /**
- * replay.bundle.js — the replay UI.
- *
- * Left: recorded sessions. Center: rrweb-player. Bottom: console logs pulled
- * from the rrweb console plugin events (type 6 / plugin "rrweb/console@1"),
- * the lightweight version of PostHog's synced DevTools panel.
+ * replay.bundle.js — the replay UI: session list, rrweb-player, and
+ * playhead-synced Console/Network panels.
  */
 import rrwebPlayer from 'rrweb-player';
 import 'rrweb-player/dist/style.css';
@@ -17,7 +14,6 @@ const sessionTitleEl = document.getElementById('session-title');
 const loadProgressEl = document.getElementById('load-progress');
 const windowTabsEl = document.getElementById('window-tabs');
 
-// Console/Network tab switching
 const tabs = [
   { btn: document.getElementById('tab-console'), list: consoleListEl },
   { btn: document.getElementById('tab-network'), list: networkListEl },
@@ -43,8 +39,8 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-// Multi-tenant servers scope every read to a project token; single-tenant
-// servers return no projects and the selector stays hidden.
+// Empty on single-tenant servers (no projects) — the selector stays hidden
+// and reads go unscoped.
 let currentProject = '';
 
 function projectQuery() {
@@ -99,11 +95,6 @@ async function loadSessions() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Playhead sync: panel rows track the replay position — past rows normal,
-// the latest-fired row highlighted, future rows dimmed. Click a row to seek.
-// ---------------------------------------------------------------------------
-
 let consoleRows = [];
 let networkRows = [];
 let syncStart = 0; // absolute timestamp of the session's first event
@@ -112,6 +103,7 @@ function seekTo(timestamp) {
   if (player) player.goto(Math.max(0, timestamp - syncStart));
 }
 
+/** Dim rows the playhead hasn't reached; highlight the latest-fired one. */
 function syncList(rows, currentMs) {
   let currentIdx = -1;
   for (let i = 0; i < rows.length; i++) {
@@ -129,17 +121,14 @@ function syncList(rows, currentMs) {
   }
 }
 
-// rrweb IncrementalSource values that represent real user interaction
-// (mousemove, mouse interaction, scroll, input, touchmove) — same set the
-// recorder uses for idle detection.
+// rrweb IncrementalSource values for real user interaction: MouseMove(1),
+// MouseInteraction(2), Scroll(3), Input(5), TouchMove(6).
 const INTERACTIVE_SOURCES = new Set([1, 2, 3, 5, 6]);
 
 /**
- * Activity-density seekbar: a histogram of user interactions painted above
- * the player's progress bar, so the interesting moments of a session are
- * visible before you scrub (the lightweight version of PostHog's activity
- * heatmap). pointer-events: none keeps the bar click-through, so seeking
- * on the progress bar underneath works untouched.
+ * Histogram of user interactions painted above the player's progress bar.
+ * pointer-events: none keeps it click-through, so seeking on the progress
+ * bar underneath works untouched.
  */
 function attachActivityBar(events) {
   if (!player) return;
@@ -327,10 +316,9 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
   player = null;
   const allEvents = [];
 
-  // Lazy loading: start the player on the first chunk (it always begins
-  // with a full snapshot), then stream the rest in via player.addEvent() —
-  // playback starts without waiting for, or the server ever assembling,
-  // the whole stream.
+  // Start the player on the first chunk (it always begins with a full
+  // snapshot) and stream the rest in via addEvent() — playback starts
+  // without waiting for the whole session.
   for (let i = 0; i < chunks.length; i++) {
     const chunkRes = await fetch(
       `/api/sessions/${sessionId}/chunks/${chunks[i].name}${projectQuery()}`

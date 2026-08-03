@@ -1,10 +1,6 @@
-"""Ingest + replay server (FastAPI port of the original server.js).
-
-The file-system analog of PostHog's pipeline: the recorder POSTs gzipped
-event batches to /ingest, each batch is stored as an immutable chunk under
-data/sessions/<session_id>/, and the replay UI reads sessions back through
-a small JSON API. Swap the chunk store for S3/ClickHouse when it outgrows
-a single box — the wire format stays the same.
+"""Ingest + replay server: the recorder POSTs gzipped event batches to
+/ingest, each batch is stored as an immutable chunk on disk, and the replay
+UI reads sessions back through a small JSON API.
 
 Run: .venv/bin/uvicorn server:app --port 3000
 """
@@ -31,9 +27,8 @@ from fastapi.staticfiles import StaticFiles
 app = FastAPI(title="capture")
 
 # The snippet runs on other people's pages, so ingest/config/bundles must be
-# reachable cross-origin (PostHog's capture endpoints are CORS-open the same
-# way). Recording data flows one direction — into this server — so a
-# wildcard origin holds nothing back that the endpoints don't already give.
+# reachable cross-origin. A wildcard origin is safe here: the read side is
+# gated by REPLAY_PASSWORD, which cross-origin callers can't present.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -81,17 +76,14 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Multi-tenancy (PostHog's project API keys, in miniature). data/projects.json
-# maps token -> {"name": ...}; create entries with `python server.py
-# add-project <name>`. With no projects configured the server runs
-# single-tenant exactly as before: tokens are ignored and everything lands in
-# data/sessions. Once projects exist, /ingest requires a known token and each
-# project's chunks live under data/projects/<token>/sessions/.
+# Project registry: token -> {"name": ...}, managed by `python server.py
+# add-project <name>`. No projects configured = single-tenant mode: tokens
+# are ignored and everything lands in data/sessions.
 PROJECTS_PATH = BASE_DIR / "data" / "projects.json"
 PROJECTS_DIR = BASE_DIR / "data" / "projects"
 
 # Password for the replay UI + read API (HTTP Basic, any username). Unset
-# means open access — fine on localhost, not with real recordings on it.
+# means open access.
 REPLAY_PASSWORD = os.environ.get("REPLAY_PASSWORD", "")
 
 
@@ -111,9 +103,7 @@ def project_sessions_dir(token: str) -> Path:
 
 
 def resolve_sessions_dir(token: Optional[str], projects: dict) -> Optional[Path]:
-    """Where a request's sessions live. Single-tenant (no projects
-    configured) -> the legacy pool. Multi-tenant -> the token must be a
-    known project; None means reject."""
+    """Storage pool for an ingest request; None means reject."""
     if not projects:
         return DATA_DIR
     if token and SAFE_ID.match(token) and token in projects:
@@ -122,8 +112,8 @@ def resolve_sessions_dir(token: Optional[str], projects: dict) -> Optional[Path]
 
 
 def session_pools() -> list:
-    """Every directory that holds session subdirectories (legacy pool +
-    one per project) — the retention sweep covers them all."""
+    """Every directory holding session subdirectories: legacy pool + one
+    per project."""
     pools = [DATA_DIR]
     if PROJECTS_DIR.is_dir():
         for entry in PROJECTS_DIR.iterdir():
@@ -142,23 +132,16 @@ def chunk_window(path) -> Optional[str]:
     return parts[1] if len(parts) == 3 else None
 MAX_BODY_BYTES = 50 * 1024 * 1024
 
-# Sessions whose newest chunk is older than this are deleted by the daily
-# retention sweep. Set RETENTION_DAYS=0 to keep everything forever.
+# 0 keeps everything forever.
 RETENTION_DAYS = float(os.environ.get("RETENTION_DAYS", "30"))
 
-# Remote recording config served to clients (PostHog's remote-config analog).
-# Edit this file to change recording behavior fleet-wide — clients re-fetch
-# after their cache TTL (1 h) without any page redeploy.
+# Global remote recording config; editing it changes recording behavior
+# fleet-wide without page redeploys (clients re-fetch after a 1 h TTL).
 CONFIG_PATH = BASE_DIR / "data" / "config.json"
 
 
 def error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
-
-
-# ---------------------------------------------------------------------------
-# Ingest
-# ---------------------------------------------------------------------------
 
 
 @app.post("/ingest")
@@ -192,10 +175,8 @@ async def ingest(
     session_dir = pool / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    # Immutable chunk per batch; timestamp prefix keeps chunks ordered, and
-    # the window-id prefix lets the manifest group chunks per tab without
-    # opening any chunk file (a multi-tab session is several independent
-    # rrweb streams — replaying them interleaved would garble the DOM).
+    # Timestamp prefix keeps chunks ordered; the window-id prefix lets the
+    # manifest group chunks per tab without opening any chunk file.
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     window_prefix = re.sub(r"[^a-f0-9]", "", str(payload.get("window_id") or ""))[:8]
     parts = [str(int(time.time() * 1000)), window_prefix, suffix]
@@ -214,16 +195,10 @@ async def ingest(
     return {"status": "ok", "stored": len(events)}
 
 
-# ---------------------------------------------------------------------------
-# Remote config
-# ---------------------------------------------------------------------------
-
-
 @app.get("/config")
 def remote_config(token: Optional[str] = Query(None)):
-    """Recording settings for the client. A project with its own
-    data/projects/<token>/config.json gets that; everyone else gets the
-    global data/config.json. Missing or invalid files degrade to {} — a bad
+    """Recording settings: per-project config.json if the project has one,
+    else the global file. Missing or invalid files degrade to {} — a bad
     config must never stop recording."""
     config_path = CONFIG_PATH
     if token and SAFE_ID.match(token) and token in load_projects():
@@ -244,11 +219,6 @@ def remote_config(token: Optional[str] = Query(None)):
     return response
 
 
-# ---------------------------------------------------------------------------
-# Read API for the replay UI
-# ---------------------------------------------------------------------------
-
-
 def chunk_timestamp(path: Path) -> int:
     try:
         return int(path.name.split("-")[0])
@@ -257,8 +227,8 @@ def chunk_timestamp(path: Path) -> int:
 
 
 def read_pool(project: Optional[str]) -> Optional[Path]:
-    """Sessions directory for a read-API request. No param reads the legacy
-    single-tenant pool; a param must name a known project."""
+    """Sessions directory for a read-API request; None means unknown project.
+    No param reads the legacy single-tenant pool."""
     if not project:
         return DATA_DIR
     if SAFE_ID.match(project) and project in load_projects():
@@ -307,8 +277,7 @@ def list_sessions(project: Optional[str] = Query(None)):
 
 @app.get("/api/sessions/{session_id}/chunks")
 def session_chunks(session_id: str, project: Optional[str] = Query(None)):
-    """Ordered chunk manifest for lazy loading — the player fetches chunks
-    one by one instead of the server concatenating the whole session."""
+    """Ordered chunk manifest; the player fetches chunks one by one."""
     if not SAFE_ID.match(session_id):
         return error(400, "invalid session_id")
     pool = read_pool(project)
@@ -348,7 +317,6 @@ def session_chunks(session_id: str, project: Optional[str] = Query(None)):
 
 @app.get("/api/sessions/{session_id}/chunks/{chunk_name}")
 def session_chunk(session_id: str, chunk_name: str, project: Optional[str] = Query(None)):
-    """A single immutable chunk, served straight from disk."""
     if not SAFE_ID.match(session_id) or not SAFE_CHUNK.match(chunk_name):
         return error(400, "invalid id")
     pool = read_pool(project)
@@ -357,8 +325,8 @@ def session_chunk(session_id: str, chunk_name: str, project: Optional[str] = Que
     path = pool / session_id / chunk_name
     if not path.is_file():
         return error(404, "not found")
-    # Chunks are immutable (timestamp + random suffix names), so let the
-    # browser cache them for replay scrubbing across visits.
+    # Chunks are immutable, so the browser may cache them for scrubbing
+    # re-visits.
     return FileResponse(
         path, media_type="application/json", headers={"Cache-Control": "max-age=86400"}
     )
@@ -392,15 +360,9 @@ def session_events(session_id: str, project: Optional[str] = Query(None)):
     return {"session_id": session_id, "url": url, "count": len(events), "events": events}
 
 
-# ---------------------------------------------------------------------------
-# Retention
-# ---------------------------------------------------------------------------
-
-
 def sweep_expired_sessions() -> int:
-    """Delete session directories whose newest chunk is past retention,
-    across the legacy pool and every project. Empty directories (no chunks)
-    are treated as expired."""
+    """Delete sessions whose newest chunk is past retention, across every
+    pool. Empty directories count as expired."""
     if RETENTION_DAYS <= 0:
         return 0
     cutoff_ms = (time.time() - RETENTION_DAYS * 86400) * 1000
@@ -437,11 +399,6 @@ async def start_retention_loop():
 
 # Registered last so /ingest and /api/* win; serves index.html at "/".
 app.mount("/", StaticFiles(directory=BASE_DIR / "public", html=True), name="static")
-
-
-# ---------------------------------------------------------------------------
-# CLI: python server.py add-project <name>
-# ---------------------------------------------------------------------------
 
 
 def add_project(name: str) -> None:
