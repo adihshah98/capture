@@ -110,6 +110,11 @@ Optional config, before the tag:
 - **Console capture** — `@rrweb/rrweb-plugin-console-record` embeds console
   log/info/warn/error into the event stream (type 6 plugin events); the replay UI
   renders them in a panel under the player.
+- **Playhead-synced inspector** — the Console and Network panels track the
+  replay position: rows the playhead hasn't reached yet are dimmed, the
+  latest-fired row is highlighted and kept scrolled into view, and clicking any
+  row seeks the player to that moment (the lightweight version of PostHog's
+  inspector timeline).
 - **Network capture** — `src/network-plugin.js` wraps `fetch` + `XMLHttpRequest`
   (method, status, duration, failures) and reads buffered PerformanceObserver
   resource entries (scripts, images, styles — including ones loaded before the

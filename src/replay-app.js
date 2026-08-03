@@ -67,12 +67,54 @@ async function loadSessions() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Playhead sync: panel rows track the replay position — past rows normal,
+// the latest-fired row highlighted, future rows dimmed. Click a row to seek.
+// ---------------------------------------------------------------------------
+
+let consoleRows = [];
+let networkRows = [];
+let syncStart = 0; // absolute timestamp of the session's first event
+
+function seekTo(timestamp) {
+  if (player) player.goto(Math.max(0, timestamp - syncStart));
+}
+
+function syncList(rows, currentMs) {
+  let currentIdx = -1;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].t - syncStart <= currentMs) currentIdx = i;
+    else break;
+  }
+  if (rows.lastIdx === currentIdx) return; // nothing moved since last frame
+  rows.lastIdx = currentIdx;
+  rows.forEach((row, i) => {
+    row.el.classList.toggle('current', i === currentIdx);
+    row.el.classList.toggle('future', i > currentIdx);
+  });
+  if (currentIdx >= 0 && !rows[currentIdx].el.parentElement.hidden) {
+    rows[currentIdx].el.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function attachTimeSync() {
+  if (!player) return;
+  syncStart = player.getMetaData().startTime;
+  syncList(consoleRows, 0);
+  syncList(networkRows, 0);
+  player.addEventListener('ui-update-current-time', ({ payload }) => {
+    syncList(consoleRows, payload);
+    syncList(networkRows, payload);
+  });
+}
+
 function renderConsole(events) {
   const logs = events
     .filter((e) => e.type === 6 && e.data && e.data.plugin === 'rrweb/console@1')
     .map((e) => ({ timestamp: e.timestamp, ...e.data.payload }));
 
   document.getElementById('console-count').textContent = logs.length ? `(${logs.length})` : '';
+  consoleRows = [];
   consoleListEl.innerHTML = '';
   if (logs.length === 0) {
     consoleListEl.innerHTML = '<li class="empty">No console output captured.</li>';
@@ -92,6 +134,8 @@ function renderConsole(events) {
       .join(' ');
     li.innerHTML = `<span class="ts">${new Date(log.timestamp).toLocaleTimeString()}</span><span class="lvl">${log.level}</span><span class="msg"></span>`;
     li.querySelector('.msg').textContent = args;
+    li.addEventListener('click', () => seekTo(log.timestamp));
+    consoleRows.push({ el: li, t: log.timestamp });
     consoleListEl.appendChild(li);
   }
 }
@@ -100,12 +144,13 @@ function renderNetwork(events) {
   const t0 = events.length ? events[0].timestamp : 0;
   const requests = events
     .filter((e) => e.type === 6 && e.data && e.data.plugin === 'capture/network@1')
-    .map((e) => e.data.payload)
-    .sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
+    .map((e) => ({ ...e.data.payload, startMs: e.data.payload.startMs || e.timestamp }))
+    .sort((a, b) => a.startMs - b.startMs);
 
   document.getElementById('network-count').textContent = requests.length
     ? `(${requests.length})`
     : '';
+  networkRows = [];
   networkListEl.innerHTML = '';
   if (requests.length === 0) {
     networkListEl.innerHTML = '<li class="empty">No network requests captured.</li>';
@@ -133,6 +178,8 @@ function renderNetwork(events) {
     li.querySelector('.kind').textContent = req.type === 'resource' ? req.initiatorType : req.type;
     li.querySelector('.dur').textContent =
       req.durationMs != null ? `${req.durationMs} ms` : '';
+    li.addEventListener('click', () => seekTo(req.startMs));
+    networkRows.push({ el: li, t: req.startMs });
     networkListEl.appendChild(li);
   }
 }
@@ -182,8 +229,14 @@ async function loadSession(sessionId) {
           height: Math.max(420, Math.round(playerHostEl.clientWidth * 0.56)),
         },
       });
+      window.__player = player; // debug handle
     } else if (player) {
       for (const event of events) player.addEvent(event);
+      // Autoplay can drain the tiny initial timeline before these events
+      // arrive: the state machine stays 'playing' but the internal timer has
+      // stopped, so appended events never play and the play button is inert.
+      // A goto() rebuilds the timer over the full timeline.
+      if (player.getReplayer().getCurrentTime() <= 0) player.goto(0, true);
     }
 
     loadProgressEl.textContent =
@@ -196,6 +249,13 @@ async function loadSession(sessionId) {
   }
   renderConsole(allEvents);
   renderNetwork(allEvents);
+  attachTimeSync();
+
+  // Final safety net for the drained-timer wedge (see above): if the whole
+  // session is loaded and the playhead never moved, restart from the top.
+  if (player && player.getReplayer().getCurrentTime() <= 0) {
+    player.goto(0, true);
+  }
 }
 
 document.getElementById('refresh').addEventListener('click', loadSessions);

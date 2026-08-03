@@ -45,6 +45,9 @@
     #network-list .url { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #network-list .kind { color: #9ca3af; flex-shrink: 0; }
     #network-list .dur { color: #6b7280; flex-shrink: 0; width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
+    #console-list li:not(.empty), #network-list li:not(.empty) { cursor: pointer; }
+    #console-list li.future, #network-list li.future { opacity: 0.4; }
+    #console-list li.current, #network-list li.current { background: #eef2ff; box-shadow: inset 2px 0 0 #4f46e5; }
     .empty { color: #9ca3af; padding: 12px 14px; font-size: 13px; }
   </style>
 </head>
