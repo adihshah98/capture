@@ -116,6 +116,10 @@ Optional config, before the tag:
   chunks per tab without opening a single file. Multi-tab sessions get a tab
   picker in the player (largest stream plays first); single-tab and legacy
   sessions look exactly as before.
+- **Activity-density seekbar** — a histogram of user interactions (clicks,
+  scrolls, inputs) painted above the player's progress bar, so the interesting
+  moments of a session are visible before you scrub; click-through, per tab,
+  lightly smoothed.
 - **Playhead-synced inspector** — the Console and Network panels track the
   replay position: rows the playhead hasn't reached yet are dimmed, the
   latest-fired row is highlighted and kept scrolled into view, and clicking any

@@ -98,6 +98,61 @@ function syncList(rows, currentMs) {
   }
 }
 
+// rrweb IncrementalSource values that represent real user interaction
+// (mousemove, mouse interaction, scroll, input, touchmove) — same set the
+// recorder uses for idle detection.
+const INTERACTIVE_SOURCES = new Set([1, 2, 3, 5, 6]);
+
+/**
+ * Activity-density seekbar: a histogram of user interactions painted above
+ * the player's progress bar, so the interesting moments of a session are
+ * visible before you scrub (the lightweight version of PostHog's activity
+ * heatmap). pointer-events: none keeps the bar click-through, so seeking
+ * on the progress bar underneath works untouched.
+ */
+function attachActivityBar(events) {
+  if (!player) return;
+  const progressEl = playerHostEl.querySelector('.rr-progress');
+  if (!progressEl) return;
+  const meta = player.getMetaData();
+  if (!meta.totalTime) return;
+
+  const BUCKETS = 120;
+  const counts = new Array(BUCKETS).fill(0);
+  for (const e of events) {
+    if (e.type === 3 && INTERACTIVE_SOURCES.has(e.data && e.data.source)) {
+      const i = Math.min(
+        BUCKETS - 1,
+        Math.floor(((e.timestamp - meta.startTime) / meta.totalTime) * BUCKETS)
+      );
+      counts[i] += 1;
+    }
+  }
+  // Light smoothing so single events still read as a visible blip.
+  const smooth = counts.map(
+    (_, i) => (counts[i - 1] || 0) * 0.25 + counts[i] * 0.5 + (counts[i + 1] || 0) * 0.25
+  );
+  const max = Math.max(...smooth, 1);
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'activity-bar';
+  const width = Math.max(progressEl.clientWidth, 200);
+  const height = 16;
+  canvas.width = width * devicePixelRatio;
+  canvas.height = height * devicePixelRatio;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  ctx.fillStyle = 'rgba(79, 70, 229, 0.45)';
+  const bw = width / BUCKETS;
+  for (let i = 0; i < BUCKETS; i++) {
+    if (!smooth[i]) continue;
+    const h = Math.max(2, (smooth[i] / max) * height);
+    ctx.fillRect(i * bw, height - h, Math.max(1, bw - 0.5), h);
+  }
+  progressEl.style.position = 'relative';
+  progressEl.appendChild(canvas);
+}
+
 function attachTimeSync() {
   if (!player) return;
   syncStart = player.getMetaData().startTime;
@@ -290,6 +345,7 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
   renderConsole(allEvents);
   renderNetwork(allEvents);
   attachTimeSync();
+  attachActivityBar(allEvents);
 
   // Final safety net for the drained-timer wedge (see above): if the whole
   // session is loaded and the playhead never moved, restart from the top.
