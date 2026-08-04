@@ -4,6 +4,9 @@
   "description": "Self-hosted session recording and replay built on rrweb",
   "scripts": {
     "build": "esbuild src/recorder.js --bundle --minify --outfile=public/recorder.bundle.js && esbuild src/replay-app.js --bundle --minify --outfile=public/replay.bundle.js && esbuild src/snippet.js --minify --outfile=public/capture.js",
+    "test": "npm run build && node --test tests/*.test.mjs && .venv/bin/python -m unittest discover -s tests",
+    "test:client": "npm run build && node --test tests/*.test.mjs",
+    "test:server": ".venv/bin/python -m unittest discover -s tests",
     "start": ".venv/bin/uvicorn server:app --port 3000",
     "dev": "npm run build && REPLAY_AUTH_DISABLED=1 .venv/bin/uvicorn server:app --port 3000"
   },

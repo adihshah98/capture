@@ -13,7 +13,13 @@ The client SDK is JavaScript (rrweb runs in the browser); the server is Python
 npm install                                  # build-time deps (esbuild, rrweb)
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 npm run dev        # builds bundles + starts the server on :3000
+npm test           # client + server tests (no test dependencies to install)
 ```
+
+`npm test` runs the client tests through Node's built-in runner and the server
+tests through `unittest`. The server tests boot real uvicorn processes against
+a throwaway `CAPTURE_DATA_DIR`, so they exercise what ships — middleware order,
+env parsing, status codes — and never touch your recordings.
 
 - **Demo page** (instrumented): http://localhost:3000/
 - **Replay UI**: http://localhost:3000/replay.html

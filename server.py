@@ -83,14 +83,17 @@ async def revalidate_static(request: Request, call_next):
     return response
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data" / "sessions"
+# Everything stored lives under here. Overridable so a test run — or a second
+# instance — never writes into the working copy's recordings.
+DATA_ROOT = Path(os.environ.get("CAPTURE_DATA_DIR") or BASE_DIR / "data")
+DATA_DIR = DATA_ROOT / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Project registry: token -> {"name": ...}, managed by `python server.py
 # add-project <name>`. No projects configured = single-tenant mode: tokens
 # are ignored and everything lands in data/sessions.
-PROJECTS_PATH = BASE_DIR / "data" / "projects.json"
-PROJECTS_DIR = BASE_DIR / "data" / "projects"
+PROJECTS_PATH = DATA_ROOT / "projects.json"
+PROJECTS_DIR = DATA_ROOT / "projects"
 
 # Password for the replay UI + read API (HTTP Basic, any username). Unset
 # means the read side is refused entirely; REPLAY_AUTH_DISABLED=1 opts out
@@ -177,7 +180,7 @@ def pool_bytes(pool: Path) -> int:
 
 # Global remote recording config; editing it changes recording behavior
 # fleet-wide without page redeploys (clients re-fetch after a 1 h TTL).
-CONFIG_PATH = BASE_DIR / "data" / "config.json"
+CONFIG_PATH = DATA_ROOT / "config.json"
 
 
 def error(status: int, message: str) -> JSONResponse:
@@ -201,7 +204,7 @@ async def ingest(
     # Checked before the body is read so an abusive client is cheap to reject.
     # 507 is retryable (our problem, may clear); 429 tells the recorder to drop
     # the batch rather than retry into a quota that only retention will free.
-    if MIN_FREE_DISK_BYTES and shutil.disk_usage(BASE_DIR).free < MIN_FREE_DISK_BYTES:
+    if MIN_FREE_DISK_BYTES and shutil.disk_usage(DATA_ROOT).free < MIN_FREE_DISK_BYTES:
         return error(507, "server storage full")
     if MAX_PROJECT_BYTES:
         # Cached after the first request; only the initial scan leaves the loop.
