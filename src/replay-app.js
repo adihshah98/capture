@@ -69,14 +69,59 @@ async function loadProjects() {
   });
 }
 
+/**
+ * fetch + JSON with the failure cases the UI has to survive: an unreachable
+ * server, and the API answering {"error": ...} with a 4xx. Without this a 401
+ * left the page blank, which reads as "broken" rather than "sign in again".
+ */
+async function fetchJson(url, options) {
+  let res;
+  try {
+    res = await fetch(url, options);
+  } catch {
+    // A 401 carrying WWW-Authenticate never reaches this code: the browser
+    // intercepts it and prompts for credentials itself, and fetch rejects if
+    // that is dismissed. So a rejection means "down" or "needs the password",
+    // and the message can't claim to know which.
+    throw new Error('Server unreachable, or it needs the password again — try reloading.');
+  }
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    /* empty or non-JSON body — fall back to the status below */
+  }
+  if (!res.ok) {
+    if (res.status === 401) {
+      throw new Error('Not authorized — reload the page to re-enter the replay password.');
+    }
+    throw new Error((body && body.error) || `Server returned ${res.status}.`);
+  }
+  return body || {};
+}
+
+/** Server-supplied text goes in via textContent, never innerHTML. */
+function showListMessage(message) {
+  sessionListEl.innerHTML = '';
+  const li = document.createElement('li');
+  li.className = 'empty';
+  li.textContent = message;
+  sessionListEl.appendChild(li);
+}
+
 async function loadSessions() {
-  const res = await fetch(`/api/sessions${projectQuery()}`);
-  const { sessions } = await res.json();
+  let sessions;
+  try {
+    ({ sessions } = await fetchJson(`/api/sessions${projectQuery()}`));
+  } catch (err) {
+    showListMessage(`Could not load sessions. ${err.message}`);
+    return;
+  }
+  sessions = Array.isArray(sessions) ? sessions : [];
 
   sessionListEl.innerHTML = '';
   if (sessions.length === 0) {
-    sessionListEl.innerHTML =
-      '<li class="empty">No sessions yet. Open the demo page and click around.</li>';
+    showListMessage('No sessions yet. Open the demo page and click around.');
     return;
   }
 
@@ -305,10 +350,7 @@ function renderNetwork(events) {
 let loadSeq = 0;
 let loadedSessionId = null;
 
-/** Tear the player down so a deleted session can't stay on screen. */
-function clearPlayer() {
-  loadSeq += 1;
-  loadedSessionId = null;
+function resetPlayerPanes() {
   player = null;
   playerHostEl.innerHTML = '';
   windowTabsEl.innerHTML = '';
@@ -316,7 +358,23 @@ function clearPlayer() {
   networkListEl.innerHTML = '';
   consoleRows = [];
   networkRows = [];
+  loadProgressEl.textContent = '';
+}
+
+/** Tear the player down so a deleted session can't stay on screen. */
+function clearPlayer() {
+  loadSeq += 1;
+  loadedSessionId = null;
+  resetPlayerPanes();
   sessionTitleEl.textContent = 'Select a session';
+}
+
+function showPlayerMessage(message) {
+  resetPlayerPanes();
+  const p = document.createElement('p');
+  p.className = 'empty';
+  p.textContent = message;
+  playerHostEl.appendChild(p);
 }
 
 async function loadSession(sessionId) {
@@ -324,9 +382,15 @@ async function loadSession(sessionId) {
   loadedSessionId = sessionId;
   sessionTitleEl.textContent = `Session ${sessionId}`;
 
-  const res = await fetch(`/api/sessions/${sessionId}/chunks${projectQuery()}`);
+  let manifest;
+  try {
+    manifest = await fetchJson(`/api/sessions/${sessionId}/chunks${projectQuery()}`);
+  } catch (err) {
+    if (seq !== loadSeq) return;
+    showPlayerMessage(`Could not load this session. ${err.message}`);
+    return;
+  }
   if (seq !== loadSeq) return;
-  const manifest = await res.json();
   if (manifest.url) {
     sessionTitleEl.textContent = `Session ${sessionId.slice(0, 8)}… — ${manifest.url}`;
   }
@@ -335,10 +399,16 @@ async function loadSession(sessionId) {
   // snapshot + incrementals per tab); interleaving them would garble the
   // DOM, so each window plays separately behind a tab picker.
   const byWindow = new Map();
-  for (const chunk of manifest.chunks) {
+  for (const chunk of Array.isArray(manifest.chunks) ? manifest.chunks : []) {
     const key = chunk.window ?? 'default';
     if (!byWindow.has(key)) byWindow.set(key, []);
     byWindow.get(key).push(chunk);
+  }
+  // A session directory can exist with no readable chunks — reaching into an
+  // empty sort result here used to throw and blank the page.
+  if (byWindow.size === 0) {
+    showPlayerMessage('This session has no chunks to replay.');
+    return;
   }
   const bytesOf = (chunks) => chunks.reduce((n, c) => n + c.bytes, 0);
   const defaultWindow = [...byWindow.entries()].sort(
@@ -375,17 +445,19 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
   // Start the player on the first chunk (it always begins with a full
   // snapshot) and stream the rest in via addEvent() — playback starts
   // without waiting for the whole session.
+  let lastError = null;
   for (let i = 0; i < chunks.length; i++) {
-    const chunkRes = await fetch(
-      `/api/sessions/${sessionId}/chunks/${chunks[i].name}${projectQuery()}`
-    );
-    if (seq !== loadSeq) return;
     let events;
     try {
-      events = (await chunkRes.json()).events || [];
-    } catch {
-      continue; // skip corrupt chunk, same policy as the server
+      const chunk = await fetchJson(
+        `/api/sessions/${sessionId}/chunks/${chunks[i].name}${projectQuery()}`
+      );
+      events = chunk.events || [];
+    } catch (err) {
+      lastError = err; // skip corrupt chunk, same policy as the server
+      continue;
     }
+    if (seq !== loadSeq) return;
     events.sort((a, b) => a.timestamp - b.timestamp);
     allEvents.push(...events);
 
@@ -417,7 +489,11 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
 
   if (seq !== loadSeq) return;
   if (!player) {
-    playerHostEl.innerHTML = '<p class="empty">Not enough events to replay yet.</p>';
+    showPlayerMessage(
+      lastError
+        ? `Could not load this session. ${lastError.message}`
+        : 'Not enough events to replay yet.'
+    );
   }
   renderConsole(allEvents);
   renderNetwork(allEvents);
