@@ -7,7 +7,6 @@ Run: .venv/bin/uvicorn server:app --port 3000
 
 import asyncio
 import base64
-import gzip
 import json
 import os
 import random
@@ -16,6 +15,7 @@ import secrets
 import shutil
 import string
 import time
+import zlib
 from pathlib import Path
 from typing import Optional
 
@@ -143,9 +143,37 @@ def chunk_window(path) -> Optional[str]:
     parts = path.name.rsplit(".", 1)[0].split("-")
     return parts[1] if len(parts) == 3 else None
 MAX_BODY_BYTES = 50 * 1024 * 1024
+# Bounding the compressed body alone is not enough: a well-formed 50 MB gzip
+# expands to gigabytes. A real batch is ~1 MB of JSON, so this is generous.
+MAX_DECOMPRESSED_BYTES = int(os.environ.get("MAX_DECOMPRESSED_BYTES", 32 * 1024 * 1024))
+
+# Ingest tokens are public by design, so without a ceiling one script can fill
+# the volume for every brand. Either check is disabled by setting it to 0.
+MAX_PROJECT_BYTES = int(os.environ.get("MAX_PROJECT_BYTES", 2 * 1024**3))
+MIN_FREE_DISK_BYTES = int(os.environ.get("MIN_FREE_DISK_BYTES", 1024**3))
 
 # 0 keeps everything forever.
 RETENTION_DAYS = float(os.environ.get("RETENTION_DAYS", "30"))
+
+
+def gunzip(body: bytes, limit: int) -> bytes:
+    """Decompress with a ceiling on the output, unlike gzip.decompress."""
+    stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    raw = stream.decompress(body, limit)
+    if stream.unconsumed_tail:
+        raise ValueError("decompressed payload too large")
+    return raw
+
+
+# Pool sizes are scanned once, then tracked as chunks are written — walking
+# every chunk on each ingest would cost more than the write itself.
+_pool_bytes: dict = {}
+
+
+def pool_bytes(pool: Path) -> int:
+    if pool not in _pool_bytes:
+        _pool_bytes[pool] = sum(f.stat().st_size for f in pool.rglob("*.json") if f.is_file())
+    return _pool_bytes[pool]
 
 # Global remote recording config; editing it changes recording behavior
 # fleet-wide without page redeploys (clients re-fetch after a 1 h TTL).
@@ -170,12 +198,25 @@ async def ingest(
     if pool is None:
         return error(401, "unknown project token")
 
+    # Checked before the body is read so an abusive client is cheap to reject.
+    # 507 is retryable (our problem, may clear); 429 tells the recorder to drop
+    # the batch rather than retry into a quota that only retention will free.
+    if MIN_FREE_DISK_BYTES and shutil.disk_usage(BASE_DIR).free < MIN_FREE_DISK_BYTES:
+        return error(507, "server storage full")
+    if MAX_PROJECT_BYTES:
+        # Cached after the first request; only the initial scan leaves the loop.
+        used = _pool_bytes.get(pool)
+        if used is None:
+            used = await asyncio.to_thread(pool_bytes, pool)
+        if used >= MAX_PROJECT_BYTES:
+            return error(429, "project storage quota reached")
+
     body = await request.body()
     if len(body) > MAX_BODY_BYTES:
         return error(413, "payload too large")
 
     try:
-        raw = gzip.decompress(body) if compression == "gzip-js" else body
+        raw = gunzip(body, MAX_DECOMPRESSED_BYTES) if compression == "gzip-js" else body
         payload = json.loads(raw)
     except Exception:
         return error(400, "bad payload")
@@ -206,6 +247,7 @@ async def ingest(
             }
         )
     )
+    _pool_bytes[pool] = pool_bytes(pool) + chunk_path.stat().st_size
 
     return {"status": "ok", "stored": len(events)}
 
@@ -391,6 +433,8 @@ def sweep_expired_sessions() -> int:
             if newest < cutoff_ms:
                 shutil.rmtree(entry, ignore_errors=True)
                 removed += 1
+    if removed:
+        _pool_bytes.clear()  # freed space must count against the quota again
     return removed
 
 

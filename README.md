@@ -221,3 +221,12 @@ nothing client-side.
 
 Retention is built in: a daily sweep deletes sessions whose newest chunk is older
 than `RETENTION_DAYS` (default 30; `RETENTION_DAYS=0` keeps everything forever).
+
+Ingest is bounded, because project tokens are public and anyone can post with
+one:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MAX_PROJECT_BYTES` | 2 GB | Per-project storage cap; over it `/ingest` returns 429 and the recorder drops the batch. `0` disables. |
+| `MIN_FREE_DISK_BYTES` | 1 GB | Free-space floor for the box; below it `/ingest` returns 507 and the recorder retries. `0` disables. |
+| `MAX_DECOMPRESSED_BYTES` | 32 MB | Ceiling on gzip expansion, so a small bomb can't exhaust memory. |
