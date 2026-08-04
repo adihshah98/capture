@@ -45,6 +45,15 @@ const DEFAULTS = {
   // recorded URL, page and network alike.
   redactUrlParams: DEFAULT_REDACT_PARAMS,
 
+  // Consent. requireConsent holds everything — including the config cache
+  // write — until window.capture.grantConsent() is called, for pages that
+  // load the tag before the banner is answered. Read from the inline tag
+  // only: a remote value would arrive after the write it must prevent.
+  requireConsent: false,
+  // navigator.globalPrivacyControl is a legally recognised opt-out signal in
+  // several US states, so it is honoured unless a brand turns it off.
+  respectGlobalPrivacyControl: true,
+
   // false disables network capture entirely.
   network: {
     captureHeaders: false,
@@ -97,6 +106,37 @@ async function resolveConfig() {
 
 const SESSION_STORAGE_KEY = 'capture_session';
 const WINDOW_STORAGE_KEY = 'capture_window_id';
+const OPT_OUT_KEY = 'capture_opt_out';
+
+function isOptedOut() {
+  try {
+    return localStorage.getItem(OPT_OUT_KEY) === '1';
+  } catch {
+    return false; // storage blocked entirely — nothing was stored either
+  }
+}
+
+/** Persisting the refusal is itself a write, but the alternative is asking
+ *  again on every page load. Documented in the integration guide. */
+function setOptedOut(value) {
+  try {
+    if (value) localStorage.setItem(OPT_OUT_KEY, '1');
+    else localStorage.removeItem(OPT_OUT_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/** Drop everything this library stored about the visitor. */
+function forgetVisitor() {
+  try {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(REMOTE_CONFIG_KEY);
+    sessionStorage.removeItem(WINDOW_STORAGE_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
 
 function uuid() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -164,7 +204,8 @@ let windowId = null;
 
 // 'disabled' (sampled out) | 'buffering' (recording into a rolling buffer,
 // nothing sent until a trigger fires; discarded on unload) | 'active'
-// (events flush to the server) | 'failed' (ingest rejected us permanently).
+// (events flush to the server) | 'failed' (ingest rejected us permanently) |
+// 'awaiting-consent' (requireConsent, banner unanswered) | 'opted-out'.
 let status = 'disabled';
 let stopFn = null; // rrweb's cleanup function while recording
 
@@ -197,7 +238,7 @@ function scrubEvent(event) {
 }
 
 function pushEvent(event) {
-  if (status === 'failed') return;
+  if (status === 'failed' || status === 'opted-out') return;
   event = scrubEvent(event);
   buffer.push(event);
   bufferBytes += JSON.stringify(event).length;
@@ -251,10 +292,9 @@ function requeue(events) {
   }
 }
 
-/** A rejection no retry can fix: stop rather than record into the void. */
-function abort(message) {
-  console.error(`capture: ${message} — recording stopped`);
-  status = 'failed';
+/** Stop recording and drop anything buffered but not yet sent. */
+function stopRecording(nextStatus) {
+  status = nextStatus;
   resetBuffer();
   if (flushTimer) {
     clearInterval(flushTimer);
@@ -264,6 +304,12 @@ function abort(message) {
     stopFn();
     stopFn = null;
   }
+}
+
+/** A rejection no retry can fix: stop rather than record into the void. */
+function abort(message) {
+  console.error(`capture: ${message} — recording stopped`);
+  stopRecording('failed');
 }
 
 async function flush(useKeepalive) {
@@ -537,7 +583,13 @@ function watchForNextSession() {
   }
 }
 
-async function main() {
+let booted = false;
+
+/** Everything past the consent gate. Nothing here runs until it may. */
+async function boot() {
+  if (booted) return;
+  booted = true;
+
   // Nothing records until the effective config is known — remote settings
   // must not race the first events.
   config = await resolveConfig();
@@ -561,6 +613,53 @@ async function main() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flush(true);
   });
+}
+
+/**
+ * Published before the consent gate so a consent banner can always reach it,
+ * whatever state recording is in. setupTriggers() merges trigger/config onto
+ * the same object once recording actually starts.
+ */
+function publishConsentApi() {
+  window.capture = Object.assign(window.capture || {}, {
+    status: () => status,
+    /** Consent obtained: start, and clear any previously stored refusal. */
+    grantConsent: () => {
+      setOptedOut(false);
+      boot();
+    },
+    optIn: () => window.capture.grantConsent(),
+    /** Refused or withdrawn: stop, forget, and stay stopped on future loads. */
+    optOut: () => {
+      setOptedOut(true);
+      stopRecording('opted-out');
+      forgetVisitor();
+    },
+    isOptedOut,
+  });
+}
+
+function main() {
+  const inline = window.CAPTURE_CONFIG || {};
+  publishConsentApi();
+
+  if (isOptedOut()) {
+    status = 'opted-out';
+    return;
+  }
+  // Checked from navigator and the inline tag alone, so honouring it costs
+  // no storage access and no config fetch. grantConsent() still overrides:
+  // an explicit banner acceptance is the brand's call to make.
+  if (navigator.globalPrivacyControl === true && inline.respectGlobalPrivacyControl !== false) {
+    status = 'opted-out';
+    return;
+  }
+  if (inline.requireConsent === true) {
+    status = 'awaiting-consent';
+    return;
+  }
+
+  boot();
 }
 
 main();

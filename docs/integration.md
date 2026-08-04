@@ -55,6 +55,49 @@ Note that **visible page text is recorded as-is** — that is what makes a
 replay a replay. If a page renders something that should never be stored,
 mask it with one of the options above.
 
+## Consent
+
+Capture ships no banner of its own — consent is yours to collect, and you
+almost certainly already do. There are two ways to wire it up.
+
+**Simplest: don't load the tag until consent.** Fire it from your consent
+trigger rather than on all pages (see [Google Tag Manager](#google-tag-manager)
+below). Nothing runs, so nothing is stored.
+
+**If the tag loads on every page** and consent arrives later, set
+`requireConsent` and drive it from your consent platform:
+
+```html
+<script>window.CAPTURE_CONFIG = { requireConsent: true };</script>
+<script src="https://capture.example.com/capture.js" data-token="cap_xxx"></script>
+```
+
+The bundle loads but writes **nothing** — no session id, no config cache, no
+recording — until you call:
+
+```js
+window.capture.grantConsent();  // consent given: start recording
+window.capture.optOut();        // refused or withdrawn: stop, erase, stay off
+window.capture.optIn();         // reverse an earlier opt-out
+window.capture.isOptedOut();    // current state, for your banner's UI
+window.capture.status();        // 'awaiting-consent' | 'opted-out' | 'active' | …
+```
+
+`optOut()` stops recording immediately, deletes the session and window ids
+and the cached config, and is remembered on later page loads. Remembering it
+does mean storing one key (`capture_opt_out`); the alternative is asking on
+every page load.
+
+`requireConsent` must be set inline in the page, not in your project's
+server-side config — a remote value would arrive after the storage write it
+exists to prevent.
+
+**Global Privacy Control** (`navigator.globalPrivacyControl`, a
+legally recognised opt-out in several US states) is honoured automatically:
+those visitors are never recorded and nothing is stored for them. Set
+`respectGlobalPrivacyControl: false` to turn that off. An explicit
+`grantConsent()` still wins, on the basis that your banner asked directly.
+
 ## Google Tag Manager
 
 1. In your container: **Tags → New → Custom HTML**.

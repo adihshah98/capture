@@ -105,6 +105,10 @@ Optional config, before the tag (inline values win over the derived ones):
     blockSelector: null,          // CSS selector not recorded at all
     redactUrlParams: [...],       // query/fragment params stripped from URLs
 
+    // Consent (inline only — a remote value arrives too late to gate storage):
+    requireConsent: false,        // touch nothing until grantConsent() is called
+    respectGlobalPrivacyControl: true, // honour navigator.globalPrivacyControl
+
     // Network capture (URLs/method/status/timings by default; false disables):
     network: {
       captureHeaders: false,      // opt-in; sensitive headers always redacted
