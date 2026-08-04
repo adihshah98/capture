@@ -20,16 +20,37 @@
     footer a { color: #0f766e; }
   </style>
   <script>
-    // Override any option via ?config={"sampleRate":0} for experimenting.
-    window.CAPTURE_CONFIG = Object.assign(
-      {
-        triggers: {
-          urls: ['#record$'],
-          onException: true,
+    // Override recording options via ?config={"sampleRate":0} for experimenting.
+    // Value options only — URL-supplied endpoints would make this page an
+    // injection vector on the capture origin.
+    (function () {
+      var TUNABLE = [
+        'sampleRate', 'minDurationMs', 'maxBufferBytes', 'triggers', 'network',
+        'flushIntervalMs', 'maxBatchSize', 'maxBatchBytes', 'idleThresholdMs',
+        'remoteConfig',
+      ];
+      var requested = {};
+      try {
+        requested = JSON.parse(new URLSearchParams(location.search).get('config') || '{}') || {};
+      } catch (err) {
+        console.warn('capture demo: ignoring unparseable ?config=', err);
+      }
+      var overrides = {};
+      TUNABLE.forEach(function (key) {
+        if (Object.prototype.hasOwnProperty.call(requested, key)) {
+          overrides[key] = requested[key];
+        }
+      });
+      window.CAPTURE_CONFIG = Object.assign(
+        {
+          triggers: {
+            urls: ['#record$'],
+            onException: true,
+          },
         },
-      },
-      JSON.parse(new URLSearchParams(location.search).get('config') || '{}')
-    );
+        overrides
+      );
+    })();
   </script>
   <script src="/capture.js"></script>
 </head>

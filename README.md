@@ -113,7 +113,7 @@ Optional config, before the tag (inline values win over the derived ones):
 
 | Component | What it does |
 |---|---|
-| `public/capture.js` (~0.7 KB) | Loader snippet; derives server URL + token from its own tag, lazy-loads the recorder after page idle |
+| `public/capture.js` (~1 KB) | Loader snippet; derives server URL + token from its own tag, lazy-loads the recorder after page idle |
 | `data/projects.json` + `?token=` on ingest/config | Per-brand projects: token-gated ingest, isolated storage, per-project config |
 | `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you |
 | `src/recorder.js` → `recorder.bundle.js` | rrweb `record()` + console plugin, session/window ids, batching, gzip, keepalive flush |

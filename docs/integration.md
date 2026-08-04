@@ -24,7 +24,7 @@ Content-Security-Policy, see [Content-Security-Policy](#content-security-policy-
 
 ## What it costs your page
 
-- The tag is **~0.7 KB** and does nothing until your page has finished
+- The tag is **~1 KB** and does nothing until your page has finished
   loading and the browser is idle; only then does it lazy-load the actual
   recorder. It never competes with your page load or your Core Web Vitals.
 - Recordings are batched, gzipped, and sent in the background every few
