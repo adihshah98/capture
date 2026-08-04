@@ -19,7 +19,8 @@ server-rendered apps alike; single-page navigations are tracked without any
 extra wiring.
 
 If you deploy tags through Google Tag Manager instead of editing HTML, see
-[Google Tag Manager](#google-tag-manager) below. If your site enforces a
+[Google Tag Manager](#google-tag-manager) below. If your store runs on
+Shopify, see [Shopify](#shopify). If your site enforces a
 Content-Security-Policy, see [Content-Security-Policy](#content-security-policy-csp).
 
 ## What it costs your page
@@ -128,6 +129,62 @@ Notes:
   the tag first fires.
 - **CSP still applies.** GTM only changes how the tag is delivered; if
   your site enforces a CSP, the directives below are still required.
+
+## Shopify
+
+Shopify themes can't be edited as plain HTML files, but the integration is
+the same single tag either way. Two routes, in order of preference:
+
+**Route 1 — theme code editor** (starts the recorder earliest):
+
+1. In the Shopify admin: **Online Store → Themes →** your live theme's
+   **⋯ menu → Edit code**.
+2. Open `layout/theme.liquid` and paste the tag just before `</head>`:
+
+   ```html
+   <script src="https://capture.example.com/capture.js" data-token="cap_YOURTOKEN"></script>
+   ```
+
+3. Save. The tag is now on every page of the storefront.
+
+**Route 2 — Custom Liquid block** (no code editor needed; use this if code
+editing is unavailable to your account, or the code editor won't load —
+we've seen it render blank on some stores):
+
+1. **Online Store → Themes → Customize** to open the theme editor.
+2. In the left sidebar, find the **Footer** section group (it renders on
+   every page) and click **Add section** (or **Add block**, depending on
+   theme) **→ Custom liquid**.
+3. Paste the same tag into the block's "Liquid code" field, verify the
+   token matches what you were given, and click **Save**.
+
+   If your admin has **Sidekick** (Shopify's assistant in the editor), you
+   can alternatively paste it this instruction verbatim: *"Add a Custom
+   liquid block to the Footer section group so it renders on every page,
+   containing exactly this code: `<script src="…/capture.js"
+   data-token="cap_…"></script>`"* — then review the block it creates and
+   Save. This is how we validated the integration ourselves.
+
+Both routes cover every storefront page, including cart and search;
+Shopify's checkout pages don't run theme code, so checkout itself is not
+recorded. Coverage is identical between the two — the footer placement just
+starts the recorder a moment later, which makes no practical difference
+since the snippet already waits for page idle.
+
+Notes:
+
+- **The tag lives in the theme.** Switching or republishing a different
+  theme drops it (true of any script tag on Shopify, analytics included) —
+  re-add it after a theme change, and add it to any unpublished theme you
+  preview-test.
+- **The theme editor's preview runs the real theme**, so sessions recorded
+  while you customize the theme may appear in your recordings — they're
+  real recordings of you, not a bug.
+- **Password-protected or trial stores work fine**; the recorder doesn't
+  care how the visitor got in.
+- Verify the same way as any site: open the storefront and check
+  `window.capture.status()` returns `"active"` (see
+  [Verifying the integration](#verifying-the-integration)).
 
 ## Content-Security-Policy (CSP)
 
