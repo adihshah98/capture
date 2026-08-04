@@ -14,9 +14,12 @@ const sessionTitleEl = document.getElementById('session-title');
 const loadProgressEl = document.getElementById('load-progress');
 const windowTabsEl = document.getElementById('window-tabs');
 
+const timelineListEl = document.getElementById('timeline-list');
+
 const tabs = [
   { btn: document.getElementById('tab-console'), list: consoleListEl },
   { btn: document.getElementById('tab-network'), list: networkListEl },
+  { btn: document.getElementById('tab-timeline'), list: timelineListEl },
 ];
 for (const tab of tabs) {
   tab.btn.addEventListener('click', () => {
@@ -182,6 +185,7 @@ async function deleteSession(sessionId, button) {
 
 let consoleRows = [];
 let networkRows = [];
+let timelineRows = [];
 let syncStart = 0; // absolute timestamp of the session's first event
 
 function seekTo(timestamp) {
@@ -263,10 +267,58 @@ function attachTimeSync() {
   syncStart = player.getMetaData().startTime;
   syncList(consoleRows, 0);
   syncList(networkRows, 0);
+  syncList(timelineRows, 0);
   player.addEventListener('ui-update-current-time', ({ payload }) => {
     syncList(consoleRows, payload);
     syncList(networkRows, payload);
+    syncList(timelineRows, payload);
   });
+}
+
+/**
+ * The recorder has always stamped why a session was kept and where it went
+ * idle, and every chunk records the URL it was flushed from — none of it was
+ * ever shown. `navigations` comes from the chunks themselves, because rrweb's
+ * Meta event only fires at snapshots and so misses SPA route changes.
+ */
+function renderTimeline(events, navigations) {
+  const marker = (e) => e.type === 5 && e.data && e.data.tag;
+  const entries = [];
+
+  for (const event of events.filter(marker)) {
+    const tag = event.data.tag;
+    if (tag === 'capture-trigger') {
+      const reason = (event.data.payload && event.data.payload.reason) || 'unknown';
+      entries.push({ t: event.timestamp, kind: 'trigger', css: 'kind-trigger', detail: `kept because: ${reason}` });
+    } else if (tag === 'capture-idle') {
+      entries.push({ t: event.timestamp, kind: 'idle', css: 'kind-idle', detail: 'no interaction — recording paused' });
+    } else if (tag === 'capture-idle-end') {
+      entries.push({ t: event.timestamp, kind: 'resumed', css: 'kind-idle', detail: 'activity resumed' });
+    }
+  }
+  for (const nav of navigations) {
+    entries.push({ t: nav.t, kind: 'page', css: 'kind-page', detail: nav.url });
+  }
+  entries.sort((a, b) => a.t - b.t);
+
+  document.getElementById('timeline-count').textContent = entries.length ? `(${entries.length})` : '';
+  timelineRows = [];
+  timelineListEl.innerHTML = '';
+  if (entries.length === 0) {
+    timelineListEl.innerHTML =
+      '<li class="empty">No triggers, idle gaps or navigations in this recording.</li>';
+    return;
+  }
+  for (const entry of entries) {
+    const li = document.createElement('li');
+    li.className = entry.css;
+    li.innerHTML = `<span class="ts">${new Date(entry.t).toLocaleTimeString()}</span><span class="kind"></span><span class="detail"></span>`;
+    li.querySelector('.kind').textContent = entry.kind;
+    li.querySelector('.detail').textContent = entry.detail;
+    li.addEventListener('click', () => seekTo(entry.t));
+    timelineRows.push({ el: li, t: entry.t });
+    timelineListEl.appendChild(li);
+  }
 }
 
 function renderConsole(events) {
@@ -356,8 +408,10 @@ function resetPlayerPanes() {
   windowTabsEl.innerHTML = '';
   consoleListEl.innerHTML = '';
   networkListEl.innerHTML = '';
+  timelineListEl.innerHTML = '';
   consoleRows = [];
   networkRows = [];
+  timelineRows = [];
   loadProgressEl.textContent = '';
 }
 
@@ -446,6 +500,7 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
   // snapshot) and stream the rest in via addEvent() — playback starts
   // without waiting for the whole session.
   let lastError = null;
+  const navigations = [];
   for (let i = 0; i < chunks.length; i++) {
     let events;
     try {
@@ -453,6 +508,12 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
         `/api/sessions/${sessionId}/chunks/${chunks[i].name}${projectQuery()}`
       );
       events = chunk.events || [];
+      // Each chunk records the URL it was flushed from, so a change between
+      // chunks is a navigation the event stream alone would not show.
+      const previous = navigations.length ? navigations[navigations.length - 1].url : null;
+      if (chunk.url && chunk.url !== previous) {
+        navigations.push({ url: chunk.url, t: events.length ? events[0].timestamp : chunk.received_at });
+      }
     } catch (err) {
       lastError = err; // skip corrupt chunk, same policy as the server
       continue;
@@ -497,6 +558,7 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
   }
   renderConsole(allEvents);
   renderNetwork(allEvents);
+  renderTimeline(allEvents, navigations);
   attachTimeSync();
   attachActivityBar(allEvents);
 

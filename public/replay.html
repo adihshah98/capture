@@ -55,7 +55,13 @@
     #network-list .url { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #network-list .kind { color: #9ca3af; flex-shrink: 0; }
     #network-list .dur { color: #6b7280; flex-shrink: 0; width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
-    #console-list li:not(.empty), #network-list li:not(.empty) { cursor: pointer; }
+    #timeline-list li { display: flex; gap: 10px; padding: 4px 14px; border-bottom: 1px solid #f0f2f5; }
+    #timeline-list .ts { color: #9ca3af; flex-shrink: 0; }
+    #timeline-list .kind { flex-shrink: 0; width: 84px; font-weight: 600; color: #6b7280; }
+    #timeline-list .detail { min-width: 0; overflow-wrap: anywhere; }
+    #timeline-list .kind-trigger .kind, #timeline-list .kind-trigger .detail { color: #0f766e; }
+    #timeline-list .kind-idle .kind, #timeline-list .kind-idle .detail { color: #d97706; }
+    #console-list li:not(.empty), #network-list li:not(.empty), #timeline-list li:not(.empty) { cursor: pointer; }
     #console-list li.future, #network-list li.future { opacity: 0.4; }
     #console-list li.current, #network-list li.current { background: #eef2ff; box-shadow: inset 2px 0 0 #4f46e5; }
     .empty { color: #9ca3af; padding: 12px 14px; font-size: 13px; }
@@ -83,9 +89,11 @@
         <div class="devtools-tabs">
           <button id="tab-console" class="active">Console <span class="count" id="console-count"></span></button>
           <button id="tab-network">Network <span class="count" id="network-count"></span></button>
+          <button id="tab-timeline">Timeline <span class="count" id="timeline-count"></span></button>
         </div>
         <ul id="console-list"><li class="empty">Console output appears here.</li></ul>
         <ul id="network-list" hidden><li class="empty">Network requests appear here.</li></ul>
+        <ul id="timeline-list" hidden><li class="empty">Triggers, idle gaps and navigations appear here.</li></ul>
       </section>
     </main>
   </div>
