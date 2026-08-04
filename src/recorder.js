@@ -254,6 +254,11 @@ function scrubEvent(event) {
           payload: event.data.payload.payload.map((arg) =>
             redactText(arg, config.redactUrlParams)
           ),
+          // Stack frames carry the page URL, so they leak the query string
+          // just as readily as the arguments do.
+          ...(Array.isArray(event.data.payload.trace)
+            ? { trace: event.data.payload.trace.map((f) => redactText(f, config.redactUrlParams)) }
+            : {}),
         },
       },
     };

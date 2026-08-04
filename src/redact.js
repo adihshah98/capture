@@ -57,7 +57,12 @@ export function redactText(text, names = DEFAULT_REDACT_PARAMS) {
   const sensitive = (key) => names.some((needle) => key.toLowerCase().includes(needle));
 
   return text
-    .replace(/https?:\/\/[^\s"'<>\\]+/gi, (url) => redactUrl(url, names))
+    // ) is excluded so a stack frame's closing bracket is not swallowed, and a
+    // trailing :line:column is kept out of the URL so frames stay readable.
+    .replace(/https?:\/\/[^\s"'<>\\)]+/gi, (url) => {
+      const frame = url.match(/^(.*?)(:\d+:\d+)$/);
+      return frame ? redactUrl(frame[1], names) + frame[2] : redactUrl(url, names);
+    })
     // Logging an object gives plain quotes; logging an already-stringified
     // JSON string gives escaped ones. Both shapes occur in real recordings.
     .replace(/\\"([\w$-]+)\\"(\s*:\s*)\\"([^"\\]{8,})\\"/g, (whole, key, sep) =>
@@ -66,8 +71,10 @@ export function redactText(text, names = DEFAULT_REDACT_PARAMS) {
     .replace(/"([\w$-]+)"(\s*:\s*)"([^"]{8,})"/g, (whole, key, sep) =>
       sensitive(key) ? `"${key}"${sep}"${PLACEHOLDER}"` : whole
     )
-    .replace(/\b([\w-]+)=([^\s&"']{8,})/g, (whole, key) =>
-      sensitive(key) ? `${key}=${PLACEHOLDER}` : whole
+    // Skips values already replaced above: re-matching a redacted URL would
+    // swallow whatever trails it, such as a stack frame's :line:column.
+    .replace(/\b([\w-]+)=([^\s&"']{8,})/g, (whole, key, value) =>
+      sensitive(key) && !value.startsWith(PLACEHOLDER) ? `${key}=${PLACEHOLDER}` : whole
     );
 }
 

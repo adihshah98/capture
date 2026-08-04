@@ -66,6 +66,18 @@ test('redacts secrets in logged URLs', () => {
   assert.ok(out.includes('page=2'));
 });
 
+test('redacts the page URL inside a console stack frame', () => {
+  // Exactly the shape rrweb's console plugin stores in payload.trace.
+  const frame = 'HTMLButtonElement.<anonymous> (https://brand.example/p.html?utm_source=x&token=SECRETVALUE1:19:78)';
+  const out = redactText(frame);
+  assert.ok(!out.includes('SECRETVALUE1'), 'the token must not survive');
+  assert.ok(out.includes('token=REDACTED'));
+  // The frame stays useful: function name, other params, line and column.
+  assert.ok(out.includes('HTMLButtonElement.<anonymous>'));
+  assert.ok(out.includes('utm_source=x'));
+  assert.ok(out.endsWith(':19:78)'), `line:column preserved, got ${out}`);
+});
+
 test('redacts a bare key=value pair', () => {
   assert.equal(redactText('using token=abcdef1234567890'), 'using token=REDACTED');
 });
