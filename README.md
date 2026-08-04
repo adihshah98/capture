@@ -100,6 +100,11 @@ Optional config, before the tag (inline values win over the derived ones):
     maxBufferBytes: 2 * 1024 * 1024, // pre-trigger rolling buffer bound
     minDurationMs: 0,             // sessions shorter than this are never sent
 
+    // Privacy (inputs are always masked; these add page text and URLs):
+    maskTextSelector: null,       // CSS selector whose text becomes asterisks
+    blockSelector: null,          // CSS selector not recorded at all
+    redactUrlParams: [...],       // query/fragment params stripped from URLs
+
     // Network capture (URLs/method/status/timings by default; false disables):
     network: {
       captureHeaders: false,      // opt-in; sensitive headers always redacted

@@ -5,6 +5,7 @@
 import { record } from 'rrweb';
 import { getRecordConsolePlugin } from '@rrweb/rrweb-plugin-console-record';
 import { getRecordNetworkPlugin } from './network-plugin.js';
+import { DEFAULT_REDACT_PARAMS, redactUrl } from './redact.js';
 
 const DEFAULTS = {
   endpoint: '/ingest',
@@ -34,6 +35,15 @@ const DEFAULTS = {
   triggers: null,
   minDurationMs: 0, // sessions shorter than this never leave the browser
   maxBufferBytes: 2 * 1024 * 1024, // pre-trigger rolling buffer bound
+
+  // Inputs are always masked. These add page text: a CSS selector whose text
+  // is replaced with asterisks, and one whose elements are not recorded at
+  // all. The .capture-mask / .capture-block classes work without config.
+  maskTextSelector: null,
+  blockSelector: null,
+  // Query/fragment parameter names whose values are stripped from every
+  // recorded URL, page and network alike.
+  redactUrlParams: DEFAULT_REDACT_PARAMS,
 
   // false disables network capture entirely.
   network: {
@@ -171,8 +181,24 @@ function resetBuffer() {
   bufferBytes = 0;
 }
 
+/**
+ * rrweb's Meta event carries the page URL verbatim, and it — not our own
+ * chunk-level copy — is what replay treats as the session's location. It has
+ * to go through the same redaction or the secrets survive in the stream.
+ */
+function scrubEvent(event) {
+  if (event.type === 4 && event.data && event.data.href) {
+    return {
+      ...event,
+      data: { ...event.data, href: redactUrl(event.data.href, config.redactUrlParams) },
+    };
+  }
+  return event;
+}
+
 function pushEvent(event) {
   if (status === 'failed') return;
+  event = scrubEvent(event);
   buffer.push(event);
   bufferBytes += JSON.stringify(event).length;
   if (status === 'active') {
@@ -205,7 +231,7 @@ function payloadFor(events) {
   return JSON.stringify({
     session_id: sessionId,
     window_id: windowId,
-    url: location.href,
+    url: redactUrl(location.href, config.redactUrlParams),
     sent_at: Date.now(),
     events,
   });
@@ -446,6 +472,8 @@ function startRecording() {
     maskAllInputs: true,
     blockClass: 'capture-block',
     maskTextClass: 'capture-mask',
+    ...(config.maskTextSelector ? { maskTextSelector: config.maskTextSelector } : {}),
+    ...(config.blockSelector ? { blockSelector: config.blockSelector } : {}),
 
     sampling: {
       mousemove: 50, // ms between events
@@ -464,6 +492,9 @@ function startRecording() {
         ? []
         : [
             getRecordNetworkPlugin({
+              // Global redaction applies to request URLs too, unless the
+              // network block overrides it explicitly.
+              redactUrlParams: config.redactUrlParams,
               ...config.network,
               ignoreUrls: [
                 // Never capture our own ingest traffic (feedback loop).

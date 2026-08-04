@@ -6,6 +6,8 @@
  * when opted in.
  */
 
+import { DEFAULT_REDACT_PARAMS, redactUrl } from './redact.js';
+
 export const NETWORK_PLUGIN_NAME = 'capture/network@1';
 
 const REDACTED_HEADERS = new Set([
@@ -24,18 +26,8 @@ const DEFAULTS = {
   captureBody: false,
   maxBodyBytes: 64 * 1024,
   captureResources: true,
+  redactUrlParams: DEFAULT_REDACT_PARAMS,
 };
-
-function sanitizeUrl(url) {
-  try {
-    const u = new URL(url, location.href);
-    u.username = '';
-    u.password = '';
-    return u.href;
-  } catch {
-    return String(url);
-  }
-}
 
 function sanitizeHeaders(entries) {
   const out = {};
@@ -62,6 +54,7 @@ function initNetworkObserver(cb, win, options) {
   const opts = Object.assign({}, DEFAULTS, options);
   const ignore = opts.ignoreUrls.map((p) => new RegExp(p));
   const shouldIgnore = (url) => ignore.some((re) => re.test(url));
+  const sanitizeUrl = (url) => redactUrl(url, opts.redactUrlParams);
   const cleanups = [];
 
   const originalFetch = win.fetch;

@@ -38,9 +38,22 @@ Content-Security-Policy, see [Content-Security-Policy](#content-security-policy-
   box), add `class="capture-block"`.
 - To keep an element's layout but mask its text content, add
   `class="capture-mask"`.
+- When you can't edit the markup — a CMS, a third-party widget — ask us to
+  set `maskTextSelector` or `blockSelector` for your project instead. They
+  take any CSS selector and need no page changes.
+- **Secrets in URLs are stripped before anything is stored.** Parameter
+  values whose names look sensitive (`token`, `password`, `secret`, `auth`,
+  `api_key`, `session`, `code`, `email`, `phone`, and similar) are replaced
+  with `REDACTED` in every recorded URL — the page address and every network
+  request alike, query string and OAuth fragment both. So a password-reset
+  or magic link is safe to record; the rest of the URL is kept intact.
 - Network capture records URLs, methods, status codes, and timings only.
   Request/response headers and bodies are not captured, and sensitive
   headers (authorization, cookies) are always redacted.
+
+Note that **visible page text is recorded as-is** — that is what makes a
+replay a replay. If a page renders something that should never be stored,
+mask it with one of the options above.
 
 ## Google Tag Manager
 
