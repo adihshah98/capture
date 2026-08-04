@@ -110,6 +110,7 @@ Optional config, before the tag (inline values win over the derived ones):
     maskTextSelector: null,       // CSS selector whose text becomes asterisks
     blockSelector: null,          // CSS selector not recorded at all
     redactUrlParams: [...],       // query/fragment params stripped from URLs
+    redactConsole: true,          // scrub secrets out of captured console args
 
     // Consent (inline only — a remote value arrives too late to gate storage):
     requireConsent: false,        // touch nothing until grantConsent() is called

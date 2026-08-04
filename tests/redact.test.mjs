@@ -33,6 +33,64 @@ test('never throws on malformed input', () => {
   }
 });
 
+// --- console text -----------------------------------------------------------
+
+const { redactText } = await import('../src/redact.js');
+
+test('redacts the analytics token shape found in real recordings', () => {
+  // Copied from a stored chunk: an analytics payload logged to the console.
+  const logged =
+    '{"percent":25,"lp_variant":"lp_home","page":"homepage","device_type":"desktop",' +
+    '"distinct_id":"$device:410940fb-283b-40f8-bc32-b3618af11fef",' +
+    '"token":"0cdb79cbfd3d47721c52bcfc653c162c","time":1785741807}';
+  const out = redactText(logged);
+  assert.ok(!out.includes('0cdb79cbfd3d47721c52bcfc653c162c'), 'the token must not survive');
+  assert.ok(out.includes('"token":"REDACTED"'));
+  // Everything else is what makes the log worth keeping.
+  assert.ok(out.includes('"percent":25'));
+  assert.ok(out.includes('"page":"homepage"'));
+});
+
+test('redacts the escaped-quote form rrweb produces for stringified JSON', () => {
+  // console.log(JSON.stringify(obj)) — rrweb escapes the inner quotes.
+  const logged = '"{\\"percent\\":25,\\"token\\":\\"0cdb79cbfd3d47721c52bcfc653c162c\\"}"';
+  const out = redactText(logged);
+  assert.ok(!out.includes('0cdb79cbfd3d47721c52bcfc653c162c'));
+  assert.ok(out.includes('\\"token\\":\\"REDACTED\\"'));
+  assert.ok(out.includes('\\"percent\\":25'));
+});
+
+test('redacts secrets in logged URLs', () => {
+  const out = redactText('fetching https://api.example.com/v1?api_key=abcdef123456&page=2 now');
+  assert.ok(!out.includes('abcdef123456'));
+  assert.ok(out.includes('page=2'));
+});
+
+test('redacts a bare key=value pair', () => {
+  assert.equal(redactText('using token=abcdef1234567890'), 'using token=REDACTED');
+});
+
+test('leaves ordinary log lines untouched', () => {
+  for (const line of [
+    'user clicked the checkout button',
+    '{"code":200,"ok":true}',
+    '{"count":42,"page":"home"}',
+    'GET /api/orders 200 in 34ms',
+  ]) {
+    assert.equal(redactText(line), line);
+  }
+});
+
+test('does not redact short values that are unlikely to be secrets', () => {
+  assert.equal(redactText('{"code":"200"}'), '{"code":"200"}');
+});
+
+test('is safe on non-string input', () => {
+  for (const value of [null, undefined, 42, {}]) {
+    assert.doesNotThrow(() => redactText(value));
+  }
+});
+
 test('honours a caller-supplied parameter list', () => {
   assert.equal(
     redactUrl('https://brand.example/a?custom=v&token=t', ['custom']),

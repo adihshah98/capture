@@ -44,6 +44,33 @@ function redactPairs(query, names) {
   return hit ? params.toString() : null;
 }
 
+/**
+ * Free text — console arguments, which are recorded verbatim. A site that
+ * logs an analytics or auth payload otherwise stores the secret in the
+ * recording. Scrubs URLs by the same rules, plus JSON-ish `"key": "value"`
+ * and bare `key=value` pairs whose key looks sensitive. Values under 8
+ * characters are left alone: they are rarely credentials, and redacting
+ * `"code": 200` would cost more in readability than it buys.
+ */
+export function redactText(text, names = DEFAULT_REDACT_PARAMS) {
+  if (typeof text !== 'string' || !text) return text;
+  const sensitive = (key) => names.some((needle) => key.toLowerCase().includes(needle));
+
+  return text
+    .replace(/https?:\/\/[^\s"'<>\\]+/gi, (url) => redactUrl(url, names))
+    // Logging an object gives plain quotes; logging an already-stringified
+    // JSON string gives escaped ones. Both shapes occur in real recordings.
+    .replace(/\\"([\w$-]+)\\"(\s*:\s*)\\"([^"\\]{8,})\\"/g, (whole, key, sep) =>
+      sensitive(key) ? `\\"${key}\\"${sep}\\"${PLACEHOLDER}\\"` : whole
+    )
+    .replace(/"([\w$-]+)"(\s*:\s*)"([^"]{8,})"/g, (whole, key, sep) =>
+      sensitive(key) ? `"${key}"${sep}"${PLACEHOLDER}"` : whole
+    )
+    .replace(/\b([\w-]+)=([^\s&"']{8,})/g, (whole, key) =>
+      sensitive(key) ? `${key}=${PLACEHOLDER}` : whole
+    );
+}
+
 export function redactUrl(url, names = DEFAULT_REDACT_PARAMS) {
   try {
     const parsed = new URL(url, location.href);
