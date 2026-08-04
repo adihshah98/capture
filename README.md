@@ -179,7 +179,6 @@ Optional config, before the tag (inline values win over the derived ones):
   server never assembles a whole session in memory, and long sessions start
   playing immediately. Chunks are immutable, so they're served with
   `max-age=86400` and scrubbing re-visits hit the browser cache.
-  (`GET /api/sessions/:id/events` remains for one-shot exports.)
 - **Console capture** — `@rrweb/rrweb-plugin-console-record` embeds console
   log/info/warn/error into the event stream (type 6 plugin events); the replay UI
   renders them in a panel under the player.

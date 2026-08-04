@@ -27,8 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 @asynccontextmanager
 async def lifespan(_app):
-    """Startup banner and the retention sweep. The bodies below run at
-    startup, so they may reference module state defined further down."""
+    """Runs at startup, so it may reference module state defined further down."""
     if REPLAY_AUTH_DISABLED:
         print(
             "warning: REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
@@ -56,9 +55,9 @@ async def lifespan(_app):
 
 app = FastAPI(title="capture", lifespan=lifespan)
 
-# The snippet runs on other people's pages, so ingest/config/bundles must be
-# reachable cross-origin. A wildcard origin is safe here: the read side is
-# gated by REPLAY_PASSWORD, which cross-origin callers can't present.
+# The snippet runs on other people's pages, so the write side must be reachable
+# cross-origin. Safe because the read side is gated by REPLAY_PASSWORD, which
+# wildcard CORS cannot carry, and DELETE is absent from the method list.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -69,12 +68,10 @@ app.add_middleware(
 
 @app.middleware("http")
 async def replay_auth(request: Request, call_next):
-    """The write side (/ingest, /config, bundles) stays open — the snippet
-    runs on other people's pages. The read side (replay UI + /api) exposes
-    recordings, so it requires REPLAY_PASSWORD: with none set it refuses to
-    serve rather than falling open."""
-    # Normalized so /Api/, //replay.html and friends can't slip past the check
-    # on filesystems StaticFiles will still serve them from.
+    """The read side requires REPLAY_PASSWORD; with none set it refuses to
+    serve rather than falling open. The write side stays open for the snippet."""
+    # Normalized so /Api/ and //replay.html can't slip past a check that
+    # StaticFiles would still serve them from.
     path = re.sub(r"/+", "/", request.url.path).lower()
     protected = path.startswith("/api/") or path == "/replay.html"
     if protected and not REPLAY_AUTH_DISABLED:
@@ -102,10 +99,8 @@ async def replay_auth(request: Request, call_next):
 
 @app.middleware("http")
 async def revalidate_static(request: Request, call_next):
-    """Browsers heuristically cache static assets with no Cache-Control, so
-    pages would keep running stale bundles/markup after a deploy. no-cache
-    forces a revalidation (cheap 304 when unchanged) on every load. Endpoints
-    that set their own Cache-Control (immutable chunks) are left alone."""
+    """Without this, browsers heuristically cache bundles and keep running
+    stale code after a deploy. Endpoints setting their own header are left."""
     response = await call_next(request)
     is_static = request.url.path.endswith((".js", ".css", ".html")) or request.url.path == "/"
     if is_static and "cache-control" not in response.headers:
@@ -113,21 +108,18 @@ async def revalidate_static(request: Request, call_next):
     return response
 
 BASE_DIR = Path(__file__).resolve().parent
-# Everything stored lives under here. Overridable so a test run — or a second
-# instance — never writes into the working copy's recordings.
+# Overridable so a test run never writes into the working copy's recordings.
 DATA_ROOT = Path(os.environ.get("CAPTURE_DATA_DIR") or BASE_DIR / "data")
 DATA_DIR = DATA_ROOT / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Project registry: token -> {"name": ...}, managed by `python server.py
-# add-project <name>`. No projects configured = single-tenant mode: tokens
+# Token -> {"name": ...}. No projects configured = single-tenant mode: tokens
 # are ignored and everything lands in data/sessions.
 PROJECTS_PATH = DATA_ROOT / "projects.json"
 PROJECTS_DIR = DATA_ROOT / "projects"
 
-# Password for the replay UI + read API (HTTP Basic, any username). Unset
-# means the read side is refused entirely; REPLAY_AUTH_DISABLED=1 opts out
-# for local development.
+# HTTP Basic, any username. Unset refuses the read side entirely;
+# REPLAY_AUTH_DISABLED=1 opts out for local development.
 REPLAY_PASSWORD = os.environ.get("REPLAY_PASSWORD", "")
 REPLAY_AUTH_DISABLED = os.environ.get("REPLAY_AUTH_DISABLED") == "1"
 
@@ -176,8 +168,8 @@ def chunk_window(path) -> Optional[str]:
     parts = path.name.rsplit(".", 1)[0].split("-")
     return parts[1] if len(parts) == 3 else None
 MAX_BODY_BYTES = 50 * 1024 * 1024
-# Bounding the compressed body alone is not enough: a well-formed 50 MB gzip
-# expands to gigabytes. A real batch is ~1 MB of JSON, so this is generous.
+# Bounding the compressed body alone is not enough: a 50 MB gzip expands to
+# gigabytes. A real batch is ~1 MB of JSON.
 MAX_DECOMPRESSED_BYTES = int(os.environ.get("MAX_DECOMPRESSED_BYTES", 32 * 1024 * 1024))
 
 # Ingest tokens are public by design, so without a ceiling one script can fill
@@ -198,14 +190,18 @@ def gunzip(body: bytes, limit: int) -> bytes:
     return raw
 
 
-# Pool sizes are scanned once, then tracked as chunks are written — walking
-# every chunk on each ingest would cost more than the write itself.
+def dir_bytes(path: Path) -> int:
+    return sum(f.stat().st_size for f in path.rglob("*.json") if f.is_file())
+
+
+# Scanned once, then tracked as chunks are written — walking every chunk on
+# each ingest would cost more than the write itself.
 _pool_bytes: dict = {}
 
 
 def pool_bytes(pool: Path) -> int:
     if pool not in _pool_bytes:
-        _pool_bytes[pool] = sum(f.stat().st_size for f in pool.rglob("*.json") if f.is_file())
+        _pool_bytes[pool] = dir_bytes(pool)
     return _pool_bytes[pool]
 
 # Global remote recording config; editing it changes recording behavior
@@ -213,8 +209,31 @@ def pool_bytes(pool: Path) -> int:
 CONFIG_PATH = DATA_ROOT / "config.json"
 
 
-def error(status: int, message: str) -> JSONResponse:
-    return JSONResponse({"error": message}, status_code=status)
+class ApiError(Exception):
+    def __init__(self, status: int, message: str):
+        self.status = status
+        self.message = message
+
+
+@app.exception_handler(ApiError)
+async def api_error_response(_request, exc: ApiError) -> JSONResponse:
+    return JSONResponse({"error": exc.message}, status_code=exc.status)
+
+
+def resolve_pool(project: Optional[str]) -> Path:
+    pool = read_pool(project)
+    if pool is None:
+        raise ApiError(404, "unknown project")
+    return pool
+
+
+def resolve_session(session_id: str, project: Optional[str]) -> Path:
+    if not SAFE_ID.match(session_id):
+        raise ApiError(400, "invalid session_id")
+    path = resolve_pool(project) / session_id
+    if not path.is_dir():
+        raise ApiError(404, "not found")
+    return path
 
 
 @app.post("/ingest")
@@ -225,47 +244,46 @@ async def ingest(
     token: Optional[str] = Query(None),
 ):
     if not SAFE_ID.match(session_id):
-        return error(400, "invalid session_id")
+        raise ApiError(400, "invalid session_id")
 
     pool = resolve_sessions_dir(token, load_projects())
     if pool is None:
-        return error(401, "unknown project token")
+        raise ApiError(401, "unknown project token")
 
-    # Checked before the body is read so an abusive client is cheap to reject.
-    # 507 is retryable (our problem, may clear); 429 tells the recorder to drop
-    # the batch rather than retry into a quota that only retention will free.
+    # Before the body is read, so an abusive client is cheap to reject. The
+    # recorder retries 5xx and drops the batch on 4xx, which is what each means.
     if MIN_FREE_DISK_BYTES and shutil.disk_usage(DATA_ROOT).free < MIN_FREE_DISK_BYTES:
-        return error(507, "server storage full")
+        raise ApiError(507, "server storage full")
     if MAX_PROJECT_BYTES:
         # Cached after the first request; only the initial scan leaves the loop.
         used = _pool_bytes.get(pool)
         if used is None:
             used = await asyncio.to_thread(pool_bytes, pool)
         if used >= MAX_PROJECT_BYTES:
-            return error(429, "project storage quota reached")
+            raise ApiError(429, "project storage quota reached")
 
     body = await request.body()
     if len(body) > MAX_BODY_BYTES:
-        return error(413, "payload too large")
+        raise ApiError(413, "payload too large")
 
     try:
         raw = gunzip(body, MAX_DECOMPRESSED_BYTES) if compression == "gzip-js" else body
         payload = json.loads(raw)
     except Exception:
-        return error(400, "bad payload")
+        raise ApiError(400, "bad payload")
 
     if not isinstance(payload, dict):
-        return error(400, "bad payload")
+        raise ApiError(400, "bad payload")
 
     events = payload.get("events")
     if not isinstance(events, list) or not events:
-        return error(400, "no events")
+        raise ApiError(400, "no events")
 
     session_dir = pool / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    # Timestamp prefix keeps chunks ordered; the window-id prefix lets the
-    # manifest group chunks per tab without opening any chunk file.
+    # Timestamp orders chunks; the window prefix lets the manifest group them
+    # per tab without opening a single file.
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     window_prefix = re.sub(r"[^a-f0-9]", "", str(payload.get("window_id") or ""))[:8]
     parts = [str(int(time.time() * 1000)), window_prefix, suffix]
@@ -287,9 +305,8 @@ async def ingest(
 
 @app.get("/healthz")
 def healthz():
-    """What a deploy can actually break, rather than whether a port is open:
-    storage that can't be written, bundles that were never built, a read side
-    left unprotected. Booleans only — this is unauthenticated."""
+    """What a deploy can break, rather than whether a port is open. Booleans
+    only: this is unauthenticated."""
     checks = {}
 
     try:
@@ -313,8 +330,7 @@ def healthz():
     )
     checks["replay_auth_enabled"] = bool(REPLAY_PASSWORD) and not REPLAY_AUTH_DISABLED
 
-    # Auth being off is a deliberate local-dev choice, so it is reported but
-    # does not fail the check.
+    # Auth off is a deliberate local-dev choice: reported, but not a failure.
     healthy = all(v for k, v in checks.items() if k != "replay_auth_enabled")
     return JSONResponse(
         {"status": "ok" if healthy else "degraded", "checks": checks},
@@ -379,9 +395,7 @@ def list_projects():
 
 @app.get("/api/sessions")
 def list_sessions(project: Optional[str] = Query(None)):
-    pool = read_pool(project)
-    if pool is None:
-        return error(404, "unknown project")
+    pool = resolve_pool(project)
     sessions = []
     for entry in pool.iterdir() if pool.is_dir() else []:
         if not entry.is_dir():
@@ -404,22 +418,12 @@ def list_sessions(project: Optional[str] = Query(None)):
 
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str, project: Optional[str] = Query(None)):
-    """Erase one session. Irreversible, and until now retention was the only
-    way anything left disk — which is not an answer to an erasure request.
-    Sits behind REPLAY_PASSWORD with the rest of /api, and DELETE is absent
-    from the CORS allowlist so no other origin can reach it."""
-    if not SAFE_ID.match(session_id):
-        return error(400, "invalid session_id")
-    pool = read_pool(project)
-    if pool is None:
-        return error(404, "unknown project")
-    session_dir = pool / session_id
-    if not session_dir.is_dir():
-        return error(404, "not found")
-
-    freed = sum(f.stat().st_size for f in session_dir.rglob("*.json") if f.is_file())
+    """Irreversible. DELETE is absent from the CORS allowlist, so only the
+    replay UI's own origin can reach it."""
+    session_dir = resolve_session(session_id, project)
+    freed = dir_bytes(session_dir)
     shutil.rmtree(session_dir, ignore_errors=True)
-    _pool_bytes.pop(pool, None)  # rescan; the freed bytes belong back in the quota
+    _pool_bytes.pop(session_dir.parent, None)  # freed bytes belong back in the quota
     print(f"deleted session {session_id} ({freed} bytes)")
     return {"status": "deleted", "session_id": session_id, "bytes_freed": freed}
 
@@ -427,86 +431,37 @@ def delete_session(session_id: str, project: Optional[str] = Query(None)):
 @app.get("/api/sessions/{session_id}/chunks")
 def session_chunks(session_id: str, project: Optional[str] = Query(None)):
     """Ordered chunk manifest; the player fetches chunks one by one."""
-    if not SAFE_ID.match(session_id):
-        return error(400, "invalid session_id")
-    pool = read_pool(project)
-    if pool is None:
-        return error(404, "unknown project")
-    session_dir = pool / session_id
-    if not session_dir.is_dir():
-        return error(404, "not found")
-
-    chunks = sorted(session_dir.glob("*.json"), key=chunk_timestamp)
+    chunks = sorted(resolve_session(session_id, project).glob("*.json"), key=chunk_timestamp)
     url = None
     if chunks:  # only the first chunk is opened; the rest stay on disk
         try:
             url = json.loads(chunks[0].read_text()).get("url")
         except Exception:
             pass
-    windows = []  # ordered by first appearance; None = pre-window chunks
-    for c in chunks:
-        w = chunk_window(c)
-        if w not in windows:
-            windows.append(w)
-    return {
-        "session_id": session_id,
-        "url": url,
-        "windows": windows,
-        "chunks": [
-            {
-                "name": c.name,
-                "timestamp": chunk_timestamp(c),
-                "bytes": c.stat().st_size,
-                "window": chunk_window(c),
-            }
-            for c in chunks
-        ],
-    }
+    manifest = [
+        {
+            "name": c.name,
+            "timestamp": chunk_timestamp(c),
+            "bytes": c.stat().st_size,
+            "window": chunk_window(c),
+        }
+        for c in chunks
+    ]
+    windows = list(dict.fromkeys(c["window"] for c in manifest))  # by first appearance
+    return {"session_id": session_id, "url": url, "windows": windows, "chunks": manifest}
 
 
 @app.get("/api/sessions/{session_id}/chunks/{chunk_name}")
 def session_chunk(session_id: str, chunk_name: str, project: Optional[str] = Query(None)):
     if not SAFE_ID.match(session_id) or not SAFE_CHUNK.match(chunk_name):
-        return error(400, "invalid id")
-    pool = read_pool(project)
-    if pool is None:
-        return error(404, "unknown project")
-    path = pool / session_id / chunk_name
+        raise ApiError(400, "invalid id")
+    path = resolve_pool(project) / session_id / chunk_name
     if not path.is_file():
-        return error(404, "not found")
-    # Chunks are immutable, so the browser may cache them for scrubbing
-    # re-visits.
+        raise ApiError(404, "not found")
+    # Immutable, so the browser may cache them across scrubbing re-visits.
     return FileResponse(
         path, media_type="application/json", headers={"Cache-Control": "max-age=86400"}
     )
-
-
-@app.get("/api/sessions/{session_id}/events")
-def session_events(session_id: str, project: Optional[str] = Query(None)):
-    if not SAFE_ID.match(session_id):
-        return error(400, "invalid session_id")
-    pool = read_pool(project)
-    if pool is None:
-        return error(404, "unknown project")
-    session_dir = pool / session_id
-    if not session_dir.is_dir():
-        return error(404, "not found")
-
-    events = []
-    url = None
-    for chunk in sorted(session_dir.glob("*.json"), key=chunk_timestamp):
-        try:
-            parsed = json.loads(chunk.read_text())
-        except Exception:
-            continue  # skip corrupt chunks rather than failing the session
-        if url is None and parsed.get("url"):
-            url = parsed["url"]
-        chunk_events = parsed.get("events")
-        if isinstance(chunk_events, list):
-            events.extend(chunk_events)
-    events.sort(key=lambda e: e.get("timestamp", 0))
-
-    return {"session_id": session_id, "url": url, "count": len(events), "events": events}
 
 
 def sweep_expired_sessions() -> int:
@@ -538,20 +493,16 @@ PUBLIC_URL_FILE = DATA_ROOT / "public_url"
 
 
 def public_base_url() -> str:
-    """Where brands reach this server. The env var covers the running service;
-    the file covers CLI runs, which don't load the systemd environment. Written
-    by setup.sh, so onboarding prints a tag that can be pasted as-is."""
-    for value in (os.environ.get("CAPTURE_PUBLIC_URL"), _read_public_url_file()):
+    """The env var covers the running service; the file covers CLI runs, which
+    don't load the systemd environment."""
+    try:
+        from_file = PUBLIC_URL_FILE.read_text()
+    except Exception:
+        from_file = ""
+    for value in (os.environ.get("CAPTURE_PUBLIC_URL"), from_file):
         if value:
             return value.strip().rstrip("/")
     return "https://capture.example.com"
-
-
-def _read_public_url_file() -> str:
-    try:
-        return PUBLIC_URL_FILE.read_text()
-    except Exception:
-        return ""
 
 
 def add_project(name: str) -> None:
@@ -580,9 +531,7 @@ def add_project(name: str) -> None:
 def pool_usage(pool: Path) -> tuple:
     if not pool.is_dir():
         return 0, 0
-    sessions = [d for d in pool.iterdir() if d.is_dir()]
-    used = sum(f.stat().st_size for f in pool.rglob("*.json") if f.is_file())
-    return len(sessions), used
+    return sum(1 for d in pool.iterdir() if d.is_dir()), dir_bytes(pool)
 
 
 def list_projects_cli() -> None:

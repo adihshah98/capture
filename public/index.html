@@ -84,11 +84,13 @@
     document.getElementById('throw-error').addEventListener('click', () => {
       console.error('simulated error: payment failed', { code: 'DEMO_42' });
     });
+    // Unauthenticated paths on purpose: /api/* answers 401 with
+    // WWW-Authenticate, which would pop a credential prompt on this page.
     document.getElementById('fetch-ok').addEventListener('click', () => {
-      fetch('/api/sessions').then((r) => console.log('fetch ok:', r.status));
+      fetch('/config').then((r) => console.log('fetch ok:', r.status));
     });
     document.getElementById('fetch-404').addEventListener('click', () => {
-      fetch('/api/sessions/does-not-exist/events').then((r) => console.log('fetch 404:', r.status));
+      fetch('/does-not-exist.json').then((r) => console.log('fetch 404:', r.status));
     });
     function alertBanner(text) {
       const el = document.createElement('div');

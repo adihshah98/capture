@@ -1,31 +1,14 @@
 /**
- * URL redaction, shared by the recorder (page URLs) and the network plugin
- * (request URLs). Credentials routinely ride in query strings — password
- * reset links, magic links, OAuth codes — and a recording is a durable copy
- * of whatever it captured, so they are stripped before anything is stored.
+ * Redaction shared by the recorder and the network plugin. A recording is a
+ * durable copy of whatever it captured, and credentials ride in query strings
+ * and console payloads, so they are stripped before anything is stored.
  */
 
-// Matched as substrings of the parameter name, so `token` also catches
-// `access_token` and `csrfToken`. Over-matching only costs debugging detail;
-// under-matching stores a live credential.
+// Matched as substrings, so `token` also catches `access_token` and
+// `csrfToken`. Over-matching costs detail; under-matching stores a credential.
 export const DEFAULT_REDACT_PARAMS = [
-  'token',
-  'password',
-  'passwd',
-  'pwd',
-  'secret',
-  'auth',
-  'apikey',
-  'api_key',
-  'session',
-  'signature',
-  'credential',
-  'jwt',
-  'bearer',
-  'otp',
-  'code',
-  'email',
-  'phone',
+  'token', 'password', 'passwd', 'pwd', 'secret', 'auth', 'apikey', 'api_key',
+  'session', 'signature', 'credential', 'jwt', 'bearer', 'otp', 'code', 'email', 'phone',
 ];
 
 const PLACEHOLDER = 'REDACTED';
@@ -45,26 +28,22 @@ function redactPairs(query, names) {
 }
 
 /**
- * Free text — console arguments, which are recorded verbatim. A site that
- * logs an analytics or auth payload otherwise stores the secret in the
- * recording. Scrubs URLs by the same rules, plus JSON-ish `"key": "value"`
- * and bare `key=value` pairs whose key looks sensitive. Values under 8
- * characters are left alone: they are rarely credentials, and redacting
- * `"code": 200` would cost more in readability than it buys.
+ * Free text, i.e. console arguments. Values under 8 characters are left
+ * alone: rarely credentials, and redacting `"code": 200` costs more than it
+ * buys.
  */
 export function redactText(text, names = DEFAULT_REDACT_PARAMS) {
   if (typeof text !== 'string' || !text) return text;
   const sensitive = (key) => names.some((needle) => key.toLowerCase().includes(needle));
 
   return text
-    // ) is excluded so a stack frame's closing bracket is not swallowed, and a
-    // trailing :line:column is kept out of the URL so frames stay readable.
+    // ) excluded so a stack frame's bracket survives; :line:column split off
+    // so frames stay readable.
     .replace(/https?:\/\/[^\s"'<>\\)]+/gi, (url) => {
       const frame = url.match(/^(.*?)(:\d+:\d+)$/);
       return frame ? redactUrl(frame[1], names) + frame[2] : redactUrl(url, names);
     })
-    // Logging an object gives plain quotes; logging an already-stringified
-    // JSON string gives escaped ones. Both shapes occur in real recordings.
+    // Logging an object gives plain quotes, a stringified one escaped quotes.
     .replace(/\\"([\w$-]+)\\"(\s*:\s*)\\"([^"\\]{8,})\\"/g, (whole, key, sep) =>
       sensitive(key) ? `\\"${key}\\"${sep}\\"${PLACEHOLDER}\\"` : whole
     )

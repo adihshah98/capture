@@ -281,6 +281,28 @@ function attachTimeSync() {
  * ever shown. `navigations` comes from the chunks themselves, because rrweb's
  * Meta event only fires at snapshots and so misses SPA route changes.
  */
+/**
+ * The three devtools panels differ only in what they derive and how a row
+ * looks; the badge, empty state, click-to-seek and row registry are shared.
+ * Items must carry `t` — the timestamp the playhead syncs and seeks to.
+ */
+function renderPanel(listEl, countId, items, emptyText, buildRow) {
+  document.getElementById(countId).textContent = items.length ? `(${items.length})` : '';
+  listEl.innerHTML = '';
+  if (items.length === 0) {
+    listEl.innerHTML = `<li class="empty">${emptyText}</li>`;
+    return [];
+  }
+  const rows = [];
+  for (const item of items) {
+    const li = buildRow(item);
+    li.addEventListener('click', () => seekTo(item.t));
+    rows.push({ el: li, t: item.t });
+    listEl.appendChild(li);
+  }
+  return rows;
+}
+
 function renderTimeline(events, navigations) {
   const marker = (e) => e.type === 5 && e.data && e.data.tag;
   const entries = [];
@@ -301,39 +323,22 @@ function renderTimeline(events, navigations) {
   }
   entries.sort((a, b) => a.t - b.t);
 
-  document.getElementById('timeline-count').textContent = entries.length ? `(${entries.length})` : '';
-  timelineRows = [];
-  timelineListEl.innerHTML = '';
-  if (entries.length === 0) {
-    timelineListEl.innerHTML =
-      '<li class="empty">No triggers, idle gaps or navigations in this recording.</li>';
-    return;
-  }
-  for (const entry of entries) {
+  timelineRows = renderPanel(timelineListEl, 'timeline-count', entries, 'No triggers, idle gaps or navigations in this recording.', (entry) => {
     const li = document.createElement('li');
     li.className = entry.css;
     li.innerHTML = `<span class="ts">${new Date(entry.t).toLocaleTimeString()}</span><span class="kind"></span><span class="detail"></span>`;
     li.querySelector('.kind').textContent = entry.kind;
     li.querySelector('.detail').textContent = entry.detail;
-    li.addEventListener('click', () => seekTo(entry.t));
-    timelineRows.push({ el: li, t: entry.t });
-    timelineListEl.appendChild(li);
-  }
+    return li;
+  });
 }
 
 function renderConsole(events) {
   const logs = events
     .filter((e) => e.type === 6 && e.data && e.data.plugin === 'rrweb/console@1')
-    .map((e) => ({ timestamp: e.timestamp, ...e.data.payload }));
+    .map((e) => ({ t: e.timestamp, ...e.data.payload }));
 
-  document.getElementById('console-count').textContent = logs.length ? `(${logs.length})` : '';
-  consoleRows = [];
-  consoleListEl.innerHTML = '';
-  if (logs.length === 0) {
-    consoleListEl.innerHTML = '<li class="empty">No console output captured.</li>';
-    return;
-  }
-  for (const log of logs) {
+  consoleRows = renderPanel(consoleListEl, 'console-count', logs, 'No console output captured.', (log) => {
     const li = document.createElement('li');
     li.className = `level-${log.level}`;
     const args = (log.payload || [])
@@ -345,35 +350,23 @@ function renderConsole(events) {
         }
       })
       .join(' ');
-    li.innerHTML = `<span class="ts">${new Date(log.timestamp).toLocaleTimeString()}</span><span class="lvl">${log.level}</span><span class="msg"></span>`;
+    li.innerHTML = `<span class="ts">${new Date(log.t).toLocaleTimeString()}</span><span class="lvl">${log.level}</span><span class="msg"></span>`;
     li.querySelector('.msg').textContent = args;
-    li.addEventListener('click', () => seekTo(log.timestamp));
-    consoleRows.push({ el: li, t: log.timestamp });
-    consoleListEl.appendChild(li);
-  }
+    return li;
+  });
 }
 
 function renderNetwork(events) {
   const t0 = events.length ? events[0].timestamp : 0;
   const requests = events
     .filter((e) => e.type === 6 && e.data && e.data.plugin === 'capture/network@1')
-    .map((e) => ({ ...e.data.payload, startMs: e.data.payload.startMs || e.timestamp }))
-    .sort((a, b) => a.startMs - b.startMs);
+    .map((e) => ({ ...e.data.payload, t: e.data.payload.startMs || e.timestamp }))
+    .sort((a, b) => a.t - b.t);
 
-  document.getElementById('network-count').textContent = requests.length
-    ? `(${requests.length})`
-    : '';
-  networkRows = [];
-  networkListEl.innerHTML = '';
-  if (requests.length === 0) {
-    networkListEl.innerHTML = '<li class="empty">No network requests captured.</li>';
-    return;
-  }
-  for (const req of requests) {
+  networkRows = renderPanel(networkListEl, 'network-count', requests, 'No network requests captured.', (req) => {
     const li = document.createElement('li');
-    const failed = req.status === 0 || req.status >= 400;
-    if (failed) li.className = 'net-error';
-    const rel = Math.max(0, (req.startMs || t0) - t0) / 1000;
+    if (req.status === 0 || req.status >= 400) li.className = 'net-error';
+    const rel = Math.max(0, req.t - t0) / 1000;
     li.innerHTML = `
       <span class="ts"></span>
       <span class="method"></span>
@@ -391,10 +384,8 @@ function renderNetwork(events) {
     li.querySelector('.kind').textContent = req.type === 'resource' ? req.initiatorType : req.type;
     li.querySelector('.dur').textContent =
       req.durationMs != null ? `${req.durationMs} ms` : '';
-    li.addEventListener('click', () => seekTo(req.startMs));
-    networkRows.push({ el: li, t: req.startMs });
-    networkListEl.appendChild(li);
-  }
+    return li;
+  });
 }
 
 // Guards the async chunk loop: bumped whenever the user picks a session,

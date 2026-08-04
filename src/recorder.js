@@ -110,35 +110,31 @@ const SESSION_STORAGE_KEY = 'capture_session';
 const WINDOW_STORAGE_KEY = 'capture_window_id';
 const OPT_OUT_KEY = 'capture_opt_out';
 
-function isOptedOut() {
+/** Storage can throw outright when blocked, and that must never stop a page. */
+function tryStorage(fn, fallback = null) {
   try {
-    return localStorage.getItem(OPT_OUT_KEY) === '1';
+    return fn();
   } catch {
-    return false; // storage blocked entirely — nothing was stored either
+    return fallback;
   }
 }
 
-/** Persisting the refusal is itself a write, but the alternative is asking
- *  again on every page load. Documented in the integration guide. */
-function setOptedOut(value) {
-  try {
-    if (value) localStorage.setItem(OPT_OUT_KEY, '1');
-    else localStorage.removeItem(OPT_OUT_KEY);
-  } catch {
-    /* storage unavailable */
-  }
-}
+const isOptedOut = () => tryStorage(() => localStorage.getItem(OPT_OUT_KEY) === '1', false);
+
+/** Persisting the refusal is itself a write; the alternative is asking again
+ *  on every page load. Documented in the integration guide. */
+const setOptedOut = (value) =>
+  tryStorage(() =>
+    value ? localStorage.setItem(OPT_OUT_KEY, '1') : localStorage.removeItem(OPT_OUT_KEY)
+  );
 
 /** Drop everything this library stored about the visitor. */
-function forgetVisitor() {
-  try {
+const forgetVisitor = () =>
+  tryStorage(() => {
     localStorage.removeItem(SESSION_STORAGE_KEY);
     localStorage.removeItem(REMOTE_CONFIG_KEY);
     sessionStorage.removeItem(WINDOW_STORAGE_KEY);
-  } catch {
-    /* storage unavailable */
-  }
-}
+  });
 
 function uuid() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -148,13 +144,8 @@ function uuid() {
   });
 }
 
-function readSession() {
-  try {
-    return JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY)) || null;
-  } catch {
-    return null;
-  }
-}
+const readSession = () =>
+  tryStorage(() => JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY))) || null;
 
 function writeSession(session) {
   localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
