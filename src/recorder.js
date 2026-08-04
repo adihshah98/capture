@@ -154,9 +154,12 @@ let windowId = null;
 
 // 'disabled' (sampled out) | 'buffering' (recording into a rolling buffer,
 // nothing sent until a trigger fires; discarded on unload) | 'active'
-// (events flush to the server).
+// (events flush to the server) | 'failed' (ingest rejected us permanently).
 let status = 'disabled';
 let stopFn = null; // rrweb's cleanup function while recording
+
+// Browsers cap in-flight keepalive request bodies at 64 KB; leave headroom.
+const KEEPALIVE_MAX_BYTES = 60 * 1024;
 
 let buffer = [];
 let bufferBytes = 0;
@@ -169,6 +172,7 @@ function resetBuffer() {
 }
 
 function pushEvent(event) {
+  if (status === 'failed') return;
   buffer.push(event);
   bufferBytes += JSON.stringify(event).length;
   if (status === 'active') {
@@ -197,36 +201,87 @@ async function gzipBody(json) {
   return { body, compressed: true };
 }
 
-async function flush(useKeepalive) {
-  if (status !== 'active' || buffer.length === 0 || inFlight) return;
-  const events = buffer;
-  resetBuffer();
-  inFlight = true;
-
-  const payload = JSON.stringify({
+function payloadFor(events) {
+  return JSON.stringify({
     session_id: sessionId,
     window_id: windowId,
     url: location.href,
     sent_at: Date.now(),
     events,
   });
+}
+
+const bodyBytes = (body) => (typeof body === 'string' ? body.length : body.byteLength);
+
+/** Put events back for the next flush to retry. */
+function requeue(events) {
+  buffer = events.concat(buffer);
+  bufferBytes = buffer.reduce((n, e) => n + JSON.stringify(e).length, 0);
+  // Trimming the front would drop the full snapshot and leave the buffer
+  // unreplayable, so restart from a fresh one — as the pre-trigger buffer does.
+  if (bufferBytes > config.maxBufferBytes && stopFn) {
+    resetBuffer();
+    record.takeFullSnapshot(true);
+  }
+}
+
+/** A rejection no retry can fix: stop rather than record into the void. */
+function abort(message) {
+  console.error(`capture: ${message} — recording stopped`);
+  status = 'failed';
+  resetBuffer();
+  if (flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = null;
+  }
+  if (stopFn) {
+    stopFn();
+    stopFn = null;
+  }
+}
+
+async function flush(useKeepalive) {
+  if (status !== 'active' || buffer.length === 0 || inFlight) return;
+  let events = buffer;
+  resetBuffer();
+  inFlight = true;
 
   try {
-    const { body, compressed } = await gzipBody(payload);
+    let { body, compressed } = await gzipBody(payloadFor(events));
+
+    // In-flight keepalive requests share a 64 KB budget, so an oversized final
+    // batch is rejected outright. Keep the oldest events that fit: a gap breaks
+    // replay of everything after it.
+    let dropped = 0;
+    while (useKeepalive && bodyBytes(body) > KEEPALIVE_MAX_BYTES && events.length > 1) {
+      const keep = Math.floor(events.length / 2);
+      dropped += events.length - keep;
+      events = events.slice(0, keep);
+      ({ body, compressed } = await gzipBody(payloadFor(events)));
+    }
+    if (dropped) {
+      console.warn(`capture: dropped ${dropped} trailing event(s) over the keepalive limit`);
+    }
+
     const params = new URLSearchParams({ session_id: sessionId, window_id: windowId });
     if (config.token) params.set('token', config.token);
     if (compressed) params.set('compression', 'gzip-js');
-    await fetch(`${config.endpoint}?${params}`, {
+    const res = await fetch(`${config.endpoint}?${params}`, {
       method: 'POST',
       body,
       keepalive: Boolean(useKeepalive),
       headers: { 'Content-Type': compressed ? 'application/octet-stream' : 'application/json' },
     });
+
+    if (res.status === 401) {
+      abort('ingest rejected the project token');
+    } else if (res.status >= 500) {
+      requeue(events);
+    } else if (!res.ok) {
+      console.error(`capture: ingest rejected a batch (${res.status}), dropping it`);
+    }
   } catch {
-    // Put events back so the next flush retries them (bounded so memory
-    // can't grow without limit if the endpoint is down).
-    buffer = events.concat(buffer).slice(-1000);
-    bufferBytes = buffer.reduce((n, e) => n + JSON.stringify(e).length, 0);
+    requeue(events);
   } finally {
     inFlight = false;
   }
