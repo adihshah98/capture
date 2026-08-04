@@ -180,6 +180,9 @@ async def ingest(
     except Exception:
         return error(400, "bad payload")
 
+    if not isinstance(payload, dict):
+        return error(400, "bad payload")
+
     events = payload.get("events")
     if not isinstance(events, list) or not events:
         return error(400, "no events")
