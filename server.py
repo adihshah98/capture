@@ -255,6 +255,43 @@ async def ingest(
     return {"status": "ok", "stored": len(events)}
 
 
+@app.get("/healthz")
+def healthz():
+    """What a deploy can actually break, rather than whether a port is open:
+    storage that can't be written, bundles that were never built, a read side
+    left unprotected. Booleans only — this is unauthenticated."""
+    checks = {}
+
+    try:
+        probe = DATA_ROOT / ".healthz"
+        probe.write_text("ok")
+        probe.unlink()
+        checks["storage_writable"] = True
+    except Exception:
+        checks["storage_writable"] = False
+
+    try:
+        free = shutil.disk_usage(DATA_ROOT).free
+        checks["disk_above_floor"] = not MIN_FREE_DISK_BYTES or free >= MIN_FREE_DISK_BYTES
+    except Exception:
+        checks["disk_above_floor"] = False
+
+    # A build that produced nothing would otherwise serve 404s to every brand.
+    checks["bundles_present"] = all(
+        (BASE_DIR / "public" / name).is_file()
+        for name in ("capture.js", "recorder.bundle.js", "replay.bundle.js")
+    )
+    checks["replay_auth_enabled"] = bool(REPLAY_PASSWORD) and not REPLAY_AUTH_DISABLED
+
+    # Auth being off is a deliberate local-dev choice, so it is reported but
+    # does not fail the check.
+    healthy = all(v for k, v in checks.items() if k != "replay_auth_enabled")
+    return JSONResponse(
+        {"status": "ok" if healthy else "degraded", "checks": checks},
+        status_code=200 if healthy else 503,
+    )
+
+
 @app.get("/config")
 def remote_config(token: Optional[str] = Query(None)):
     """Recording settings: per-project config.json if the project has one,

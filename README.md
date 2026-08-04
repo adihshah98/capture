@@ -138,6 +138,7 @@ Optional config, before the tag (inline values win over the derived ones):
 | `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts |
 | `data/sessions/<id>/<ts>-<rand>.json` | Immutable chunk per batch |
 | `GET /api/sessions`, `/:id/chunks`, `/:id/chunks/:name` | Read API: session list, chunk manifest, single immutable chunk |
+| `GET /healthz` | 200 when storage is writable, disk is above the floor and the bundles exist; 503 otherwise. Unauthenticated and boolean-only, so `deploy.sh` and uptime checks can use it |
 | `public/replay.html` + `replay.bundle.js` | rrweb-player + synced Console/Network panels |
 
 ## Client behavior

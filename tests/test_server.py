@@ -219,6 +219,55 @@ class TestDelete(ServerCase):
         )
 
 
+class TestHealthz(ServerCase):
+    env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": "s3cret"}
+
+    def test_reports_ok_when_everything_is_fine(self):
+        status, body = request(f"{self.base}/healthz")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["checks"]["storage_writable"])
+        self.assertTrue(payload["checks"]["bundles_present"])
+        self.assertTrue(payload["checks"]["replay_auth_enabled"])
+
+    def test_needs_no_password(self):
+        # deploy.sh and any uptime check must reach it unauthenticated.
+        self.assertEqual(request(f"{self.base}/healthz")[0], 200)
+
+    def test_leaks_no_project_detail(self):
+        body = request(f"{self.base}/healthz")[1].decode()
+        self.assertNotIn("cap_", body)
+        self.assertNotIn("s3cret", body)
+
+
+class TestHealthzDegraded(ServerCase):
+    env = {"MIN_FREE_DISK_BYTES": str(10**18)}
+
+    def test_503_when_disk_is_below_the_floor(self):
+        status, body = request(f"{self.base}/healthz")
+        self.assertEqual(status, 503)
+        payload = json.loads(body)
+        self.assertEqual(payload["status"], "degraded")
+        self.assertFalse(payload["checks"]["disk_above_floor"])
+
+
+class TestHealthzUnwritableStorage(ServerCase):
+    def test_503_when_storage_cannot_be_written(self):
+        # The failure /config could never surface: process up, storage dead.
+        self.assertEqual(request(f"{self.base}/healthz")[0], 200)
+        mode = self.data_dir.stat().st_mode
+        os.chmod(self.data_dir, 0o500)
+        try:
+            status, body = request(f"{self.base}/healthz")
+            self.assertEqual(status, 503)
+            self.assertFalse(json.loads(body)["checks"]["storage_writable"])
+            # /config still answers 200 — which is why it was a bad health check.
+            self.assertEqual(request(f"{self.base}/config")[0], 200)
+        finally:
+            os.chmod(self.data_dir, mode)
+
+
 class TestProjectTokens(ServerCase):
     @classmethod
     def setUpClass(cls):
