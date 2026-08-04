@@ -222,6 +222,19 @@ nothing client-side.
 Retention is built in: a daily sweep deletes sessions whose newest chunk is older
 than `RETENTION_DAYS` (default 30; `RETENTION_DAYS=0` keeps everything forever).
 
+Deletion on demand, for erasure requests that can't wait for retention:
+
+```bash
+python server.py list-projects                  # tokens, names, session counts, size
+python server.py remove-project <token>         # revoke the token, keep the recordings
+python server.py remove-project <token> --purge # revoke and erase them
+```
+
+Individual sessions have a **Delete** button in the replay UI (two clicks to
+confirm), backed by `DELETE /api/sessions/<id>`. Like the rest of `/api` it sits
+behind `REPLAY_PASSWORD`, and `DELETE` is deliberately absent from the CORS
+allowlist so no other origin can call it. All of these are irreversible.
+
 Ingest is bounded, because project tokens are public and anyone can post with
 one:
 

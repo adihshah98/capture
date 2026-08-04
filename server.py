@@ -332,6 +332,28 @@ def list_sessions(project: Optional[str] = Query(None)):
     return {"sessions": sessions}
 
 
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str, project: Optional[str] = Query(None)):
+    """Erase one session. Irreversible, and until now retention was the only
+    way anything left disk — which is not an answer to an erasure request.
+    Sits behind REPLAY_PASSWORD with the rest of /api, and DELETE is absent
+    from the CORS allowlist so no other origin can reach it."""
+    if not SAFE_ID.match(session_id):
+        return error(400, "invalid session_id")
+    pool = read_pool(project)
+    if pool is None:
+        return error(404, "unknown project")
+    session_dir = pool / session_id
+    if not session_dir.is_dir():
+        return error(404, "not found")
+
+    freed = sum(f.stat().st_size for f in session_dir.rglob("*.json") if f.is_file())
+    shutil.rmtree(session_dir, ignore_errors=True)
+    _pool_bytes.pop(pool, None)  # rescan; the freed bytes belong back in the quota
+    print(f"deleted session {session_id} ({freed} bytes)")
+    return {"status": "deleted", "session_id": session_id, "bytes_freed": freed}
+
+
 @app.get("/api/sessions/{session_id}/chunks")
 def session_chunks(session_id: str, project: Optional[str] = Query(None)):
     """Ordered chunk manifest; the player fetches chunks one by one."""
@@ -482,11 +504,57 @@ def add_project(name: str) -> None:
     )
 
 
+def pool_usage(pool: Path) -> tuple:
+    if not pool.is_dir():
+        return 0, 0
+    sessions = [d for d in pool.iterdir() if d.is_dir()]
+    used = sum(f.stat().st_size for f in pool.rglob("*.json") if f.is_file())
+    return len(sessions), used
+
+
+def list_projects_cli() -> None:
+    projects = load_projects()
+    if not projects:
+        print("no projects configured — single-tenant mode, tokens are ignored")
+        return
+    for token, meta in projects.items():
+        count, used = pool_usage(project_sessions_dir(token))
+        name = (meta or {}).get("name") or "?"
+        print(f"{token}  {name}  —  {count} session(s), {used / 1024**2:.1f} MB")
+
+
+def remove_project(token: str, purge: bool) -> None:
+    """Revoke a token. Recordings are kept unless --purge is passed: erasing a
+    brand's history should never be a side effect of rotating their tag."""
+    projects = load_projects()
+    if token not in projects:
+        print(f"no such project: {token}")
+        return
+    name = (projects.pop(token) or {}).get("name") or token
+    PROJECTS_PATH.write_text(json.dumps(projects, indent=2))
+    print(f"revoked '{name}' — batches sent with that token are now rejected")
+
+    pool = project_sessions_dir(token)
+    count, used = pool_usage(pool)
+    if purge:
+        shutil.rmtree(pool.parent, ignore_errors=True)
+        print(f"deleted {count} stored session(s), {used / 1024**2:.1f} MB")
+    elif count:
+        print(f"kept {count} session(s), {used / 1024**2:.1f} MB — re-run with --purge to erase")
+
+
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) >= 3 and sys.argv[1] == "add-project":
-        add_project(sys.argv[2])
+    argv = sys.argv[1:]
+    if len(argv) >= 2 and argv[0] == "add-project":
+        add_project(argv[1])
+    elif argv[:1] == ["list-projects"]:
+        list_projects_cli()
+    elif len(argv) >= 2 and argv[0] == "remove-project":
+        remove_project(argv[1], purge="--purge" in argv[2:])
     else:
         print("usage: python server.py add-project <name>")
+        print("       python server.py list-projects")
+        print("       python server.py remove-project <token> [--purge]")
         print("run the server with: .venv/bin/uvicorn server:app --port 3000")

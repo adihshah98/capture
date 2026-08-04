@@ -83,15 +83,55 @@ async function loadSessions() {
   for (const session of sessions) {
     const li = document.createElement('li');
     li.innerHTML = `
-      <span class="sid">${session.session_id.slice(0, 8)}…</span>
-      <span class="meta">${formatTime(session.last_seen)} · ${session.chunk_count} chunks · ${formatBytes(session.bytes)}</span>
+      <div class="info">
+        <span class="sid">${session.session_id.slice(0, 8)}…</span>
+        <span class="meta">${formatTime(session.last_seen)} · ${session.chunk_count} chunks · ${formatBytes(session.bytes)}</span>
+      </div>
+      <button class="del" title="Delete this recording">Delete</button>
     `;
     li.addEventListener('click', () => {
       document.querySelectorAll('#session-list li').forEach((el) => el.classList.remove('active'));
       li.classList.add('active');
       loadSession(session.session_id);
     });
+    li.querySelector('.del').addEventListener('click', (event) => {
+      event.stopPropagation(); // don't load the session we're deleting
+      deleteSession(session.session_id, event.currentTarget);
+    });
     sessionListEl.appendChild(li);
+  }
+}
+
+/**
+ * Two clicks to delete: the first arms the button, the second erases. Inline
+ * rather than confirm() so the page never blocks on a modal, and because this
+ * is irreversible — nothing else removes a recording before retention does.
+ */
+async function deleteSession(sessionId, button) {
+  if (button.dataset.armed !== 'yes') {
+    button.dataset.armed = 'yes';
+    button.textContent = 'Confirm?';
+    button.classList.add('armed');
+    setTimeout(() => {
+      if (!button.isConnected || button.dataset.armed !== 'yes') return;
+      delete button.dataset.armed;
+      button.textContent = 'Delete';
+      button.classList.remove('armed');
+    }, 4000);
+    return;
+  }
+
+  button.disabled = true;
+  button.textContent = 'Deleting…';
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}${projectQuery()}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`server returned ${res.status}`);
+    if (sessionId === loadedSessionId) clearPlayer();
+    await loadSessions();
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = 'Failed';
+    console.error('capture: delete failed', err);
   }
 }
 
@@ -263,9 +303,25 @@ function renderNetwork(events) {
 // Guards the async chunk loop: bumped whenever the user picks a session,
 // so a stale load loop stops instead of feeding events to the wrong player.
 let loadSeq = 0;
+let loadedSessionId = null;
+
+/** Tear the player down so a deleted session can't stay on screen. */
+function clearPlayer() {
+  loadSeq += 1;
+  loadedSessionId = null;
+  player = null;
+  playerHostEl.innerHTML = '';
+  windowTabsEl.innerHTML = '';
+  consoleListEl.innerHTML = '';
+  networkListEl.innerHTML = '';
+  consoleRows = [];
+  networkRows = [];
+  sessionTitleEl.textContent = 'Select a session';
+}
 
 async function loadSession(sessionId) {
   const seq = ++loadSeq;
+  loadedSessionId = sessionId;
   sessionTitleEl.textContent = `Session ${sessionId}`;
 
   const res = await fetch(`/api/sessions/${sessionId}/chunks${projectQuery()}`);

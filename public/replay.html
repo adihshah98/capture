@@ -16,11 +16,16 @@
     aside { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; overflow-y: auto; }
     aside h2, section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; padding: 12px 14px 4px; margin: 0; }
     #session-list { list-style: none; margin: 0; padding: 6px; }
-    #session-list li { padding: 10px 8px; border-radius: 6px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+    #session-list li { padding: 10px 8px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     #session-list li:hover { background: #f0f2f5; }
     #session-list li.active { background: #e8eefb; }
+    #session-list .info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     #session-list .sid { font-weight: 600; font-size: 13px; }
     #session-list .meta { font-size: 11px; color: #6b7280; }
+    #session-list .del { flex: none; opacity: 0.45; border: 1px solid #d0d3d8; background: #fff; color: #6b7280; font-size: 11px; padding: 3px 8px; border-radius: 5px; cursor: pointer; }
+    #session-list li:hover .del, #session-list .del:focus, #session-list .del.armed { opacity: 1; }
+    #session-list .del.armed { border-color: #dc2626; color: #dc2626; font-weight: 600; }
+    #session-list .del:disabled { opacity: 1; color: #9ca3af; cursor: default; }
     main { display: flex; flex-direction: column; gap: 12px; min-width: 0; overflow-y: auto; }
     .title-row { display: flex; align-items: baseline; gap: 8px; }
     #window-tabs { display: flex; gap: 4px; }
