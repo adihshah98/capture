@@ -7,16 +7,26 @@
 # Usage: ./setup.sh
 set -euo pipefail
 
-HOST="ec2-user@ec2-35-167-249-40.us-west-2.compute.amazonaws.com"
-KEY="$HOME/Downloads/capture-key.pem"
+HOST="${CAPTURE_HOST:-ec2-user@ec2-35-167-249-40.us-west-2.compute.amazonaws.com}"
+KEY="${CAPTURE_KEY:-$HOME/Downloads/capture-key.pem}"
+# What brand tags point at: CloudFront, which fronts the box. Recorded on the
+# server so `server.py add-project` prints a pasteable tag.
+PUBLIC_URL="${CAPTURE_PUBLIC_URL:-https://d1lt8dgxjrizij.cloudfront.net}"
 
-ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" 'bash -s' <<'REMOTE'
+ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" bash -s "$PUBLIC_URL" <<'REMOTE'
 set -euo pipefail
+PUBLIC_URL="${1:?public URL not passed through}"
 
 # AL2023's default python3 is 3.9, too old for our pinned fastapi.
 sudo dnf install -y -q python3.11 >/dev/null
 
 sudo mkdir -p /opt/capture && sudo chown ec2-user /opt/capture
+
+# Read by `server.py add-project`, which runs from a shell and so never sees
+# the systemd environment.
+mkdir -p /opt/capture/data
+printf '%s\n' "$PUBLIC_URL" > /opt/capture/data/public_url
+echo "public URL recorded: $PUBLIC_URL"
 
 # Secrets live in /etc/capture.env, not the unit file, so redeploys and
 # unit changes never rotate the password.

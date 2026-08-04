@@ -295,6 +295,71 @@ class TestProjectTokens(ServerCase):
         self.assertNotIn("j" * 32, [s["session_id"] for s in default["sessions"]])
 
 
+class TestProjectCli(unittest.TestCase):
+    """The CLI runs from a shell, not systemd, so it resolves its own paths."""
+
+    def setUp(self):
+        self.data_dir = Path(tempfile.mkdtemp(prefix="capture-cli-"))
+        self.addCleanup(shutil.rmtree, self.data_dir, ignore_errors=True)
+
+    def run_cli(self, *args, env=None):
+        result = subprocess.run(
+            [str(REPO / ".venv" / "bin" / "python"), "server.py", *args],
+            cwd=REPO,
+            env={**os.environ, "CAPTURE_DATA_DIR": str(self.data_dir), **(env or {})},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return result.stdout + result.stderr
+
+    def test_startup_prints_no_deprecation_warning(self):
+        # on_event was deprecated and printed on every CLI invocation.
+        out = self.run_cli("list-projects")
+        self.assertNotIn("DeprecationWarning", out)
+        self.assertNotIn("on_event is deprecated", out)
+
+    def test_add_project_uses_the_configured_public_url(self):
+        out = self.run_cli("add-project", "Acme", env={"CAPTURE_PUBLIC_URL": "https://cdn.example.net/"})
+        self.assertIn('src="https://cdn.example.net/capture.js"', out)
+        self.assertNotIn("capture.example.com", out)
+
+    def test_public_url_file_is_used_when_the_env_var_is_absent(self):
+        (self.data_dir / "public_url").write_text("https://from-file.example\n")
+        out = self.run_cli("add-project", "Acme")
+        self.assertIn('src="https://from-file.example/capture.js"', out)
+
+    def test_placeholder_host_is_called_out(self):
+        out = self.run_cli("add-project", "Acme")
+        self.assertIn("capture.example.com", out)
+        self.assertIn("placeholder host", out)
+
+    def test_list_and_remove_round_trip(self):
+        created = self.run_cli("add-project", "Acme")
+        token = created.split("token: ")[1].split()[0]
+        self.assertIn(token, self.run_cli("list-projects"))
+
+        # Revoking keeps recordings unless --purge is passed.
+        sessions = self.data_dir / "projects" / token / "sessions" / "s1"
+        sessions.mkdir(parents=True)
+        (sessions / "1-abcdef.json").write_text('{"events":[1]}')
+
+        out = self.run_cli("remove-project", token)
+        self.assertIn("revoked", out)
+        self.assertTrue(sessions.exists(), "recordings must survive a plain revoke")
+        self.assertNotIn(token, self.run_cli("list-projects"))
+
+    def test_purge_deletes_the_recordings(self):
+        created = self.run_cli("add-project", "Acme")
+        token = created.split("token: ")[1].split()[0]
+        sessions = self.data_dir / "projects" / token / "sessions" / "s1"
+        sessions.mkdir(parents=True)
+        (sessions / "1-abcdef.json").write_text('{"events":[1]}')
+
+        self.run_cli("remove-project", token, "--purge")
+        self.assertFalse((self.data_dir / "projects" / token).exists())
+
+
 if __name__ == "__main__":
     if not UVICORN.exists():
         sys.exit(f"missing {UVICORN} — run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt")

@@ -12,9 +12,9 @@
 # Usage: ./deploy.sh
 set -euo pipefail
 
-HOST="ec2-user@ec2-35-167-249-40.us-west-2.compute.amazonaws.com"
-KEY="$HOME/Downloads/capture-key.pem"
-PUBLIC_URL="https://d1lt8dgxjrizij.cloudfront.net"
+HOST="${CAPTURE_HOST:-ec2-user@ec2-35-167-249-40.us-west-2.compute.amazonaws.com}"
+KEY="${CAPTURE_KEY:-$HOME/Downloads/capture-key.pem}"
+PUBLIC_URL="${CAPTURE_PUBLIC_URL:-https://d1lt8dgxjrizij.cloudfront.net}"
 
 cd "$(dirname "$0")"
 npm run build

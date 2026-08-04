@@ -16,6 +16,7 @@ import shutil
 import string
 import time
 import zlib
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -24,7 +25,36 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-app = FastAPI(title="capture")
+@asynccontextmanager
+async def lifespan(_app):
+    """Startup banner and the retention sweep. The bodies below run at
+    startup, so they may reference module state defined further down."""
+    if REPLAY_AUTH_DISABLED:
+        print(
+            "warning: REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
+            "open to anyone who can reach this server"
+        )
+    elif not REPLAY_PASSWORD:
+        print(
+            "REPLAY_PASSWORD is not set — the replay UI and read API will "
+            "return 503 until it is"
+        )
+
+    async def loop():
+        while True:
+            removed = await asyncio.to_thread(sweep_expired_sessions)
+            if removed:
+                print(f"retention: removed {removed} expired session(s)")
+            await asyncio.sleep(24 * 3600)
+
+    task = asyncio.create_task(loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="capture", lifespan=lifespan)
 
 # The snippet runs on other people's pages, so ingest/config/bundles must be
 # reachable cross-origin. A wildcard origin is safe here: the read side is
@@ -500,31 +530,28 @@ def sweep_expired_sessions() -> int:
     return removed
 
 
-@app.on_event("startup")
-async def start_retention_loop():
-    if REPLAY_AUTH_DISABLED:
-        print(
-            "warning: REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
-            "open to anyone who can reach this server"
-        )
-    elif not REPLAY_PASSWORD:
-        print(
-            "REPLAY_PASSWORD is not set — the replay UI and read API will "
-            "return 503 until it is"
-        )
-
-    async def loop():
-        while True:
-            removed = await asyncio.to_thread(sweep_expired_sessions)
-            if removed:
-                print(f"retention: removed {removed} expired session(s)")
-            await asyncio.sleep(24 * 3600)
-
-    asyncio.create_task(loop())
-
-
 # Registered last so /ingest and /api/* win; serves index.html at "/".
 app.mount("/", StaticFiles(directory=BASE_DIR / "public", html=True), name="static")
+
+
+PUBLIC_URL_FILE = DATA_ROOT / "public_url"
+
+
+def public_base_url() -> str:
+    """Where brands reach this server. The env var covers the running service;
+    the file covers CLI runs, which don't load the systemd environment. Written
+    by setup.sh, so onboarding prints a tag that can be pasted as-is."""
+    for value in (os.environ.get("CAPTURE_PUBLIC_URL"), _read_public_url_file()):
+        if value:
+            return value.strip().rstrip("/")
+    return "https://capture.example.com"
+
+
+def _read_public_url_file() -> str:
+    try:
+        return PUBLIC_URL_FILE.read_text()
+    except Exception:
+        return ""
 
 
 def add_project(name: str) -> None:
@@ -535,9 +562,15 @@ def add_project(name: str) -> None:
     PROJECTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     PROJECTS_PATH.write_text(json.dumps(projects, indent=2))
     project_sessions_dir(token).mkdir(parents=True, exist_ok=True)
+    base = public_base_url()
     print(f"project '{name}' created — token: {token}")
-    print("\nAdd this tag to the brand's site (replace the host with yours):\n")
-    print(f'  <script src="https://capture.example.com/capture.js" data-token="{token}"></script>')
+    print("\nAdd this tag to the brand's site:\n")
+    print(f'  <script src="{base}/capture.js" data-token="{token}"></script>')
+    if base == "https://capture.example.com":
+        print(
+            "\n  (placeholder host — set CAPTURE_PUBLIC_URL or run ./setup.sh "
+            "to record your real one)"
+        )
     print(
         "\nOptional per-project recording config: "
         f"data/projects/{token}/config.json (falls back to data/config.json)"
