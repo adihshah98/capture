@@ -5,7 +5,7 @@
   "scripts": {
     "build": "esbuild src/recorder.js --bundle --minify --outfile=public/recorder.bundle.js && esbuild src/replay-app.js --bundle --minify --outfile=public/replay.bundle.js && esbuild src/snippet.js --minify --outfile=public/capture.js",
     "start": ".venv/bin/uvicorn server:app --port 3000",
-    "dev": "npm run build && .venv/bin/uvicorn server:app --port 3000"
+    "dev": "npm run build && REPLAY_AUTH_DISABLED=1 .venv/bin/uvicorn server:app --port 3000"
   },
   "keywords": [],
   "author": "",

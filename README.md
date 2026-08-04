@@ -67,11 +67,13 @@ replay UI grows a project selector. Operator notes:
   REPLAY_PASSWORD=... .venv/bin/uvicorn server:app --port 3000
   ```
 
-  `/replay.html` and `/api/*` then require the password (HTTP Basic, any
-  username). `/ingest`, `/config` and the bundles stay open — the snippet
-  runs on other people's pages. Serve everything over HTTPS (any reverse
-  proxy in front of uvicorn); browsers block plain-HTTP ingest from HTTPS
-  pages.
+  `/replay.html` and `/api/*` require the password (HTTP Basic, any
+  username). With no password set they return 503 rather than serving
+  recordings openly; `REPLAY_AUTH_DISABLED=1` opts out of that for local
+  development, and `npm run dev` sets it for you. `/ingest`, `/config` and
+  the bundles stay open — the snippet runs on other people's pages. Serve
+  everything over HTTPS (any reverse proxy in front of uvicorn); browsers
+  block plain-HTTP ingest from HTTPS pages.
 
 Optional config, before the tag (inline values win over the derived ones):
 
@@ -115,7 +117,7 @@ Optional config, before the tag (inline values win over the derived ones):
 |---|---|
 | `public/capture.js` (~1 KB) | Loader snippet; derives server URL + token from its own tag, lazy-loads the recorder after page idle |
 | `data/projects.json` + `?token=` on ingest/config | Per-brand projects: token-gated ingest, isolated storage, per-project config |
-| `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you |
+| `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you; unset means the read side is refused, not open |
 | `src/recorder.js` → `recorder.bundle.js` | rrweb `record()` + console plugin, session/window ids, batching, gzip, keepalive flush |
 | `server.py` — `POST /ingest?compression=gzip-js` | FastAPI endpoint receiving gzipped JSON event batches |
 | `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts |

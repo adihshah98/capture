@@ -41,10 +41,20 @@ app.add_middleware(
 async def replay_auth(request: Request, call_next):
     """The write side (/ingest, /config, bundles) stays open — the snippet
     runs on other people's pages. The read side (replay UI + /api) exposes
-    recordings, so it sits behind REPLAY_PASSWORD when one is set."""
-    path = request.url.path
+    recordings, so it requires REPLAY_PASSWORD: with none set it refuses to
+    serve rather than falling open."""
+    # Normalized so /Api/, //replay.html and friends can't slip past the check
+    # on filesystems StaticFiles will still serve them from.
+    path = re.sub(r"/+", "/", request.url.path).lower()
     protected = path.startswith("/api/") or path == "/replay.html"
-    if protected and REPLAY_PASSWORD:
+    if protected and not REPLAY_AUTH_DISABLED:
+        if not REPLAY_PASSWORD:
+            return Response(
+                "Replay access is unconfigured. Set REPLAY_PASSWORD to a secret, "
+                "or REPLAY_AUTH_DISABLED=1 to serve recordings to anyone.\n",
+                status_code=503,
+                media_type="text/plain",
+            )
         supplied = ""
         header = request.headers.get("authorization", "")
         if header.startswith("Basic "):
@@ -83,8 +93,10 @@ PROJECTS_PATH = BASE_DIR / "data" / "projects.json"
 PROJECTS_DIR = BASE_DIR / "data" / "projects"
 
 # Password for the replay UI + read API (HTTP Basic, any username). Unset
-# means open access.
+# means the read side is refused entirely; REPLAY_AUTH_DISABLED=1 opts out
+# for local development.
 REPLAY_PASSWORD = os.environ.get("REPLAY_PASSWORD", "")
+REPLAY_AUTH_DISABLED = os.environ.get("REPLAY_AUTH_DISABLED") == "1"
 
 
 def load_projects() -> dict:
@@ -381,10 +393,15 @@ def sweep_expired_sessions() -> int:
 
 @app.on_event("startup")
 async def start_retention_loop():
-    if not REPLAY_PASSWORD:
+    if REPLAY_AUTH_DISABLED:
         print(
-            "warning: REPLAY_PASSWORD is not set — the replay UI and read API "
-            "are open to anyone who can reach this server"
+            "warning: REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
+            "open to anyone who can reach this server"
+        )
+    elif not REPLAY_PASSWORD:
+        print(
+            "REPLAY_PASSWORD is not set — the replay UI and read API will "
+            "return 503 until it is"
         )
 
     async def loop():
