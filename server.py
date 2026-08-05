@@ -350,11 +350,16 @@ async def ingest(
     session_dir = pool / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    visitor = payload.get("visitor_id")
-    if isinstance(visitor, str) and SAFE_ID.match(visitor):
-        visitor_path = session_dir / VISITOR_FILE
-        if not visitor_path.is_file():
-            visitor_path.write_text(json.dumps({"visitor_id": visitor}))
+    meta_path = session_dir / VISITOR_FILE
+    if not meta_path.is_file():
+        meta = {}
+        visitor, url = payload.get("visitor_id"), payload.get("url")
+        if isinstance(visitor, str) and SAFE_ID.match(visitor):
+            meta["visitor_id"] = visitor
+        if isinstance(url, str) and url:
+            meta["url"] = url[:2048]
+        if meta:
+            meta_path.write_text(json.dumps(meta))
 
     # Timestamp orders chunks; the window prefix lets the manifest group them
     # per tab without opening a single file.
@@ -676,10 +681,11 @@ def list_sessions(request: Request, project: Optional[str] = Query(None)):
                 info["order"] = json.loads(order_path.read_text())
             except Exception:
                 pass
-        visitor_path = entry / VISITOR_FILE
-        if visitor_path.is_file():
+        meta_path = entry / VISITOR_FILE
+        if meta_path.is_file():
             try:
-                info["visitor_id"] = json.loads(visitor_path.read_text()).get("visitor_id")
+                meta = json.loads(meta_path.read_text())
+                info.update({k: meta[k] for k in ("visitor_id", "url") if isinstance(meta.get(k), str)})
             except Exception:
                 pass
         sessions.append(info)

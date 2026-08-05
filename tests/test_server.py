@@ -305,6 +305,24 @@ class TestVisitorId(ServerCase):
         self.assertEqual(self.ingest(session), 200)
         self.assertNotIn("visitor_id", self.listed(session))
 
+    def test_entry_url_comes_from_the_first_batch(self):
+        session = "u" * 32
+        self.ingest(session, {"events": self.EVENTS, "visitor_id": "vis-u", "url": "https://brand.example/landing-a?x=1"})
+        self.ingest(session, {"events": self.EVENTS, "visitor_id": "vis-u", "url": "https://brand.example/checkout"})
+        listed = self.listed(session)
+        self.assertEqual(listed["url"], "https://brand.example/landing-a?x=1")
+        self.assertEqual(listed["visitor_id"], "vis-u")
+
+    def test_non_string_url_is_ignored(self):
+        session = "t" * 32
+        self.assertEqual(self.ingest(session, {"events": self.EVENTS, "url": 42}), 200)
+        self.assertNotIn("url", self.listed(session))
+
+    def test_oversized_url_is_truncated(self):
+        session = "s2" + "x" * 30
+        self.ingest(session, {"events": self.EVENTS, "url": "https://brand.example/" + "a" * 3000})
+        self.assertEqual(len(self.listed(session)["url"]), 2048)
+
 
 class TestHealthz(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": "s3cret"}

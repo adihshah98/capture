@@ -169,7 +169,7 @@ Optional config, before the tag (inline values win over the derived ones):
 | `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts |
 | `POST /order?session_id&token` | Checkout outcome from a Shopify custom pixel (checkout pages run no theme code); stored as `order.json` beside the session's chunks and shown as a Purchased / Reached checkout badge in the session list |
 | `data/sessions/<id>/<ts>-<rand>.json` | Immutable chunk per batch |
-| `data/sessions/<id>/visitor.json` | Anonymous per-browser visitor id (first batch wins); the session list groups return visits by it |
+| `data/sessions/<id>/visitor.json` | Per-session metadata from the first batch: anonymous visitor id (groups return visits) and entry URL |
 | `GET /api/sessions`, `/:id/chunks`, `/:id/chunks/:name` | Read API: session list, chunk manifest, single immutable chunk |
 | `GET /healthz` | 200 when storage is writable, disk is above the floor and the bundles exist; 503 otherwise. Unauthenticated and boolean-only, so `deploy.sh` and uptime checks can use it |
 | `public/replay.html` + `replay.bundle.js` | rrweb-player + synced Timeline panel |

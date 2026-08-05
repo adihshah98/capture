@@ -26,6 +26,20 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function formatDuration(ms) {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+function pagePath(url) {
+  try {
+    const u = new URL(url);
+    return u.pathname + u.search;
+  } catch {
+    return url || '';
+  }
+}
+
 // Empty on single-tenant servers (no projects) — the selector stays hidden
 // and reads go unscoped.
 let currentProject = '';
@@ -102,19 +116,35 @@ function showListMessage(message) {
   sessionListEl.appendChild(li);
 }
 
+let allSessions = [];
+let sessionFilter = 'all';
+const FILTERS = {
+  all: () => true,
+  checkout: (s) => Boolean(s.order),
+  purchased: (s) => Boolean(s.order && s.order.purchased_at),
+};
+
 async function loadSessions() {
-  let sessions;
   try {
-    ({ sessions } = await fetchJson(`/api/sessions${projectQuery()}`));
+    const body = await fetchJson(`/api/sessions${projectQuery()}`);
+    allSessions = Array.isArray(body.sessions) ? body.sessions : [];
   } catch (err) {
+    allSessions = [];
     showListMessage(`Could not load sessions. ${err.message}`);
     return;
   }
-  sessions = Array.isArray(sessions) ? sessions : [];
+  renderSessionList();
+}
 
+function renderSessionList() {
   sessionListEl.innerHTML = '';
-  if (sessions.length === 0) {
+  if (allSessions.length === 0) {
     showListMessage('No sessions yet. Open the demo page and click around.');
+    return;
+  }
+  const sessions = allSessions.filter(FILTERS[sessionFilter]);
+  if (sessions.length === 0) {
+    showListMessage('No sessions match this filter.');
     return;
   }
 
@@ -124,10 +154,15 @@ async function loadSessions() {
     li.innerHTML = `
       <div class="info">
         <span class="sid">${session.session_id.slice(0, 8)}…</span>
-        <span class="meta">${formatTime(session.last_seen)} · ${session.chunk_count} chunks · ${formatBytes(session.bytes)}</span>
+        <span class="meta">${formatTime(session.last_seen)} · ${formatDuration(session.last_seen - session.first_seen)}</span>
+        <span class="page"></span>
       </div>
       <button class="del" title="Delete this recording">Delete</button>
     `;
+    const page = li.querySelector('.page');
+    page.textContent = pagePath(session.url);
+    page.title = session.url || '';
+    li.title = `${session.chunk_count} chunks · ${formatBytes(session.bytes)}`;
     // Order fields originate from checkout POSTs, so they are untrusted
     // input: textContent, never the innerHTML template above.
     const order = session.order;
@@ -528,6 +563,15 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
   if (player && player.getReplayer().getCurrentTime() <= 0) {
     player.goto(0, true);
   }
+}
+
+const filterButtons = document.querySelectorAll('#session-filter button');
+for (const btn of filterButtons) {
+  btn.addEventListener('click', () => {
+    sessionFilter = btn.dataset.filter;
+    filterButtons.forEach((b) => b.classList.toggle('active', b === btn));
+    renderSessionList();
+  });
 }
 
 document.getElementById('refresh').addEventListener('click', loadSessions);
