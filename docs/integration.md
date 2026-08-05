@@ -50,6 +50,11 @@ Content-Security-Policy, see [Content-Security-Policy](#content-security-policy-
   rest of the URL is kept intact.
 - **Console output and network requests are not captured at all.** The
   recording is the DOM and user interactions only.
+- **Return visits are grouped by a random visitor identifier** stored in
+  the visitor's browser. It is a random UUID that says nothing about the
+  person: never linked to accounts, emails, or IP addresses, and never
+  shared across devices or browsers. Opting out (or clearing site data)
+  removes it.
 
 Note that **visible page text is recorded as-is** — that is what makes a
 replay a replay. If a page renders something that should never be stored,

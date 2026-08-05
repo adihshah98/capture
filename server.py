@@ -350,6 +350,12 @@ async def ingest(
     session_dir = pool / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
+    visitor = payload.get("visitor_id")
+    if isinstance(visitor, str) and SAFE_ID.match(visitor):
+        visitor_path = session_dir / VISITOR_FILE
+        if not visitor_path.is_file():
+            visitor_path.write_text(json.dumps({"visitor_id": visitor}))
+
     # Timestamp orders chunks; the window prefix lets the manifest group them
     # per tab without opening a single file.
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
@@ -374,6 +380,8 @@ async def ingest(
 # Written beside a session's chunks by /order; excluded from chunk listings.
 ORDER_FILE = "order.json"
 ORDER_MAX_BODY_BYTES = 4096
+
+VISITOR_FILE = "visitor.json"
 
 
 @app.post("/order")
@@ -666,6 +674,12 @@ def list_sessions(request: Request, project: Optional[str] = Query(None)):
         if order_path.is_file():
             try:
                 info["order"] = json.loads(order_path.read_text())
+            except Exception:
+                pass
+        visitor_path = entry / VISITOR_FILE
+        if visitor_path.is_file():
+            try:
+                info["visitor_id"] = json.loads(visitor_path.read_text()).get("visitor_id")
             except Exception:
                 pass
         sessions.append(info)

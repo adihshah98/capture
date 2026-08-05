@@ -266,6 +266,46 @@ class TestOrderEvents(ServerCase):
         self.assertEqual(self.order("r" * 32, {"event": "checkout_completed"}), 404)
 
 
+class TestVisitorId(ServerCase):
+    EVENTS = [{"type": 4, "data": {}}]
+
+    def listed(self, session_id):
+        sessions = json.loads(request(f"{self.base}/api/sessions")[1])["sessions"]
+        return next(s for s in sessions if s["session_id"] == session_id)
+
+    def test_visitor_id_is_stored_and_listed(self):
+        session = "v" * 32
+        status = self.ingest(session, {"events": self.EVENTS, "visitor_id": "vis-abc123"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.listed(session)["visitor_id"], "vis-abc123")
+
+    def test_first_visitor_id_wins(self):
+        session = "w" * 32
+        self.ingest(session, {"events": self.EVENTS, "visitor_id": "vis-first"})
+        self.ingest(session, {"events": self.EVENTS, "visitor_id": "vis-second"})
+        self.assertEqual(self.listed(session)["visitor_id"], "vis-first")
+
+    def test_invalid_visitor_ids_are_ignored(self):
+        for i, bad in enumerate(["../../etc/passwd", "x" * 65, 42, {"nested": True}]):
+            session = f"inv{i}" + "x" * 28
+            status = self.ingest(session, {"events": self.EVENTS, "visitor_id": bad})
+            self.assertEqual(status, 200, f"batch with visitor_id {bad!r} must still ingest")
+            self.assertNotIn("visitor_id", self.listed(session))
+
+    def test_marker_never_appears_as_a_chunk(self):
+        session = "y" * 32
+        self.ingest(session, {"events": self.EVENTS, "visitor_id": "vis-abc123"})
+        manifest = json.loads(request(f"{self.base}/api/sessions/{session}/chunks")[1])
+        self.assertEqual(len(manifest["chunks"]), 1)
+        self.assertNotIn("visitor.json", [c["name"] for c in manifest["chunks"]])
+        self.assertEqual(self.listed(session)["chunk_count"], 1)
+
+    def test_batches_without_visitor_id_still_ingest(self):
+        session = "z" * 32
+        self.assertEqual(self.ingest(session), 200)
+        self.assertNotIn("visitor_id", self.listed(session))
+
+
 class TestHealthz(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": "s3cret"}
 

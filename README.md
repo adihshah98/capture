@@ -169,6 +169,7 @@ Optional config, before the tag (inline values win over the derived ones):
 | `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts |
 | `POST /order?session_id&token` | Checkout outcome from a Shopify custom pixel (checkout pages run no theme code); stored as `order.json` beside the session's chunks and shown as a Purchased / Reached checkout badge in the session list |
 | `data/sessions/<id>/<ts>-<rand>.json` | Immutable chunk per batch |
+| `data/sessions/<id>/visitor.json` | Anonymous per-browser visitor id (first batch wins); the session list groups return visits by it |
 | `GET /api/sessions`, `/:id/chunks`, `/:id/chunks/:name` | Read API: session list, chunk manifest, single immutable chunk |
 | `GET /healthz` | 200 when storage is writable, disk is above the floor and the bundles exist; 503 otherwise. Unauthenticated and boolean-only, so `deploy.sh` and uptime checks can use it |
 | `public/replay.html` + `replay.bundle.js` | rrweb-player + synced Timeline panel |
@@ -185,7 +186,10 @@ Optional config, before the tag (inline values win over the derived ones):
   `window.capture.config()`.
 - **Session identity** — a session id in `localStorage`, rotated after 30 min idle or
   24 h max; a per-tab window id in `sessionStorage`. On rotation the recorder takes a
-  fresh full snapshot so every session is independently replayable.
+  fresh full snapshot so every session is independently replayable. A visitor id in
+  `localStorage` never rotates, so the session list can group return visits from the
+  same browser — deliberately pseudonymous: no identify(), no cross-device linking,
+  and opt-out removes it.
 - **Batching + compression** — events buffer in memory and flush every 5 s, at 50
   events, or at ~0.9 MB of payload (a single full snapshot can dwarf dozens of small
   events), gzipped with `CompressionStream` and POSTed with `fetch`. On `pagehide` /

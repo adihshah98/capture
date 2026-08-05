@@ -95,6 +95,7 @@ async function resolveConfig() {
 }
 
 const SESSION_STORAGE_KEY = 'capture_session';
+const VISITOR_STORAGE_KEY = 'capture_visitor';
 const WINDOW_STORAGE_KEY = 'capture_window_id';
 const OPT_OUT_KEY = 'capture_opt_out';
 
@@ -120,6 +121,7 @@ const setOptedOut = (value) =>
 const forgetVisitor = () =>
   tryStorage(() => {
     localStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(VISITOR_STORAGE_KEY);
     localStorage.removeItem(REMOTE_CONFIG_KEY);
     sessionStorage.removeItem(WINDOW_STORAGE_KEY);
   });
@@ -177,11 +179,22 @@ function getWindowId() {
   return id;
 }
 
+const getVisitorId = () =>
+  tryStorage(() => {
+    let id = localStorage.getItem(VISITOR_STORAGE_KEY);
+    if (!id) {
+      id = uuid();
+      localStorage.setItem(VISITOR_STORAGE_KEY, id);
+    }
+    return id;
+  });
+
 // Assigned in main() once config is resolved — the sampling decision
 // depends on the effective sampleRate.
 let session = null;
 let sessionId = null;
 let windowId = null;
+let visitorId = null;
 
 // 'disabled' (sampled out) | 'buffering' (recording into a rolling buffer,
 // nothing sent until a trigger fires; discarded on unload) | 'active'
@@ -253,6 +266,7 @@ function payloadFor(events) {
   return JSON.stringify({
     session_id: sessionId,
     window_id: windowId,
+    visitor_id: visitorId,
     url: redactUrl(location.href, config.redactUrlParams),
     sent_at: Date.now(),
     events,
@@ -552,6 +566,7 @@ async function boot() {
   session = getSession();
   sessionId = session.id;
   windowId = getWindowId();
+  visitorId = getVisitorId();
   setupTriggers();
 
   if (session.sampled) {

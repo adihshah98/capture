@@ -118,8 +118,9 @@ async function loadSessions() {
     return;
   }
 
-  for (const session of sessions) {
+  const appendSession = (session, grouped) => {
     const li = document.createElement('li');
+    if (grouped) li.className = 'grouped';
     li.innerHTML = `
       <div class="info">
         <span class="sid">${session.session_id.slice(0, 8)}…</span>
@@ -152,6 +153,39 @@ async function loadSessions() {
       deleteSession(session.session_id, event.currentTarget);
     });
     sessionListEl.appendChild(li);
+  };
+
+  const appendVisitorHeader = (group) => {
+    const li = document.createElement('li');
+    li.className = 'visitor-header';
+    const first = Math.min(...group.map((s) => s.first_seen));
+    const purchases = group.filter((s) => s.order && s.order.purchased_at).length;
+    li.textContent =
+      `Visitor ${String(group[0].visitor_id).slice(0, 8)} · ${group.length} visits` +
+      ` · since ${new Date(first).toLocaleDateString()}` +
+      (purchases ? ` · ${purchases} purchase${purchases > 1 ? 's' : ''}` : '');
+    sessionListEl.appendChild(li);
+  };
+
+  const byVisitor = new Map();
+  for (const session of sessions) {
+    if (!session.visitor_id) continue;
+    if (!byVisitor.has(session.visitor_id)) byVisitor.set(session.visitor_id, []);
+    byVisitor.get(session.visitor_id).push(session);
+  }
+  const rendered = new Set();
+  for (const session of sessions) {
+    if (rendered.has(session)) continue;
+    const group = session.visitor_id ? byVisitor.get(session.visitor_id) : null;
+    if (group && group.length > 1) {
+      appendVisitorHeader(group);
+      for (const s of group) {
+        appendSession(s, true);
+        rendered.add(s);
+      }
+    } else {
+      appendSession(session, false);
+    }
   }
 }
 
