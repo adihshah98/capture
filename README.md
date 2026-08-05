@@ -1,8 +1,7 @@
 # Capture — self-hosted session replay
 
 Self-hosted session recording and replay built on [rrweb](https://github.com/rrweb-io/rrweb):
-watch real user sessions on your sites as DOM-accurate replays, with synced
-console and network panels.
+watch real user sessions on your sites as DOM-accurate replays.
 
 The client SDK is JavaScript (rrweb runs in the browser); the server is Python
 (FastAPI). Node is only needed at build time to bundle the client.
@@ -149,19 +148,10 @@ Optional config, before the tag (inline values win over the derived ones):
     maskTextSelector: null,       // CSS selector whose text becomes asterisks
     blockSelector: null,          // CSS selector not recorded at all
     redactUrlParams: [...],       // query/fragment params stripped from URLs
-    redactConsole: true,          // scrub secrets out of captured console args
 
     // Consent (inline only — a remote value arrives too late to gate storage):
     requireConsent: false,        // touch nothing until grantConsent() is called
     respectGlobalPrivacyControl: true, // honour navigator.globalPrivacyControl
-
-    // Network capture (URLs/method/status/timings by default; false disables):
-    network: {
-      captureHeaders: false,      // opt-in; sensitive headers always redacted
-      captureBody: false,         // opt-in; capped at 64 KB
-      captureResources: true,     // img/script/css from the Performance API
-      ignoreUrls: [],             // regexes; ingest endpoint always ignored
-    },
   };
 </script>
 ```
@@ -174,20 +164,20 @@ Optional config, before the tag (inline values win over the derived ones):
 | `data/projects.json` + `?token=` on ingest/config | Per-brand projects: token-gated ingest, isolated storage, per-project config |
 | `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you; unset means the read side is refused, not open |
 | `WORKOS_API_KEY` + `WORKOS_CLIENT_ID` (per-user logins) | Replaces the Basic password with WorkOS AuthKit; each project's `org_id` scopes which brand team can read it |
-| `src/recorder.js` → `recorder.bundle.js` | rrweb `record()` + console plugin, session/window ids, batching, gzip, keepalive flush |
+| `src/recorder.js` → `recorder.bundle.js` | rrweb `record()`, session/window ids, batching, gzip, keepalive flush |
 | `server.py` — `POST /ingest?compression=gzip-js` | FastAPI endpoint receiving gzipped JSON event batches |
 | `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts |
 | `POST /order?session_id&token` | Checkout outcome from a Shopify custom pixel (checkout pages run no theme code); stored as `order.json` beside the session's chunks and shown as a Purchased / Reached checkout badge in the session list |
 | `data/sessions/<id>/<ts>-<rand>.json` | Immutable chunk per batch |
 | `GET /api/sessions`, `/:id/chunks`, `/:id/chunks/:name` | Read API: session list, chunk manifest, single immutable chunk |
 | `GET /healthz` | 200 when storage is writable, disk is above the floor and the bundles exist; 503 otherwise. Unauthenticated and boolean-only, so `deploy.sh` and uptime checks can use it |
-| `public/replay.html` + `replay.bundle.js` | rrweb-player + synced Console/Network panels |
+| `public/replay.html` + `replay.bundle.js` | rrweb-player + synced Timeline panel |
 
 ## Client behavior
 
 - **Remote config** — before recording starts, the client fetches `/config`
   (served from `data/config.json`) and caches it in `localStorage` for 1 h, so
-  recording behavior — sample rate, triggers, idle threshold, network options —
+  recording behavior — sample rate, triggers, idle threshold —
   can change fleet-wide by editing one server file, no page redeploys. Merge
   precedence: built-in defaults < remote config < inline `window.CAPTURE_CONFIG`
   (the page always wins). A missing/invalid config file or unreachable endpoint
@@ -220,9 +210,6 @@ Optional config, before the tag (inline values win over the derived ones):
   server never assembles a whole session in memory, and long sessions start
   playing immediately. Chunks are immutable, so they're served with
   `max-age=86400` and scrubbing re-visits hit the browser cache.
-- **Console capture** — `@rrweb/rrweb-plugin-console-record` embeds console
-  log/info/warn/error into the event stream (type 6 plugin events); the replay UI
-  renders them in a panel under the player.
 - **Multi-tab replay** — each browser tab records its own independent rrweb
   stream (own window id, own full snapshot) into the shared session; the ingest
   server encodes the window id into chunk filenames so the manifest groups
@@ -233,18 +220,10 @@ Optional config, before the tag (inline values win over the derived ones):
   scrolls, inputs) painted above the player's progress bar, so the interesting
   moments of a session are visible before you scrub; click-through, per tab,
   lightly smoothed.
-- **Playhead-synced inspector** — the Console and Network panels track the
-  replay position: rows the playhead hasn't reached yet are dimmed, the
-  latest-fired row is highlighted and kept scrolled into view, and clicking any
-  row seeks the player to that moment.
-- **Network capture** — `src/network-plugin.js` wraps `fetch` + `XMLHttpRequest`
-  (method, status, duration, failures) and reads buffered PerformanceObserver
-  resource entries (scripts, images, styles — including ones loaded before the
-  recorder), emitted as `capture/network@1` plugin events. Privacy-first: URLs
-  and timings only by default; headers/bodies are opt-in, sensitive headers
-  (authorization, cookie, …) are always redacted, URL credentials are stripped,
-  and the ingest endpoint itself is never captured. The replay UI shows a
-  Network tab beside Console with per-request rows and error highlighting.
+- **Playhead-synced timeline** — the Timeline panel tracks the replay
+  position: rows the playhead hasn't reached yet are dimmed, the latest-fired
+  row is highlighted and kept scrolled into view, and clicking any row seeks
+  the player to that moment.
 - **Ingestion controls** — `sampleRate` rolls a sticky per-session
   keep/skip decision at session creation, so a session is wholly recorded or never
   leaves the browser. With `triggers` configured, the recorder starts in a

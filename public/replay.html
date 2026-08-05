@@ -43,30 +43,16 @@
     .devtools-tabs button { border: none; background: none; padding: 6px 12px; font-size: 12px; font-weight: 600; color: #6b7280; cursor: pointer; border-bottom: 2px solid transparent; }
     .devtools-tabs button.active { color: #1c1e21; border-bottom-color: #4f46e5; }
     .devtools-tabs .count { font-weight: 400; color: #9ca3af; }
-    #console-list, #network-list { list-style: none; margin: 0; padding: 6px 0; max-height: 220px; overflow-y: auto; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
-    #console-list li { display: flex; gap: 10px; padding: 4px 14px; border-bottom: 1px solid #f0f2f5; }
-    #console-list .ts { color: #9ca3af; flex-shrink: 0; }
-    #console-list .lvl { flex-shrink: 0; width: 42px; font-weight: 600; }
-    #console-list .level-error .lvl, #console-list .level-error .msg { color: #dc2626; }
-    #console-list .level-warn .lvl, #console-list .level-warn .msg { color: #d97706; }
-    #console-list .msg { white-space: pre-wrap; word-break: break-word; }
-    #network-list li { display: flex; gap: 10px; padding: 4px 14px; border-bottom: 1px solid #f0f2f5; align-items: baseline; }
-    #network-list .ts { color: #9ca3af; flex-shrink: 0; width: 58px; text-align: right; }
-    #network-list .method { flex-shrink: 0; width: 44px; font-weight: 600; }
-    #network-list .st { flex-shrink: 0; width: 30px; }
-    #network-list li.net-error .st, #network-list li.net-error .url { color: #dc2626; }
-    #network-list .url { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #network-list .kind { color: #9ca3af; flex-shrink: 0; }
-    #network-list .dur { color: #6b7280; flex-shrink: 0; width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
+    #timeline-list { list-style: none; margin: 0; padding: 6px 0; max-height: 220px; overflow-y: auto; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
     #timeline-list li { display: flex; gap: 10px; padding: 4px 14px; border-bottom: 1px solid #f0f2f5; }
     #timeline-list .ts { color: #9ca3af; flex-shrink: 0; }
     #timeline-list .kind { flex-shrink: 0; width: 84px; font-weight: 600; color: #6b7280; }
     #timeline-list .detail { min-width: 0; overflow-wrap: anywhere; }
     #timeline-list .kind-trigger .kind, #timeline-list .kind-trigger .detail { color: #0f766e; }
     #timeline-list .kind-idle .kind, #timeline-list .kind-idle .detail { color: #d97706; }
-    #console-list li:not(.empty), #network-list li:not(.empty), #timeline-list li:not(.empty) { cursor: pointer; }
-    #console-list li.future, #network-list li.future { opacity: 0.4; }
-    #console-list li.current, #network-list li.current { background: #eef2ff; box-shadow: inset 2px 0 0 #4f46e5; }
+    #timeline-list li:not(.empty) { cursor: pointer; }
+    #timeline-list li.future { opacity: 0.4; }
+    #timeline-list li.current { background: #eef2ff; box-shadow: inset 2px 0 0 #4f46e5; }
     .empty { color: #9ca3af; padding: 12px 14px; font-size: 13px; }
   </style>
 </head>
@@ -90,13 +76,9 @@
       <div id="player-host"></div>
       <section class="devtools-panel">
         <div class="devtools-tabs">
-          <button id="tab-console" class="active">Console <span class="count" id="console-count"></span></button>
-          <button id="tab-network">Network <span class="count" id="network-count"></span></button>
-          <button id="tab-timeline">Timeline <span class="count" id="timeline-count"></span></button>
+          <button id="tab-timeline" class="active">Timeline <span class="count" id="timeline-count"></span></button>
         </div>
-        <ul id="console-list"><li class="empty">Console output appears here.</li></ul>
-        <ul id="network-list" hidden><li class="empty">Network requests appear here.</li></ul>
-        <ul id="timeline-list" hidden><li class="empty">Triggers, idle gaps and navigations appear here.</li></ul>
+        <ul id="timeline-list"><li class="empty">Triggers, idle gaps and navigations appear here.</li></ul>
       </section>
     </main>
   </div>

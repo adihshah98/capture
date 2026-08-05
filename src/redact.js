@@ -1,7 +1,7 @@
 /**
- * Redaction shared by the recorder and the network plugin. A recording is a
- * durable copy of whatever it captured, and credentials ride in query strings
- * and console payloads, so they are stripped before anything is stored.
+ * URL redaction for the recorder. A recording is a durable copy of whatever
+ * it captured, and credentials ride in query strings, so they are stripped
+ * before anything is stored.
  */
 
 // Matched as substrings, so `token` also catches `access_token` and
@@ -25,36 +25,6 @@ function redactPairs(query, names) {
     }
   }
   return hit ? params.toString() : null;
-}
-
-/**
- * Free text, i.e. console arguments. Values under 8 characters are left
- * alone: rarely credentials, and redacting `"code": 200` costs more than it
- * buys.
- */
-export function redactText(text, names = DEFAULT_REDACT_PARAMS) {
-  if (typeof text !== 'string' || !text) return text;
-  const sensitive = (key) => names.some((needle) => key.toLowerCase().includes(needle));
-
-  return text
-    // ) excluded so a stack frame's bracket survives; :line:column split off
-    // so frames stay readable.
-    .replace(/https?:\/\/[^\s"'<>\\)]+/gi, (url) => {
-      const frame = url.match(/^(.*?)(:\d+:\d+)$/);
-      return frame ? redactUrl(frame[1], names) + frame[2] : redactUrl(url, names);
-    })
-    // Logging an object gives plain quotes, a stringified one escaped quotes.
-    .replace(/\\"([\w$-]+)\\"(\s*:\s*)\\"([^"\\]{8,})\\"/g, (whole, key, sep) =>
-      sensitive(key) ? `\\"${key}\\"${sep}\\"${PLACEHOLDER}\\"` : whole
-    )
-    .replace(/"([\w$-]+)"(\s*:\s*)"([^"]{8,})"/g, (whole, key, sep) =>
-      sensitive(key) ? `"${key}"${sep}"${PLACEHOLDER}"` : whole
-    )
-    // Skips values already replaced above: re-matching a redacted URL would
-    // swallow whatever trails it, such as a stack frame's :line:column.
-    .replace(/\b([\w-]+)=([^\s&"']{8,})/g, (whole, key, value) =>
-      sensitive(key) && !value.startsWith(PLACEHOLDER) ? `${key}=${PLACEHOLDER}` : whole
-    );
 }
 
 export function redactUrl(url, names = DEFAULT_REDACT_PARAMS) {

@@ -46,10 +46,6 @@
       <textarea id="notes" rows="3" placeholder="Anything else?"></textarea>
       <div class="actions">
         <button type="submit" class="primary">Submit</button>
-        <button type="button" id="log-something">Log to console</button>
-        <button type="button" id="throw-error">Trigger an error</button>
-        <button type="button" id="fetch-ok">Fetch API (200)</button>
-        <button type="button" id="fetch-404">Fetch API (404)</button>
       </div>
     </form>
 
@@ -71,26 +67,10 @@
     document.getElementById('cta').addEventListener('click', () => {
       clicks += 1;
       document.getElementById('counter').textContent = clicks;
-      console.log('CTA clicked', { clicks });
     });
     document.getElementById('signup').addEventListener('submit', (e) => {
       e.preventDefault();
-      console.info('form submitted');
       alertBanner('Form submitted (fake) — check the replay!');
-    });
-    document.getElementById('log-something').addEventListener('click', () => {
-      console.warn('a warning from the demo page', { at: Date.now() });
-    });
-    document.getElementById('throw-error').addEventListener('click', () => {
-      console.error('simulated error: payment failed', { code: 'DEMO_42' });
-    });
-    // Unauthenticated paths on purpose: /api/* answers 401 with
-    // WWW-Authenticate, which would pop a credential prompt on this page.
-    document.getElementById('fetch-ok').addEventListener('click', () => {
-      fetch('/config').then((r) => console.log('fetch ok:', r.status));
-    });
-    document.getElementById('fetch-404').addEventListener('click', () => {
-      fetch('/does-not-exist.json').then((r) => console.log('fetch 404:', r.status));
     });
     function alertBanner(text) {
       const el = document.createElement('div');

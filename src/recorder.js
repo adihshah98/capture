@@ -3,9 +3,7 @@
  * (inputs masked), batches + gzips event chunks, and ships them to /ingest.
  */
 import { record } from 'rrweb';
-import { getRecordConsolePlugin } from '@rrweb/rrweb-plugin-console-record';
-import { getRecordNetworkPlugin } from './network-plugin.js';
-import { DEFAULT_REDACT_PARAMS, redactText, redactUrl } from './redact.js';
+import { DEFAULT_REDACT_PARAMS, redactUrl } from './redact.js';
 
 const DEFAULTS = {
   endpoint: '/ingest',
@@ -42,10 +40,8 @@ const DEFAULTS = {
   maskTextSelector: null,
   blockSelector: null,
   // Query/fragment parameter names whose values are stripped from every
-  // recorded URL, page and network alike.
+  // recorded URL.
   redactUrlParams: DEFAULT_REDACT_PARAMS,
-  // Console arguments are captured verbatim; false stores them unscrubbed.
-  redactConsole: true,
 
   // Consent. requireConsent holds everything — including the config cache
   // write — until window.capture.grantConsent() is called, for pages that
@@ -55,14 +51,6 @@ const DEFAULTS = {
   // navigator.globalPrivacyControl is a legally recognised opt-out signal in
   // several US states, so it is honoured unless a brand turns it off.
   respectGlobalPrivacyControl: true,
-
-  // false disables network capture entirely.
-  network: {
-    captureHeaders: false,
-    captureBody: false,
-    captureResources: true,
-    ignoreUrls: [],
-  },
 };
 
 // Local-only merge so helpers work before init; main() swaps in the full
@@ -225,33 +213,6 @@ function scrubEvent(event) {
     return {
       ...event,
       data: { ...event.data, href: redactUrl(event.data.href, config.redactUrlParams) },
-    };
-  }
-  // Console arguments are stored as the site logged them, secrets included.
-  if (
-    config.redactConsole !== false &&
-    event.type === 6 &&
-    event.data &&
-    event.data.plugin === 'rrweb/console@1' &&
-    event.data.payload &&
-    Array.isArray(event.data.payload.payload)
-  ) {
-    return {
-      ...event,
-      data: {
-        ...event.data,
-        payload: {
-          ...event.data.payload,
-          payload: event.data.payload.payload.map((arg) =>
-            redactText(arg, config.redactUrlParams)
-          ),
-          // Stack frames carry the page URL, so they leak the query string
-          // just as readily as the arguments do.
-          ...(Array.isArray(event.data.payload.trace)
-            ? { trace: event.data.payload.trace.map((f) => redactText(f, config.redactUrlParams)) }
-            : {}),
-        },
-      },
     };
   }
   return event;
@@ -547,32 +508,6 @@ function startRecording() {
       media: 800,
       input: 'last', // only the final value of rapid input bursts
     },
-
-    plugins: [
-      getRecordConsolePlugin({
-        level: ['log', 'info', 'warn', 'error'],
-        lengthThreshold: 1000,
-        stringifyOptions: { stringLengthLimit: 1000, numOfKeysLimit: 100, depthOfLimit: 3 },
-      }),
-      ...(config.network === false
-        ? []
-        : [
-            getRecordNetworkPlugin({
-              // Global redaction applies to request URLs too, unless the
-              // network block overrides it explicitly.
-              redactUrlParams: config.redactUrlParams,
-              ...config.network,
-              ignoreUrls: [
-                // Never capture our own ingest traffic (feedback loop).
-                new URL(config.endpoint, location.href).href.replace(
-                  /[.*+?^${}()|[\]\\]/g,
-                  '\\$&'
-                ),
-                ...((config.network && config.network.ignoreUrls) || []),
-              ],
-            }),
-          ]),
-    ],
   });
   scheduleFlush();
   checkUrlTriggers();

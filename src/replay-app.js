@@ -1,6 +1,6 @@
 /**
- * replay.bundle.js — the replay UI: session list, rrweb-player, and
- * playhead-synced Console/Network panels.
+ * replay.bundle.js — the replay UI: session list, rrweb-player, and a
+ * playhead-synced Timeline panel.
  */
 import rrwebPlayer from 'rrweb-player';
 import 'rrweb-player/dist/style.css';
@@ -8,27 +8,11 @@ import 'rrweb-player/dist/style.css';
 const projectSelectEl = document.getElementById('project-select');
 const sessionListEl = document.getElementById('session-list');
 const playerHostEl = document.getElementById('player-host');
-const consoleListEl = document.getElementById('console-list');
-const networkListEl = document.getElementById('network-list');
 const sessionTitleEl = document.getElementById('session-title');
 const loadProgressEl = document.getElementById('load-progress');
 const windowTabsEl = document.getElementById('window-tabs');
 
 const timelineListEl = document.getElementById('timeline-list');
-
-const tabs = [
-  { btn: document.getElementById('tab-console'), list: consoleListEl },
-  { btn: document.getElementById('tab-network'), list: networkListEl },
-  { btn: document.getElementById('tab-timeline'), list: timelineListEl },
-];
-for (const tab of tabs) {
-  tab.btn.addEventListener('click', () => {
-    for (const t of tabs) {
-      t.btn.classList.toggle('active', t === tab);
-      t.list.hidden = t !== tab;
-    }
-  });
-}
 
 let player = null;
 
@@ -204,8 +188,6 @@ async function deleteSession(sessionId, button) {
   }
 }
 
-let consoleRows = [];
-let networkRows = [];
 let timelineRows = [];
 let syncStart = 0; // absolute timestamp of the session's first event
 
@@ -286,12 +268,8 @@ function attachActivityBar(events) {
 function attachTimeSync() {
   if (!player) return;
   syncStart = player.getMetaData().startTime;
-  syncList(consoleRows, 0);
-  syncList(networkRows, 0);
   syncList(timelineRows, 0);
   player.addEventListener('ui-update-current-time', ({ payload }) => {
-    syncList(consoleRows, payload);
-    syncList(networkRows, payload);
     syncList(timelineRows, payload);
   });
 }
@@ -303,8 +281,6 @@ function attachTimeSync() {
  * Meta event only fires at snapshots and so misses SPA route changes.
  */
 /**
- * The three devtools panels differ only in what they derive and how a row
- * looks; the badge, empty state, click-to-seek and row registry are shared.
  * Items must carry `t` — the timestamp the playhead syncs and seeks to.
  */
 function renderPanel(listEl, countId, items, emptyText, buildRow) {
@@ -354,61 +330,6 @@ function renderTimeline(events, navigations) {
   });
 }
 
-function renderConsole(events) {
-  const logs = events
-    .filter((e) => e.type === 6 && e.data && e.data.plugin === 'rrweb/console@1')
-    .map((e) => ({ t: e.timestamp, ...e.data.payload }));
-
-  consoleRows = renderPanel(consoleListEl, 'console-count', logs, 'No console output captured.', (log) => {
-    const li = document.createElement('li');
-    li.className = `level-${log.level}`;
-    const args = (log.payload || [])
-      .map((p) => {
-        try {
-          return typeof p === 'string' ? p.replace(/^"|"$/g, '') : JSON.stringify(p);
-        } catch {
-          return String(p);
-        }
-      })
-      .join(' ');
-    li.innerHTML = `<span class="ts">${new Date(log.t).toLocaleTimeString()}</span><span class="lvl">${log.level}</span><span class="msg"></span>`;
-    li.querySelector('.msg').textContent = args;
-    return li;
-  });
-}
-
-function renderNetwork(events) {
-  const t0 = events.length ? events[0].timestamp : 0;
-  const requests = events
-    .filter((e) => e.type === 6 && e.data && e.data.plugin === 'capture/network@1')
-    .map((e) => ({ ...e.data.payload, t: e.data.payload.startMs || e.timestamp }))
-    .sort((a, b) => a.t - b.t);
-
-  networkRows = renderPanel(networkListEl, 'network-count', requests, 'No network requests captured.', (req) => {
-    const li = document.createElement('li');
-    if (req.status === 0 || req.status >= 400) li.className = 'net-error';
-    const rel = Math.max(0, req.t - t0) / 1000;
-    li.innerHTML = `
-      <span class="ts"></span>
-      <span class="method"></span>
-      <span class="st"></span>
-      <span class="url"></span>
-      <span class="kind"></span>
-      <span class="dur"></span>
-    `;
-    li.querySelector('.ts').textContent = `+${rel.toFixed(1)}s`;
-    li.querySelector('.method').textContent = req.method || req.initiatorType || '—';
-    li.querySelector('.st').textContent = req.status != null ? req.status : '·';
-    const url = li.querySelector('.url');
-    url.textContent = req.url;
-    url.title = req.url + (req.error ? ` — ${req.error}` : '');
-    li.querySelector('.kind').textContent = req.type === 'resource' ? req.initiatorType : req.type;
-    li.querySelector('.dur').textContent =
-      req.durationMs != null ? `${req.durationMs} ms` : '';
-    return li;
-  });
-}
-
 // Guards the async chunk loop: bumped whenever the user picks a session,
 // so a stale load loop stops instead of feeding events to the wrong player.
 let loadSeq = 0;
@@ -418,11 +339,7 @@ function resetPlayerPanes() {
   player = null;
   playerHostEl.innerHTML = '';
   windowTabsEl.innerHTML = '';
-  consoleListEl.innerHTML = '';
-  networkListEl.innerHTML = '';
   timelineListEl.innerHTML = '';
-  consoleRows = [];
-  networkRows = [];
   timelineRows = [];
   loadProgressEl.textContent = '';
 }
@@ -568,8 +485,6 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
         : 'Not enough events to replay yet.'
     );
   }
-  renderConsole(allEvents);
-  renderNetwork(allEvents);
   renderTimeline(allEvents, navigations);
   attachTimeSync();
   attachActivityBar(allEvents);

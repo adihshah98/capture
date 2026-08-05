@@ -14,7 +14,6 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@rrweb/rrweb-plugin-console-record": "^2.1.1",
     "rrweb": "^2.1.1",
     "rrweb-player": "^2.1.1"
   },

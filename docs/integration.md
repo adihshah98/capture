@@ -45,18 +45,11 @@ Content-Security-Policy, see [Content-Security-Policy](#content-security-policy-
 - **Secrets in URLs are stripped before anything is stored.** Parameter
   values whose names look sensitive (`token`, `password`, `secret`, `auth`,
   `api_key`, `session`, `code`, `email`, `phone`, and similar) are replaced
-  with `REDACTED` in every recorded URL — the page address and every network
-  request alike, query string and OAuth fragment both. So a password-reset
-  or magic link is safe to record; the rest of the URL is kept intact.
-- **Console output is scrubbed the same way.** Console arguments are
-  captured, and analytics or auth payloads logged there routinely carry
-  secrets, so `"token": "..."`-style pairs and secrets inside logged URLs
-  are replaced with `REDACTED` before storage. Ordinary log lines, short
-  values and non-sensitive keys are left intact so the console panel stays
-  useful for debugging.
-- Network capture records URLs, methods, status codes, and timings only.
-  Request/response headers and bodies are not captured, and sensitive
-  headers (authorization, cookies) are always redacted.
+  with `REDACTED` in every recorded page URL, query string and OAuth
+  fragment both. So a password-reset or magic link is safe to record; the
+  rest of the URL is kept intact.
+- **Console output and network requests are not captured at all.** The
+  recording is the DOM and user interactions only.
 
 Note that **visible page text is recorded as-is** — that is what makes a
 replay a replay. If a page renders something that should never be stored,
