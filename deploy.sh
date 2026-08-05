@@ -61,14 +61,15 @@ REMOTE
 # The origin is healthy; confirm the path brands actually use works too. A
 # CloudFront or security-group change can break this while the box is fine.
 fail=0
-check() { # description expected-status url
+check() { # description expected-status(es, space-separated) url
   actual=$(curl -s -o /dev/null -w '%{http_code}' "$3")
-  if [ "$actual" = "$2" ]; then
-    printf '  ok    %-34s %s\n' "$1" "$actual"
-  else
-    printf '  FAIL  %-34s %s (expected %s)\n' "$1" "$actual" "$2" >&2
-    fail=1
-  fi
+  case " $2 " in
+    *" $actual "*)
+      printf '  ok    %-34s %s\n' "$1" "$actual" ;;
+    *)
+      printf '  FAIL  %-34s %s (expected %s)\n' "$1" "$actual" "$2" >&2
+      fail=1 ;;
+  esac
 }
 
 echo "checking $PUBLIC_URL"
@@ -76,7 +77,8 @@ check "health"                 200 "$PUBLIC_URL/healthz"
 check "snippet"                200 "$PUBLIC_URL/capture.js"
 check "recorder bundle"        200 "$PUBLIC_URL/recorder.bundle.js"
 check "remote config"          200 "$PUBLIC_URL/config"
-check "replay UI is gated"     401 "$PUBLIC_URL/replay.html"
+# 401 in Basic-password mode, 302-to-login in WorkOS mode — gated either way.
+check "replay UI is gated"     "401 302" "$PUBLIC_URL/replay.html"
 check "read API is gated"      401 "$PUBLIC_URL/api/sessions"
 
 # Served, not just present: a truncated or stale build returns 200 too.

@@ -7,6 +7,8 @@ Run: .venv/bin/uvicorn server:app --port 3000
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import os
 import random
@@ -15,6 +17,8 @@ import secrets
 import shutil
 import string
 import time
+import urllib.parse
+import urllib.request
 import zlib
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,7 +26,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 @asynccontextmanager
@@ -32,6 +36,11 @@ async def lifespan(_app):
         print(
             "warning: REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
             "open to anyone who can reach this server"
+        )
+    elif WORKOS_ENABLED:
+        print(
+            "replay auth: WorkOS per-user logins; projects are visible to "
+            "their org_id members" + (" and operators" if OPERATORS else " (no operators set)")
         )
     elif not REPLAY_PASSWORD:
         print(
@@ -68,32 +77,46 @@ app.add_middleware(
 
 @app.middleware("http")
 async def replay_auth(request: Request, call_next):
-    """The read side requires REPLAY_PASSWORD; with none set it refuses to
-    serve rather than falling open. The write side stays open for the snippet."""
+    """The read side requires a login. Most specific mode wins: local dev
+    opts out entirely; WorkOS (if configured) gives per-user sessions scoped
+    to a brand's own projects; else REPLAY_PASSWORD guards everything as a
+    single operator; nothing configured refuses to serve rather than falling
+    open. The write side stays open for the snippet in every mode."""
     # Normalized so /Api/ and //replay.html can't slip past a check that
     # StaticFiles would still serve them from.
     path = re.sub(r"/+", "/", request.url.path).lower()
     protected = path.startswith("/api/") or path == "/replay.html"
     if protected and not REPLAY_AUTH_DISABLED:
-        if not REPLAY_PASSWORD:
+        if WORKOS_ENABLED:
+            session = read_session(request.cookies.get(SESSION_COOKIE))
+            if not session:
+                if path == "/replay.html":  # a person in a browser: send to login
+                    return RedirectResponse("/login", status_code=302)
+                return JSONResponse(  # the UI's fetches: point it at login
+                    {"error": "login required", "login": "/login"}, status_code=401
+                )
+            request.state.auth = session
+        elif not REPLAY_PASSWORD:
             return Response(
-                "Replay access is unconfigured. Set REPLAY_PASSWORD to a secret, "
+                "Replay access is unconfigured. Set REPLAY_PASSWORD to a secret "
+                "(or WORKOS_API_KEY + WORKOS_CLIENT_ID for per-user logins), "
                 "or REPLAY_AUTH_DISABLED=1 to serve recordings to anyone.\n",
                 status_code=503,
                 media_type="text/plain",
             )
-        supplied = ""
-        header = request.headers.get("authorization", "")
-        if header.startswith("Basic "):
-            try:
-                supplied = base64.b64decode(header[6:]).decode().partition(":")[2]
-            except Exception:
-                supplied = ""
-        if not secrets.compare_digest(supplied, REPLAY_PASSWORD):
-            return Response(
-                status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="capture replay"'},
-            )
+        else:
+            supplied = ""
+            header = request.headers.get("authorization", "")
+            if header.startswith("Basic "):
+                try:
+                    supplied = base64.b64decode(header[6:]).decode().partition(":")[2]
+                except Exception:
+                    supplied = ""
+            if not secrets.compare_digest(supplied, REPLAY_PASSWORD):
+                return Response(
+                    status_code=401,
+                    headers={"WWW-Authenticate": 'Basic realm="capture replay"'},
+                )
     return await call_next(request)
 
 
@@ -122,6 +145,51 @@ PROJECTS_DIR = DATA_ROOT / "projects"
 # REPLAY_AUTH_DISABLED=1 opts out for local development.
 REPLAY_PASSWORD = os.environ.get("REPLAY_PASSWORD", "")
 REPLAY_AUTH_DISABLED = os.environ.get("REPLAY_AUTH_DISABLED") == "1"
+
+# Per-user logins via WorkOS AuthKit. When both vars are set they replace the
+# Basic password: each project's org_id (see `set-org`) says which WorkOS
+# organization may read it, so a brand's team sees only their own recordings.
+WORKOS_API_KEY = os.environ.get("WORKOS_API_KEY", "")
+WORKOS_CLIENT_ID = os.environ.get("WORKOS_CLIENT_ID", "")
+WORKOS_ENABLED = bool(WORKOS_API_KEY and WORKOS_CLIENT_ID)
+WORKOS_API = "https://api.workos.com"
+
+# Operator emails see every project (and the legacy no-project pool).
+OPERATORS = {e.strip().lower() for e in os.environ.get("CAPTURE_OPERATORS", "").split(",") if e.strip()}
+
+# Sessions are HMAC-signed cookies, no server-side store. Rotating the secret
+# (or the API key it is derived from) logs everyone out — nothing else.
+SESSION_SECRET = os.environ.get("SESSION_SECRET") or hashlib.sha256(
+    f"session:{WORKOS_API_KEY}".encode()
+).hexdigest()
+SESSION_TTL_S = 7 * 24 * 3600
+SESSION_COOKIE = "capture_session"
+STATE_COOKIE = "capture_login_state"
+
+
+def _sign(raw: str) -> str:
+    return hmac.new(SESSION_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
+
+
+def make_session(payload: dict) -> str:
+    raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return f"{raw}.{_sign(raw)}"
+
+
+def read_session(cookie: Optional[str]) -> Optional[dict]:
+    """The payload of a validly signed, unexpired session cookie, else None."""
+    if not cookie or "." not in cookie:
+        return None
+    raw, sig = cookie.rsplit(".", 1)
+    if not secrets.compare_digest(_sign(raw), sig):
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or payload.get("exp", 0) < time.time():
+        return None
+    return payload
 
 
 def load_projects() -> dict:
@@ -328,7 +396,7 @@ def healthz():
         (BASE_DIR / "public" / name).is_file()
         for name in ("capture.js", "recorder.bundle.js", "replay.bundle.js")
     )
-    checks["replay_auth_enabled"] = bool(REPLAY_PASSWORD) and not REPLAY_AUTH_DISABLED
+    checks["replay_auth_enabled"] = bool(REPLAY_PASSWORD or WORKOS_ENABLED) and not REPLAY_AUTH_DISABLED
 
     # Auth off is a deliberate local-dev choice: reported, but not a failure.
     healthy = all(v for k, v in checks.items() if k != "replay_auth_enabled")
@@ -379,22 +447,130 @@ def read_pool(project: Optional[str]) -> Optional[Path]:
     return None
 
 
+def workos_call(path: str, payload: Optional[dict] = None, bearer: bool = False) -> dict:
+    req = urllib.request.Request(
+        WORKOS_API + path,
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={
+            "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {WORKOS_API_KEY}"} if bearer else {}),
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as res:
+        return json.load(res)
+
+
+def workos_authenticate(code: str) -> tuple:
+    """Exchange the AuthKit code for the user's email and organization ids."""
+    auth = workos_call(
+        "/user_management/authenticate",
+        {
+            "client_id": WORKOS_CLIENT_ID,
+            "client_secret": WORKOS_API_KEY,
+            "grant_type": "authorization_code",
+            "code": code,
+        },
+    )
+    user = auth.get("user") or {}
+    orgs = {auth["organization_id"]} if auth.get("organization_id") else set()
+    if user.get("id"):
+        memberships = workos_call(
+            f"/user_management/organization_memberships?user_id={user['id']}&statuses=active",
+            bearer=True,
+        )
+        orgs |= {m["organization_id"] for m in memberships.get("data", []) if m.get("organization_id")}
+    return (user.get("email") or "").lower(), sorted(orgs)
+
+
+@app.get("/login")
+def login():
+    if not WORKOS_ENABLED:
+        return Response(
+            "Per-user login is not configured; set WORKOS_API_KEY and WORKOS_CLIENT_ID.\n",
+            status_code=503,
+            media_type="text/plain",
+        )
+    state = secrets.token_urlsafe(24)
+    query = urllib.parse.urlencode(
+        {
+            "client_id": WORKOS_CLIENT_ID,
+            "redirect_uri": public_base_url() + "/auth/callback",
+            "response_type": "code",
+            "provider": "authkit",
+            "state": state,
+        }
+    )
+    response = RedirectResponse(f"{WORKOS_API}/user_management/authorize?{query}", status_code=302)
+    response.set_cookie(STATE_COOKIE, state, max_age=600, httponly=True, secure=True, samesite="lax")
+    return response
+
+
+@app.get("/auth/callback")
+def auth_callback(request: Request, code: Optional[str] = Query(None), state: Optional[str] = Query(None)):
+    if not WORKOS_ENABLED:
+        raise ApiError(503, "login not configured")
+    # The state cookie ties the callback to a login this server started.
+    if not code or not state or state != request.cookies.get(STATE_COOKIE):
+        raise ApiError(401, "bad login attempt — start again at /login")
+    try:
+        email, orgs = workos_authenticate(code)
+    except Exception as exc:
+        print(f"auth: WorkOS code exchange failed: {exc}")
+        raise ApiError(401, "login failed — start again at /login")
+    session = make_session({"email": email, "orgs": orgs, "exp": int(time.time()) + SESSION_TTL_S})
+    response = RedirectResponse("/replay.html", status_code=302)
+    response.set_cookie(
+        SESSION_COOKIE, session, max_age=SESSION_TTL_S, httponly=True, secure=True, samesite="lax"
+    )
+    response.delete_cookie(STATE_COOKIE)
+    return response
+
+
+@app.get("/logout")
+def logout():
+    response = Response("Signed out.\n", media_type="text/plain")
+    response.delete_cookie(SESSION_COOKIE)
+    return response
+
+
+def allowed_projects(request: Request) -> Optional[set]:
+    """Project tokens this request may read; None means unrestricted (an
+    operator, the Basic-password mode, or auth disabled for local dev)."""
+    auth = getattr(request.state, "auth", None)
+    if auth is None or (auth.get("email") or "").lower() in OPERATORS:
+        return None
+    orgs = set(auth.get("orgs") or [])
+    return {t for t, meta in load_projects().items() if (meta or {}).get("org_id") in orgs}
+
+
+def require_read_access(request: Request, project: Optional[str]) -> None:
+    """Reject reads outside the session's own projects. The ?project= query
+    parameter is untrusted input once brands hold logins."""
+    allowed = allowed_projects(request)
+    if allowed is not None and (not project or project not in allowed):
+        raise ApiError(403, "not your project")
+
+
 @app.get("/api/projects")
-def list_projects():
-    """Projects for the replay UI's selector. The legacy pool shows up as a
-    blank token when it still holds recordings, so pre-project sessions
-    stay reachable after tokens are introduced."""
+def list_projects(request: Request):
+    """Projects for the replay UI's selector, limited to what the session may
+    read. The legacy pool shows up as a blank token for operators when it
+    still holds recordings, so pre-project sessions stay reachable after
+    tokens are introduced."""
+    allowed = allowed_projects(request)
     projects = [
         {"token": token, "name": (meta or {}).get("name") or token}
         for token, meta in load_projects().items()
+        if allowed is None or token in allowed
     ]
-    if projects and any(entry.is_dir() for entry in DATA_DIR.iterdir()):
+    if allowed is None and projects and any(entry.is_dir() for entry in DATA_DIR.iterdir()):
         projects.append({"token": "", "name": "(no project)"})
     return {"projects": projects}
 
 
 @app.get("/api/sessions")
-def list_sessions(project: Optional[str] = Query(None)):
+def list_sessions(request: Request, project: Optional[str] = Query(None)):
+    require_read_access(request, project)
     pool = resolve_pool(project)
     sessions = []
     for entry in pool.iterdir() if pool.is_dir() else []:
@@ -417,9 +593,11 @@ def list_sessions(project: Optional[str] = Query(None)):
 
 
 @app.delete("/api/sessions/{session_id}")
-def delete_session(session_id: str, project: Optional[str] = Query(None)):
+def delete_session(request: Request, session_id: str, project: Optional[str] = Query(None)):
     """Irreversible. DELETE is absent from the CORS allowlist, so only the
-    replay UI's own origin can reach it."""
+    replay UI's own origin can reach it. Brands may delete within their own
+    project — it is their data."""
+    require_read_access(request, project)
     session_dir = resolve_session(session_id, project)
     freed = dir_bytes(session_dir)
     shutil.rmtree(session_dir, ignore_errors=True)
@@ -429,8 +607,9 @@ def delete_session(session_id: str, project: Optional[str] = Query(None)):
 
 
 @app.get("/api/sessions/{session_id}/chunks")
-def session_chunks(session_id: str, project: Optional[str] = Query(None)):
+def session_chunks(request: Request, session_id: str, project: Optional[str] = Query(None)):
     """Ordered chunk manifest; the player fetches chunks one by one."""
+    require_read_access(request, project)
     chunks = sorted(resolve_session(session_id, project).glob("*.json"), key=chunk_timestamp)
     url = None
     if chunks:  # only the first chunk is opened; the rest stay on disk
@@ -452,7 +631,8 @@ def session_chunks(session_id: str, project: Optional[str] = Query(None)):
 
 
 @app.get("/api/sessions/{session_id}/chunks/{chunk_name}")
-def session_chunk(session_id: str, chunk_name: str, project: Optional[str] = Query(None)):
+def session_chunk(request: Request, session_id: str, chunk_name: str, project: Optional[str] = Query(None)):
+    require_read_access(request, project)
     if not SAFE_ID.match(session_id) or not SAFE_CHUNK.match(chunk_name):
         raise ApiError(400, "invalid id")
     path = resolve_pool(project) / session_id / chunk_name
@@ -542,7 +722,20 @@ def list_projects_cli() -> None:
     for token, meta in projects.items():
         count, used = pool_usage(project_sessions_dir(token))
         name = (meta or {}).get("name") or "?"
-        print(f"{token}  {name}  —  {count} session(s), {used / 1024**2:.1f} MB")
+        org = (meta or {}).get("org_id") or "no org — operators only"
+        print(f"{token}  {name}  —  {count} session(s), {used / 1024**2:.1f} MB  —  {org}")
+
+
+def set_project_org(token: str, org_id: str) -> None:
+    """Grant a WorkOS organization read access to a project's recordings."""
+    projects = load_projects()
+    if token not in projects:
+        print(f"no such project: {token}")
+        return
+    projects[token] = {**(projects[token] or {}), "org_id": org_id}
+    PROJECTS_PATH.write_text(json.dumps(projects, indent=2))
+    name = (projects[token] or {}).get("name") or token
+    print(f"'{name}' is now readable by members of WorkOS organization {org_id}")
 
 
 def remove_project(token: str, purge: bool) -> None:
@@ -575,8 +768,11 @@ if __name__ == "__main__":
         list_projects_cli()
     elif len(argv) >= 2 and argv[0] == "remove-project":
         remove_project(argv[1], purge="--purge" in argv[2:])
+    elif len(argv) >= 3 and argv[0] == "set-org":
+        set_project_org(argv[1], argv[2])
     else:
         print("usage: python server.py add-project <name>")
         print("       python server.py list-projects")
         print("       python server.py remove-project <token> [--purge]")
+        print("       python server.py set-org <token> <workos_org_id>")
         print("run the server with: .venv/bin/uvicorn server:app --port 3000")

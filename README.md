@@ -81,6 +81,45 @@ replay UI grows a project selector. Operator notes:
   everything over HTTPS (any reverse proxy in front of uvicorn); browsers
   block plain-HTTP ingest from HTTPS pages.
 
+## Giving brands their own logins (WorkOS)
+
+`REPLAY_PASSWORD` is single-operator: whoever holds it sees every project.
+To let each brand's team watch **only their own** recordings, switch the read
+side to per-user logins backed by [WorkOS AuthKit](https://workos.com/docs/authkit)
+(free tier covers this comfortably):
+
+1. In the WorkOS dashboard: create an application, enable AuthKit, and add
+   `https://capture.yourdomain.com/auth/callback` as a redirect URI.
+2. Create one WorkOS **Organization** per brand and invite that brand's
+   users to it.
+3. On the server, set the environment and restart:
+
+   ```bash
+   WORKOS_API_KEY=sk_...          # API key — also signs session cookies
+   WORKOS_CLIENT_ID=client_...
+   CAPTURE_OPERATORS=you@example.com   # comma-separated; these emails see every project
+   ```
+
+4. Tie each project to its brand's organization:
+
+   ```bash
+   python server.py set-org cap_xxxxxxxx org_yyyyyyyy
+   ```
+
+With both `WORKOS_*` vars set, `/replay.html` redirects to a hosted login
+instead of prompting for the Basic password; sessions are 7-day HMAC-signed
+cookies (rotate `SESSION_SECRET` or the API key to log everyone out). A
+logged-in user sees exactly the projects whose `org_id` matches one of their
+organizations — the project selector, session lists, chunks, and the Delete
+button all scope to that. Operators see everything, including the legacy
+no-project pool. Unset the `WORKOS_*` vars to fall back to `REPLAY_PASSWORD`.
+The write side (`/ingest`, `/config`, bundles) is unaffected — the snippet
+still runs on brand pages with no login.
+
+If a CDN fronts the server, it must forward cookies and query strings to the
+origin for `/replay.html`, `/api/*`, `/login`, and `/auth/*` (with caching
+disabled on those paths, which is the safe default for the read side anyway).
+
 Optional config, before the tag (inline values win over the derived ones):
 
 ```html
@@ -134,6 +173,7 @@ Optional config, before the tag (inline values win over the derived ones):
 | `public/capture.js` (~1 KB) | Loader snippet; derives server URL + token from its own tag, lazy-loads the recorder after page idle |
 | `data/projects.json` + `?token=` on ingest/config | Per-brand projects: token-gated ingest, isolated storage, per-project config |
 | `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you; unset means the read side is refused, not open |
+| `WORKOS_API_KEY` + `WORKOS_CLIENT_ID` (per-user logins) | Replaces the Basic password with WorkOS AuthKit; each project's `org_id` scopes which brand team can read it |
 | `src/recorder.js` → `recorder.bundle.js` | rrweb `record()` + console plugin, session/window ids, batching, gzip, keepalive flush |
 | `server.py` — `POST /ingest?compression=gzip-js` | FastAPI endpoint receiving gzipped JSON event batches |
 | `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts |

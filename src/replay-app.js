@@ -96,6 +96,12 @@ async function fetchJson(url, options) {
   }
   if (!res.ok) {
     if (res.status === 401) {
+      // Per-user login mode: the server points at its login page. Session
+      // expiry mid-visit lands here, so go log in rather than erroring.
+      if (body && body.login) {
+        window.location = body.login;
+        throw new Error('Signing in…');
+      }
       throw new Error('Not authorized — reload the page to re-enter the replay password.');
     }
     throw new Error((body && body.error) || `Server returned ${res.status}.`);
