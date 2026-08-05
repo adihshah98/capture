@@ -1,12 +1,6 @@
-"""Server tests: auth, ingest limits, storage quotas, and the delete path.
-
-Each case boots a real uvicorn process against a throwaway CAPTURE_DATA_DIR,
-so this exercises what actually ships — middleware order, env parsing and all
-— rather than an in-process approximation. Only the standard library is used;
-there is no test dependency to install.
-
-Run: python -m unittest discover -s tests
-"""
+# Each case boots a real uvicorn process against a throwaway CAPTURE_DATA_DIR,
+# so tests exercise what actually ships — middleware order, env parsing and
+# all — rather than an in-process approximation.
 
 import gzip
 import json
@@ -33,7 +27,7 @@ def free_port() -> int:
 
 
 def request(url, method="GET", data=None, headers=None):
-    """Returns (status, body-bytes). HTTP errors are values here, not raises."""
+    # HTTP errors are (status, body) values here, not raises.
     req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
     try:
         with urllib.request.urlopen(req, timeout=10) as res:
@@ -43,8 +37,6 @@ def request(url, method="GET", data=None, headers=None):
 
 
 class ServerCase(unittest.TestCase):
-    """Boots one server per test class with the given environment."""
-
     env: dict = {}
 
     @classmethod
@@ -103,7 +95,6 @@ class TestIngestValidation(ServerCase):
         self.assertEqual(self.ingest("../etc/passwd"), 400)
 
     def test_non_object_bodies_are_400_not_500(self):
-        # A list parses as JSON but has no .get; this used to be an unhandled 500.
         for body in (b"[]", b'"hi"', b"7", b"null"):
             with self.subTest(body=body):
                 self.assertEqual(self.ingest("t" * 32, raw=body), 400)
@@ -122,10 +113,9 @@ class TestGzipBomb(ServerCase):
         self.assertEqual(self.ingest("w" * 32), 200)
 
     def test_bomb_is_refused_and_server_survives(self):
-        bomb = gzip.compress(b"\0" * (8 * 1024 * 1024))  # ~8 KB on the wire
+        bomb = gzip.compress(b"\0" * (8 * 1024 * 1024))
         self.assertLess(len(bomb), 100 * 1024)
         self.assertEqual(self.ingest("x" * 32, raw=bomb, gzipped=False), 400)
-        # The point of the ceiling is that the process is still there.
         self.assertEqual(request(f"{self.base}/config")[0], 200)
 
 
@@ -220,9 +210,6 @@ class TestDelete(ServerCase):
 
 
 class TestOrderEvents(ServerCase):
-    """The Shopify custom pixel posts checkout outcomes to /order; they show
-    up on the session in the list API but never as replayable chunks."""
-
     def order(self, session_id, payload):
         return request(
             f"{self.base}/order?session_id={session_id}",
@@ -337,7 +324,6 @@ class TestHealthz(ServerCase):
         self.assertTrue(payload["checks"]["replay_auth_enabled"])
 
     def test_needs_no_password(self):
-        # deploy.sh and any uptime check must reach it unauthenticated.
         self.assertEqual(request(f"{self.base}/healthz")[0], 200)
 
     def test_leaks_no_project_detail(self):
@@ -359,7 +345,6 @@ class TestHealthzDegraded(ServerCase):
 
 class TestHealthzUnwritableStorage(ServerCase):
     def test_503_when_storage_cannot_be_written(self):
-        # The failure /config could never surface: process up, storage dead.
         self.assertEqual(request(f"{self.base}/healthz")[0], 200)
         mode = self.data_dir.stat().st_mode
         os.chmod(self.data_dir, 0o500)

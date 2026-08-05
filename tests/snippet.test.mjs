@@ -1,10 +1,4 @@
-/**
- * The built loader snippet. Page config outranks the derived values by
- * design, so any page that folds untrusted input into CAPTURE_CONFIG must not
- * be able to turn the snippet into a script loader for a third party.
- *
- * Runs against public/capture.js — the artifact that is actually served.
- */
+// Runs against public/capture.js — the artifact that is actually served.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

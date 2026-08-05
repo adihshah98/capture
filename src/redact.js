@@ -1,9 +1,3 @@
-/**
- * URL redaction for the recorder. A recording is a durable copy of whatever
- * it captured, and credentials ride in query strings, so they are stripped
- * before anything is stored.
- */
-
 // Matched as substrings, so `token` also catches `access_token` and
 // `csrfToken`. Over-matching costs detail; under-matching stores a credential.
 export const DEFAULT_REDACT_PARAMS = [
@@ -13,7 +7,6 @@ export const DEFAULT_REDACT_PARAMS = [
 
 const PLACEHOLDER = 'REDACTED';
 
-/** Returns the rewritten query string, or null when nothing matched. */
 function redactPairs(query, names) {
   const params = new URLSearchParams(query);
   let hit = false;

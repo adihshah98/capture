@@ -1,7 +1,3 @@
-/**
- * URL redaction. Credentials ride in query strings and OAuth fragments, and a
- * recording is a durable copy of whatever it captured.
- */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 

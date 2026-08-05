@@ -1,9 +1,3 @@
-/**
- * capture.js — loader snippet. Derives the server URL and project token
- * from its own <script> tag, then lazy-loads the recorder bundle:
- *
- *   <script src="https://capture.example.com/capture.js" data-token="cap_xxx"></script>
- */
 (function () {
   if (window.__captureLoaded) return;
   window.__captureLoaded = true;
@@ -21,8 +15,6 @@
       derived.token = script.getAttribute('data-token');
     }
   }
-  // Published globally for the recorder bundle; inline page config wins
-  // over the derived values.
   var config = (window.CAPTURE_CONFIG = Object.assign(derived, window.CAPTURE_CONFIG || {}));
 
   // Page config outranks the derived values, so a page that folds untrusted

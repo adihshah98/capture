@@ -1,9 +1,6 @@
-"""WorkOS-mode read-side auth: login redirects, signed session cookies, and
-org→project scoping. No WorkOS network calls are made — these tests mint
-session cookies with the same HMAC scheme the server uses (SESSION_SECRET is
-pinned via the environment), which exercises validation, expiry, and scoping
-without touching the code-exchange path.
-"""
+# No WorkOS network calls: session cookies are minted with the same HMAC
+# scheme the server uses (SESSION_SECRET pinned via the environment), which
+# exercises validation, expiry, and scoping without the code-exchange path.
 
 import base64
 import hashlib
@@ -20,8 +17,7 @@ SECRET = "test-session-secret"
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
-    """/login 302s to api.workos.com; following it would leave the test box."""
-
+    # /login 302s to api.workos.com; following it would leave the test box.
     def redirect_request(self, *args, **kwargs):
         return None
 
@@ -73,8 +69,6 @@ class TestWorkOSScoping(ServerCase):
     def api(self, path, cookie):
         return request(f"{self.base}{path}", headers={"Cookie": cookie})
 
-    # -- unauthenticated --
-
     def test_replay_html_redirects_to_login(self):
         status, headers, _ = request_no_redirect(f"{self.base}/replay.html")
         self.assertEqual(status, 302)
@@ -104,8 +98,6 @@ class TestWorkOSScoping(ServerCase):
         )
         self.assertEqual(status, 401)
 
-    # -- cookie validation --
-
     def test_forged_signature_is_rejected(self):
         cookie = session_cookie("who@evil.com", ["org_alpha"], secret="wrong-secret")
         self.assertEqual(self.api("/api/sessions?project=cap_alpha", cookie)[0], 401)
@@ -113,8 +105,6 @@ class TestWorkOSScoping(ServerCase):
     def test_expired_session_is_rejected(self):
         cookie = session_cookie("a@alpha.com", ["org_alpha"], exp_in=-10)
         self.assertEqual(self.api("/api/sessions?project=cap_alpha", cookie)[0], 401)
-
-    # -- scoping --
 
     def test_member_sees_only_their_own_project(self):
         cookie = session_cookie("a@alpha.com", ["org_alpha"])
@@ -169,8 +159,6 @@ class TestWorkOSScoping(ServerCase):
             headers={"Cookie": cookie},
         )
         self.assertEqual(status, 200)
-
-    # -- the write side is untouched --
 
     def test_ingest_still_needs_only_the_project_token(self):
         self.assertEqual(self.ingest("w" * 32, token="cap_alpha"), 200)

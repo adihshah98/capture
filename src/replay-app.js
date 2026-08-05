@@ -1,7 +1,3 @@
-/**
- * replay.bundle.js — the replay UI: session list, rrweb-player, and a
- * playhead-synced Timeline panel.
- */
 import rrwebPlayer from 'rrweb-player';
 import 'rrweb-player/dist/style.css';
 
@@ -40,8 +36,6 @@ function pagePath(url) {
   }
 }
 
-// Empty on single-tenant servers (no projects) — the selector stays hidden
-// and reads go unscoped.
 let currentProject = '';
 
 function projectQuery() {
@@ -70,11 +64,6 @@ async function loadProjects() {
   });
 }
 
-/**
- * fetch + JSON with the failure cases the UI has to survive: an unreachable
- * server, and the API answering {"error": ...} with a 4xx. Without this a 401
- * left the page blank, which reads as "broken" rather than "sign in again".
- */
 async function fetchJson(url, options) {
   let res;
   try {
@@ -94,8 +83,7 @@ async function fetchJson(url, options) {
   }
   if (!res.ok) {
     if (res.status === 401) {
-      // Per-user login mode: the server points at its login page. Session
-      // expiry mid-visit lands here, so go log in rather than erroring.
+      // Session expiry mid-visit lands here: go log in rather than erroring.
       if (body && body.login) {
         window.location = body.login;
         throw new Error('Signing in…');
@@ -107,7 +95,7 @@ async function fetchJson(url, options) {
   return body || {};
 }
 
-/** Server-supplied text goes in via textContent, never innerHTML. */
+// Server-supplied text goes in via textContent, never innerHTML.
 function showListMessage(message) {
   sessionListEl.innerHTML = '';
   const li = document.createElement('li');
@@ -224,11 +212,8 @@ function renderSessionList() {
   }
 }
 
-/**
- * Two clicks to delete: the first arms the button, the second erases. Inline
- * rather than confirm() so the page never blocks on a modal, and because this
- * is irreversible — nothing else removes a recording before retention does.
- */
+// Two clicks to delete, inline rather than confirm(): the page never blocks
+// on a modal, and this is irreversible.
 async function deleteSession(sessionId, button) {
   if (button.dataset.armed !== 'yes') {
     button.dataset.armed = 'yes';
@@ -264,14 +249,13 @@ function seekTo(timestamp) {
   if (player) player.goto(Math.max(0, timestamp - syncStart));
 }
 
-/** Dim rows the playhead hasn't reached; highlight the latest-fired one. */
 function syncList(rows, currentMs) {
   let currentIdx = -1;
   for (let i = 0; i < rows.length; i++) {
     if (rows[i].t - syncStart <= currentMs) currentIdx = i;
     else break;
   }
-  if (rows.lastIdx === currentIdx) return; // nothing moved since last frame
+  if (rows.lastIdx === currentIdx) return;
   rows.lastIdx = currentIdx;
   rows.forEach((row, i) => {
     row.el.classList.toggle('current', i === currentIdx);
@@ -286,11 +270,8 @@ function syncList(rows, currentMs) {
 // MouseInteraction(2), Scroll(3), Input(5), TouchMove(6).
 const INTERACTIVE_SOURCES = new Set([1, 2, 3, 5, 6]);
 
-/**
- * Histogram of user interactions painted above the player's progress bar.
- * pointer-events: none keeps it click-through, so seeking on the progress
- * bar underneath works untouched.
- */
+// pointer-events: none keeps the canvas click-through, so seeking on the
+// progress bar underneath works untouched.
 function attachActivityBar(events) {
   if (!player) return;
   const progressEl = playerHostEl.querySelector('.rr-progress');
@@ -343,15 +324,6 @@ function attachTimeSync() {
   });
 }
 
-/**
- * The recorder has always stamped why a session was kept and where it went
- * idle, and every chunk records the URL it was flushed from — none of it was
- * ever shown. `navigations` comes from the chunks themselves, because rrweb's
- * Meta event only fires at snapshots and so misses SPA route changes.
- */
-/**
- * Items must carry `t` — the timestamp the playhead syncs and seeks to.
- */
 function renderPanel(listEl, countId, items, emptyText, buildRow) {
   document.getElementById(countId).textContent = items.length ? `(${items.length})` : '';
   listEl.innerHTML = '';
@@ -413,7 +385,6 @@ function resetPlayerPanes() {
   loadProgressEl.textContent = '';
 }
 
-/** Tear the player down so a deleted session can't stay on screen. */
 function clearPlayer() {
   loadSeq += 1;
   loadedSessionId = null;
@@ -456,8 +427,6 @@ async function loadSession(sessionId) {
     if (!byWindow.has(key)) byWindow.set(key, []);
     byWindow.get(key).push(chunk);
   }
-  // A session directory can exist with no readable chunks — reaching into an
-  // empty sort result here used to throw and blank the page.
   if (byWindow.size === 0) {
     showPlayerMessage('This session has no chunks to replay.');
     return;

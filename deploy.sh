@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
-# Ship the current code to the production EC2 box and restart the service.
-# Requires ./setup.sh to have been run once on the box first.
-# Recorded sessions (data/) are untouched — this only replaces code.
-#
-# The box is not reachable directly: its security group only admits
-# CloudFront, which terminates TLS and is what brand tags point at. So the
-# deploy is checked twice — on the origin, then through the CDN.
-#
-# A failed check rolls the previous code back and exits non-zero.
-#
-# Usage: ./deploy.sh
+# The box only admits CloudFront, so the deploy is checked twice — on the
+# origin, then through the CDN. A failed check rolls back the previous code.
 set -euo pipefail
 
 HOST="${CAPTURE_HOST:-ec2-user@ec2-35-167-249-40.us-west-2.compute.amazonaws.com}"
@@ -25,8 +16,7 @@ ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail
 cd /opt/capture
 
-# Snapshot the running code so a bad deploy can be undone. data/ is excluded:
-# recordings are never part of the rollback.
+# data/ is excluded: recordings are never part of the rollback.
 rm -rf .rollback && mkdir .rollback
 cp -a server.py requirements.txt public .rollback/ 2>/dev/null || true
 
@@ -35,8 +25,7 @@ tar xzf /tmp/capture-deploy.tar.gz
 .venv/bin/pip install -q -r requirements.txt
 sudo systemctl restart capture
 
-# /healthz reports storage writability and whether the bundles exist, so this
-# fails on a broken deploy rather than on a closed port.
+# /healthz fails on a broken deploy, not just a closed port.
 for i in $(seq 1 30); do
   if curl -sf -o /tmp/health.json localhost/healthz; then
     echo "origin health: $(cat /tmp/health.json)"
@@ -58,8 +47,8 @@ fi
 exit 1
 REMOTE
 
-# The origin is healthy; confirm the path brands actually use works too. A
-# CloudFront or security-group change can break this while the box is fine.
+# A CloudFront or security-group change can break the public path while the
+# box itself is fine.
 fail=0
 check() { # description expected-status(es, space-separated) url
   actual=$(curl -s -o /dev/null -w '%{http_code}' "$3")

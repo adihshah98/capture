@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
-# One-time server bootstrap for the production EC2 box: app directory,
-# generated replay password, systemd unit. Run once, then use ./deploy.sh
-# for every code deploy. Re-running is safe — it won't rotate an existing
-# password or disturb recorded data.
-#
-# Usage: ./setup.sh
+# One-time bootstrap; ./deploy.sh handles code deploys. Re-running is safe —
+# it won't rotate an existing password or disturb recorded data.
 set -euo pipefail
 
 HOST="${CAPTURE_HOST:-ec2-user@ec2-35-167-249-40.us-west-2.compute.amazonaws.com}"
 KEY="${CAPTURE_KEY:-$HOME/Downloads/capture-key.pem}"
-# What brand tags point at: CloudFront, which fronts the box. Recorded on the
-# server so `server.py add-project` prints a pasteable tag.
 PUBLIC_URL="${CAPTURE_PUBLIC_URL:-https://d1lt8dgxjrizij.cloudfront.net}"
 
 ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" bash -s "$PUBLIC_URL" <<'REMOTE'

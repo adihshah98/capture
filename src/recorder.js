@@ -1,13 +1,9 @@
-/**
- * recorder.bundle.js — the lazy-loaded rrweb recorder: records the DOM
- * (inputs masked), batches + gzips event chunks, and ships them to /ingest.
- */
 import { record } from 'rrweb';
 import { DEFAULT_REDACT_PARAMS, redactUrl } from './redact.js';
 
 const DEFAULTS = {
   endpoint: '/ingest',
-  token: null, // project token, usually set via data-token on the snippet tag
+  token: null,
 
   remoteConfig: true,
   configUrl: '/config',
@@ -18,38 +14,24 @@ const DEFAULTS = {
   // Also flush on serialized size — event count is a weak proxy when a
   // single full snapshot can be most of a megabyte.
   maxBatchBytes: 900 * 1024,
-  // Past this much time without user interaction, non-interactive events
-  // (animation/timer mutations, background tabs) are dropped, not recorded.
   idleThresholdMs: 5 * 60 * 1000,
-  checkoutEveryNms: 5 * 60 * 1000, // periodic full snapshots so replay can seek
+  checkoutEveryNms: 5 * 60 * 1000,
   sessionIdleTimeoutMs: 30 * 60 * 1000,
   sessionMaxLengthMs: 24 * 60 * 60 * 1000,
 
-  // Ingestion gates; every configured gate must pass before events are sent.
   sampleRate: 1, // sticky per-session keep probability
-  // null records unconditionally; an object buffers client-side until a
-  // trigger fires: { urls: ['/checkout'], onException: true }, or a manual
-  // window.capture.trigger('reason').
   triggers: null,
-  minDurationMs: 0, // sessions shorter than this never leave the browser
-  maxBufferBytes: 2 * 1024 * 1024, // pre-trigger rolling buffer bound
+  minDurationMs: 0,
+  maxBufferBytes: 2 * 1024 * 1024,
 
-  // Inputs are always masked. These add page text: a CSS selector whose text
-  // is replaced with asterisks, and one whose elements are not recorded at
-  // all. The .capture-mask / .capture-block classes work without config.
   maskTextSelector: null,
   blockSelector: null,
-  // Query/fragment parameter names whose values are stripped from every
-  // recorded URL.
   redactUrlParams: DEFAULT_REDACT_PARAMS,
 
-  // Consent. requireConsent holds everything — including the config cache
-  // write — until window.capture.grantConsent() is called, for pages that
-  // load the tag before the banner is answered. Read from the inline tag
-  // only: a remote value would arrive after the write it must prevent.
+  // Read from the inline tag only: a remote value would arrive after the
+  // storage write it must prevent.
   requireConsent: false,
-  // navigator.globalPrivacyControl is a legally recognised opt-out signal in
-  // several US states, so it is honoured unless a brand turns it off.
+  // A legally recognised opt-out signal in several US states.
   respectGlobalPrivacyControl: true,
 };
 
@@ -99,7 +81,7 @@ const VISITOR_STORAGE_KEY = 'capture_visitor';
 const WINDOW_STORAGE_KEY = 'capture_window_id';
 const OPT_OUT_KEY = 'capture_opt_out';
 
-/** Storage can throw outright when blocked, and that must never stop a page. */
+// Storage can throw outright when blocked, and that must never stop a page.
 function tryStorage(fn, fallback = null) {
   try {
     return fn();
@@ -110,14 +92,13 @@ function tryStorage(fn, fallback = null) {
 
 const isOptedOut = () => tryStorage(() => localStorage.getItem(OPT_OUT_KEY) === '1', false);
 
-/** Persisting the refusal is itself a write; the alternative is asking again
- *  on every page load. Documented in the integration guide. */
+// Persisting the refusal is itself a write; the alternative is asking again
+// on every page load.
 const setOptedOut = (value) =>
   tryStorage(() =>
     value ? localStorage.setItem(OPT_OUT_KEY, '1') : localStorage.removeItem(OPT_OUT_KEY)
   );
 
-/** Drop everything this library stored about the visitor. */
 const forgetVisitor = () =>
   tryStorage(() => {
     localStorage.removeItem(SESSION_STORAGE_KEY);
@@ -141,11 +122,8 @@ function writeSession(session) {
   localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
 }
 
-/**
- * Current session, rotated after idle timeout or max length. The sampling
- * decision is rolled once at creation and persisted, so a session is
- * wholly recorded or wholly skipped — never a fragment.
- */
+// The sampling decision is rolled once at creation and persisted, so a
+// session is wholly recorded or wholly skipped — never a fragment.
 function getSession() {
   const now = Date.now();
   let session = readSession();
@@ -189,8 +167,6 @@ const getVisitorId = () =>
     return id;
   });
 
-// Assigned in main() once config is resolved — the sampling decision
-// depends on the effective sampleRate.
 let session = null;
 let sessionId = null;
 let windowId = null;
@@ -201,7 +177,7 @@ let visitorId = null;
 // (events flush to the server) | 'failed' (ingest rejected us permanently) |
 // 'awaiting-consent' (requireConsent, banner unanswered) | 'opted-out'.
 let status = 'disabled';
-let stopFn = null; // rrweb's cleanup function while recording
+let stopFn = null;
 
 // Browsers cap in-flight keepalive request bodies at 64 KB; leave headroom.
 const KEEPALIVE_MAX_BYTES = 60 * 1024;
@@ -216,11 +192,8 @@ function resetBuffer() {
   bufferBytes = 0;
 }
 
-/**
- * rrweb's Meta event carries the page URL verbatim, and it — not our own
- * chunk-level copy — is what replay treats as the session's location. It has
- * to go through the same redaction or the secrets survive in the stream.
- */
+// rrweb's Meta event carries the page URL verbatim, and it — not our own
+// chunk-level copy — is what replay treats as the session's location.
 function scrubEvent(event) {
   if (event.type === 4 && event.data && event.data.href) {
     return {
@@ -242,8 +215,8 @@ function pushEvent(event) {
     }
     return;
   }
-  // Buffering: the duration gate is time-based, so re-check it as events
-  // arrive rather than on a timer of its own.
+  // The duration gate is time-based, so re-check it as events arrive rather
+  // than on a timer of its own.
   if (status === 'buffering' && config.minDurationMs) tryTransition('min-duration');
   if (status === 'buffering' && bufferBytes > config.maxBufferBytes) {
     // Trimming old events from the front could drop the full snapshot and
@@ -275,19 +248,17 @@ function payloadFor(events) {
 
 const bodyBytes = (body) => (typeof body === 'string' ? body.length : body.byteLength);
 
-/** Put events back for the next flush to retry. */
 function requeue(events) {
   buffer = events.concat(buffer);
   bufferBytes = buffer.reduce((n, e) => n + JSON.stringify(e).length, 0);
   // Trimming the front would drop the full snapshot and leave the buffer
-  // unreplayable, so restart from a fresh one — as the pre-trigger buffer does.
+  // unreplayable, so restart from a fresh one.
   if (bufferBytes > config.maxBufferBytes && stopFn) {
     resetBuffer();
     record.takeFullSnapshot(true);
   }
 }
 
-/** Stop recording and drop anything buffered but not yet sent. */
 function stopRecording(nextStatus) {
   status = nextStatus;
   resetBuffer();
@@ -301,7 +272,6 @@ function stopRecording(nextStatus) {
   }
 }
 
-/** A rejection no retry can fix: stop rather than record into the void. */
 function abort(message) {
   console.error(`capture: ${message} — recording stopped`);
   stopRecording('failed');
@@ -316,9 +286,9 @@ async function flush(useKeepalive) {
   try {
     let { body, compressed } = await gzipBody(payloadFor(events));
 
-    // In-flight keepalive requests share a 64 KB budget, so an oversized final
-    // batch is rejected outright. Keep the oldest events that fit: a gap breaks
-    // replay of everything after it.
+    // An oversized final batch would be rejected outright at the keepalive
+    // cap. Keep the oldest events that fit: a gap breaks replay of
+    // everything after it.
     let dropped = 0;
     while (useKeepalive && bodyBytes(body) > KEEPALIVE_MAX_BYTES && events.length > 1) {
       const keep = Math.floor(events.length / 2);
@@ -361,7 +331,6 @@ function scheduleFlush() {
 
 let urlTriggers = [];
 
-/** Every configured gate — a fired trigger, the minimum duration — must pass. */
 function gatesSatisfied() {
   const current = readSession();
   const triggerOk = !config.triggers || Boolean(current && current.triggered);
@@ -371,7 +340,6 @@ function gatesSatisfied() {
   return triggerOk && durationOk;
 }
 
-/** buffering → active once every gate passes: fire the buffered lead-up. */
 function tryTransition(reason) {
   if (status !== 'buffering' || !gatesSatisfied()) return;
   status = 'active';
@@ -383,10 +351,6 @@ function tryTransition(reason) {
   flush(false);
 }
 
-/**
- * A trigger fired: persist the decision on the session so later page loads
- * within it start recording immediately, then try to send.
- */
 function activate(reason) {
   if (status !== 'buffering') return;
   const current = readSession();
@@ -431,11 +395,10 @@ function setupTriggers() {
   window.capture = Object.assign(window.capture || {}, {
     trigger: (reason) => activate(reason || 'manual'),
     status: () => status,
-    config: () => ({ ...config }), // effective (merged) config, for debugging
+    config: () => ({ ...config }),
   });
 }
 
-/** Handle an idle/max-length rotation observed mid-page. */
 function onSessionRotated(next) {
   sessionId = next.id;
   resetBuffer();
@@ -457,8 +420,8 @@ function onSessionRotated(next) {
   checkUrlTriggers();
 }
 
-// rrweb IncrementalSource values that represent real user interaction:
-// MouseMove(1), MouseInteraction(2), Scroll(3), Input(5), TouchMove(6).
+// rrweb IncrementalSource values for real user interaction: MouseMove(1),
+// MouseInteraction(2), Scroll(3), Input(5), TouchMove(6).
 const INTERACTIVE_SOURCES = new Set([1, 2, 3, 5, 6]);
 const isInteractive = (event) =>
   event.type === 3 && INTERACTIVE_SOURCES.has(event.data && event.data.source);
@@ -466,14 +429,12 @@ const isInteractive = (event) =>
 let idle = false;
 let lastUserActivity = Date.now();
 
-/** Marker events pushed directly (addCustomEvent would recurse through emit). */
+// Markers are pushed directly: addCustomEvent would recurse through emit.
 function pushMarker(tag) {
   pushEvent({ type: 5, data: { tag, payload: {} }, timestamp: Date.now() });
 }
 
 function startRecording() {
-  // Gate state is per session and persisted, so a session that already
-  // passed its gates stays active across page loads.
   status = gatesSatisfied() ? 'active' : 'buffering';
   idle = false;
   lastUserActivity = Date.now();
@@ -489,8 +450,8 @@ function startRecording() {
           if (status === 'disabled') return;
         }
         if (idle) {
-          // Waking up: mark it and take a fresh snapshot so replay resumes
-          // from current reality rather than a stale pre-idle DOM.
+          // Waking up: fresh snapshot so replay resumes from current
+          // reality rather than a stale pre-idle DOM.
           idle = false;
           pushMarker('capture-idle-end');
           record.takeFullSnapshot(true);
@@ -499,11 +460,11 @@ function startRecording() {
         return;
       }
 
-      if (idle) return; // dropped: nobody is watching
+      if (idle) return;
       if (Date.now() - lastUserActivity > config.idleThresholdMs) {
         idle = true;
         pushMarker('capture-idle');
-        flush(false); // ship what we have; the stream pauses here
+        flush(false);
         return;
       }
       pushEvent(event);
@@ -517,7 +478,7 @@ function startRecording() {
     ...(config.blockSelector ? { blockSelector: config.blockSelector } : {}),
 
     sampling: {
-      mousemove: 50, // ms between events
+      mousemove: 50,
       scroll: 100,
       media: 800,
       input: 'last', // only the final value of rapid input bursts
@@ -527,21 +488,18 @@ function startRecording() {
   checkUrlTriggers();
 }
 
-/**
- * Sampled-out sessions record nothing, but the page stays instrumented:
- * lightweight activity listeners keep the stored session alive, and the
- * eventual rotation re-rolls the sampling dice and may start recording.
- */
+// Sampled-out sessions record nothing, but lightweight listeners keep the
+// stored session alive so the eventual rotation re-rolls the sampling dice.
 function watchForNextSession() {
   let lastCheck = 0;
   const onActivity = () => {
     const now = Date.now();
-    if (now - lastCheck < 5000) return; // throttle localStorage writes
+    if (now - lastCheck < 5000) return;
     lastCheck = now;
     const current = getSession();
     if (!current.rotated) return;
     sessionId = current.id;
-    if (!current.sampled) return; // re-rolled and sampled out again
+    if (!current.sampled) return;
     for (const type of ['pointerdown', 'keydown', 'scroll']) {
       removeEventListener(type, onActivity, true);
     }
@@ -554,7 +512,6 @@ function watchForNextSession() {
 
 let booted = false;
 
-/** Everything past the consent gate. Nothing here runs until it may. */
 async function boot() {
   if (booted) return;
   booted = true;
@@ -575,31 +532,25 @@ async function boot() {
     watchForNextSession();
   }
 
-  // Final flush when the tab is hidden or closed. pagehide + visibilitychange
-  // covers desktop and mobile; keepalive lets the request outlive the page.
-  // A still-buffering session is discarded here by design: no trigger fired,
-  // so it was never worth keeping (flush() is a no-op unless 'active').
+  // pagehide + visibilitychange covers desktop and mobile; keepalive lets
+  // the request outlive the page. A still-buffering session is discarded
+  // here by design: no trigger fired, so it was never worth keeping.
   window.addEventListener('pagehide', () => flush(true));
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flush(true);
   });
 }
 
-/**
- * Published before the consent gate so a consent banner can always reach it,
- * whatever state recording is in. setupTriggers() merges trigger/config onto
- * the same object once recording actually starts.
- */
+// Published before the consent gate so a consent banner can always reach it,
+// whatever state recording is in.
 function publishConsentApi() {
   window.capture = Object.assign(window.capture || {}, {
     status: () => status,
-    /** Consent obtained: start, and clear any previously stored refusal. */
     grantConsent: () => {
       setOptedOut(false);
       boot();
     },
     optIn: () => window.capture.grantConsent(),
-    /** Refused or withdrawn: stop, forget, and stay stopped on future loads. */
     optOut: () => {
       setOptedOut(true);
       stopRecording('opted-out');
