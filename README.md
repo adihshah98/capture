@@ -66,6 +66,11 @@ replay UI grows a project selector. Operator notes:
 - Per-project remote config: `data/projects/<token>/config.json` (falls back
   to the global `data/config.json`), so each brand can have its own sample
   rate, triggers, etc.
+- Optional root-domain allowlist, enforced server-side at ingest:
+  `python server.py set-domains cap_xxx brand.com` rejects batches (403)
+  whose Origin/Referer isn't that root or one of its subdomains, so the
+  token can't be used from other sites. Run it with no domains to clear.
+  Best-effort — headers are spoofable outside a browser.
 - Protect the replay side in production:
 
   ```bash

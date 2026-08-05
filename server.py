@@ -216,6 +216,16 @@ def resolve_sessions_dir(token: Optional[str], projects: dict) -> Optional[Path]
     return None
 
 
+def require_allowed_domain(request: Request, meta: Optional[dict]) -> None:
+    domains = (meta or {}).get("domains") or []
+    if not domains:
+        return
+    source = request.headers.get("origin") or request.headers.get("referer") or ""
+    host = (urllib.parse.urlparse(source).hostname or "").lower()
+    if not any(host == d or host.endswith("." + d) for d in domains):
+        raise ApiError(403, "domain not allowed for this project")
+
+
 def session_pools() -> list:
     """Every directory holding session subdirectories: legacy pool + one
     per project."""
@@ -314,9 +324,11 @@ async def ingest(
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
 
-    pool = resolve_sessions_dir(token, load_projects())
+    projects = load_projects()
+    pool = resolve_sessions_dir(token, projects)
     if pool is None:
         raise ApiError(401, "unknown project token")
+    require_allowed_domain(request, projects.get(token))
 
     # Before the body is read, so an abusive client is cheap to reject. The
     # recorder retries 5xx and drops the batch on 4xx, which is what each means.
@@ -839,6 +851,25 @@ def set_project_org(token: str, org_id: str) -> None:
     print(f"'{name}' is now readable by members of WorkOS organization {org_id}")
 
 
+def set_project_domains(token: str, domains: list) -> None:
+    projects = load_projects()
+    if token not in projects:
+        print(f"no such project: {token}")
+        return
+    cleaned = [
+        host.lower()
+        for d in domains
+        if (host := urllib.parse.urlparse(d if "://" in d else f"//{d}").hostname)
+    ]
+    projects[token] = {**(projects[token] or {}), "domains": cleaned}
+    PROJECTS_PATH.write_text(json.dumps(projects, indent=2))
+    name = (projects[token] or {}).get("name") or token
+    if cleaned:
+        print(f"'{name}' now accepts recordings only from {', '.join(cleaned)} (and subdomains)")
+    else:
+        print(f"'{name}' now accepts recordings from any domain")
+
+
 def remove_project(token: str, purge: bool) -> None:
     """Revoke a token. Recordings are kept unless --purge is passed: erasing a
     brand's history should never be a side effect of rotating their tag."""
@@ -871,9 +902,12 @@ if __name__ == "__main__":
         remove_project(argv[1], purge="--purge" in argv[2:])
     elif len(argv) >= 3 and argv[0] == "set-org":
         set_project_org(argv[1], argv[2])
+    elif len(argv) >= 2 and argv[0] == "set-domains":
+        set_project_domains(argv[1], argv[2:])
     else:
         print("usage: python server.py add-project <name>")
         print("       python server.py list-projects")
         print("       python server.py remove-project <token> [--purge]")
         print("       python server.py set-org <token> <workos_org_id>")
+        print("       python server.py set-domains <token> [domain ...]")
         print("run the server with: .venv/bin/uvicorn server:app --port 3000")

@@ -81,7 +81,7 @@ class ServerCase(unittest.TestCase):
         cls.proc.wait(timeout=10)
         shutil.rmtree(cls.data_dir, ignore_errors=True)
 
-    def ingest(self, session_id, payload=None, gzipped=True, token=None, raw=None):
+    def ingest(self, session_id, payload=None, gzipped=True, token=None, raw=None, headers=None):
         body = raw if raw is not None else json.dumps(
             payload if payload is not None else {"events": [{"type": 4, "data": {}}]}
         ).encode()
@@ -92,7 +92,7 @@ class ServerCase(unittest.TestCase):
         if token:
             url += f"&token={token}"
         return request(url, method="POST", data=body,
-                       headers={"Content-Type": "application/octet-stream"})[0]
+                       headers={"Content-Type": "application/octet-stream", **(headers or {})})[0]
 
 
 class TestIngestValidation(ServerCase):
@@ -411,6 +411,37 @@ class TestProjectTokens(ServerCase):
         self.assertNotIn("j" * 32, [s["session_id"] for s in default["sessions"]])
 
 
+class TestDomainAllowlist(ServerCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.token = "cap_domainstesttokentest"
+        (cls.data_dir / "projects.json").write_text(
+            json.dumps({cls.token: {"name": "Test", "domains": ["brand.com"]}})
+        )
+
+    def send(self, session_id, **headers):
+        return self.ingest(session_id, token=self.token, headers=headers)
+
+    def test_root_domain_is_accepted(self):
+        self.assertEqual(self.send("a" * 32, Origin="https://brand.com"), 200)
+
+    def test_subdomains_are_accepted(self):
+        self.assertEqual(self.send("b" * 32, Origin="https://www.brand.com"), 200)
+
+    def test_other_domains_are_rejected(self):
+        self.assertEqual(self.send("c" * 32, Origin="https://evil.example"), 403)
+
+    def test_lookalike_suffix_is_rejected(self):
+        self.assertEqual(self.send("d" * 32, Origin="https://evilbrand.com"), 403)
+
+    def test_missing_origin_is_rejected(self):
+        self.assertEqual(self.send("e" * 32), 403)
+
+    def test_referer_is_the_fallback(self):
+        self.assertEqual(self.send("f" * 32, Referer="https://shop.brand.com/lp?x=1"), 200)
+
+
 class TestProjectCli(unittest.TestCase):
     """The CLI runs from a shell, not systemd, so it resolves its own paths."""
 
@@ -449,6 +480,19 @@ class TestProjectCli(unittest.TestCase):
         out = self.run_cli("add-project", "Acme")
         self.assertIn("capture.example.com", out)
         self.assertIn("placeholder host", out)
+
+    def test_set_domains_round_trip(self):
+        created = self.run_cli("add-project", "Acme")
+        token = created.split("token: ")[1].split()[0]
+        out = self.run_cli("set-domains", token, "https://Brand.com/path", "shop.example")
+        self.assertIn("brand.com, shop.example", out)
+        stored = json.loads((self.data_dir / "projects.json").read_text())
+        self.assertEqual(stored[token]["domains"], ["brand.com", "shop.example"])
+
+        out = self.run_cli("set-domains", token)
+        self.assertIn("any domain", out)
+        stored = json.loads((self.data_dir / "projects.json").read_text())
+        self.assertEqual(stored[token]["domains"], [])
 
     def test_list_and_remove_round_trip(self):
         created = self.run_cli("add-project", "Acme")
