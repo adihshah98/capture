@@ -186,6 +186,76 @@ Notes:
   `window.capture.status()` returns `"active"` (see
   [Verifying the integration](#verifying-the-integration)).
 
+### Did they buy? Linking purchases to recordings
+
+The recording ends when a visitor enters checkout — Shopify runs no theme
+code there. But Shopify **does** let a [custom pixel](https://help.shopify.com/en/manual/promoting-marketing/pixels/custom-pixels)
+run on checkout pages, including the thank-you page, so the *outcome* can be
+linked back to the recorded session. Sessions in the replay UI then carry a
+green **Purchased** badge (with order id and total) or an amber **Reached
+checkout** badge.
+
+1. In the Shopify admin: **Settings → Customer events → Add custom pixel**,
+   name it e.g. `Capture purchases`.
+2. Paste this as the pixel code, with your server address and token filled
+   in (the same two values as the storefront tag):
+
+   ```js
+   const CAPTURE_SERVER = 'https://capture.example.com';
+   const CAPTURE_TOKEN = 'cap_YOURTOKEN';
+
+   async function sendToCapture(event, fields) {
+     try {
+       // The recorder keeps its session id in localStorage; the pixel
+       // sandbox reads the storefront's storage through this async API.
+       const raw = await browser.localStorage.getItem('capture_session');
+       const session = raw && JSON.parse(raw);
+       if (!session || !session.id) return; // visitor wasn't recorded
+       await fetch(`${CAPTURE_SERVER}/order?session_id=${session.id}&token=${CAPTURE_TOKEN}`, {
+         method: 'POST',
+         headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify({ event, ...fields }),
+         keepalive: true,
+       });
+     } catch (e) {
+       // Never let tracking interfere with checkout.
+     }
+   }
+
+   analytics.subscribe('checkout_started', () => {
+     sendToCapture('checkout_started', {});
+   });
+
+   analytics.subscribe('checkout_completed', (event) => {
+     const checkout = event.data.checkout;
+     sendToCapture('checkout_completed', {
+       order_id: checkout.order && checkout.order.id,
+       total: checkout.totalPrice && checkout.totalPrice.amount,
+       currency: checkout.totalPrice && checkout.totalPrice.currencyCode,
+     });
+   });
+   ```
+
+3. Click **Save**, then **Connect**. Verify with a test order: the session
+   you placed it from shows a green **Purchased** badge in the session list.
+
+What to know:
+
+- **The checkout itself is still not recorded** — that's a Shopify
+  restriction no script tag can lift. This links the purchase (or the
+  drop-off) to the session so you know how the story ended.
+- Only the capture session id, order id, total, and currency are sent —
+  no customer details.
+- **Storefront and checkout must share a domain** (they do by default).
+  A purchase completed off-domain — e.g. entirely inside the Shop app —
+  can't see the storefront's session id and won't be linked.
+- Visitors who were sampled out or opted out have no session id in
+  storage, so the pixel sends nothing for them — consent choices carry
+  over automatically.
+- A session whose visitor started checkout but never completed it keeps
+  the amber **Reached checkout** badge — those are your checkout-abandonment
+  recordings, usually the ones worth watching.
+
 ## Content-Security-Policy (CSP)
 
 If your site sends a `Content-Security-Policy` header, the browser will

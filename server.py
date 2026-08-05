@@ -371,6 +371,73 @@ async def ingest(
     return {"status": "ok", "stored": len(events)}
 
 
+# Written beside a session's chunks by /order; excluded from chunk listings.
+ORDER_FILE = "order.json"
+ORDER_MAX_BODY_BYTES = 4096
+
+
+@app.post("/order")
+async def order_event(
+    request: Request,
+    session_id: str = Query(""),
+    token: Optional[str] = Query(None),
+):
+    """Purchase outcome for pages the recorder can't run on (Shopify's
+    checkout): a custom web pixel posts checkout_started / checkout_completed
+    with the session id it read from the storefront's localStorage. Stored as
+    one small metadata file beside the session's chunks, not as events —
+    there is no recording of the checkout itself to attach them to."""
+    if not SAFE_ID.match(session_id):
+        raise ApiError(400, "invalid session_id")
+    pool = resolve_sessions_dir(token, load_projects())
+    if pool is None:
+        raise ApiError(401, "unknown project token")
+    session_dir = pool / session_id
+    # Annotate only sessions that were actually recorded — creating
+    # directories here would let anyone holding the (public) token fill the
+    # disk with junk sessions.
+    if not session_dir.is_dir():
+        raise ApiError(404, "unknown session")
+
+    body = await request.body()
+    if len(body) > ORDER_MAX_BODY_BYTES:
+        raise ApiError(413, "payload too large")
+    try:
+        payload = json.loads(body)
+    except Exception:
+        raise ApiError(400, "bad payload")
+    if not isinstance(payload, dict):
+        raise ApiError(400, "bad payload")
+    event = payload.get("event")
+    if event not in ("checkout_started", "checkout_completed"):
+        raise ApiError(400, "unknown event")
+
+    path = session_dir / ORDER_FILE
+    try:
+        order = json.loads(path.read_text())
+        if not isinstance(order, dict):
+            order = {}
+    except Exception:
+        order = {}
+
+    now = int(time.time() * 1000)
+    if event == "checkout_started":
+        order.setdefault("checkout_started_at", now)
+    else:
+        order["purchased_at"] = now
+        if isinstance(payload.get("order_id"), str):
+            order["order_id"] = payload["order_id"][:128]
+        total = payload.get("total")
+        # The bounds also exclude NaN/Infinity, which browsers' JSON.parse
+        # would choke on when the session list is served back.
+        if isinstance(total, (int, float)) and not isinstance(total, bool) and -1e15 < total < 1e15:
+            order["total"] = total
+        if isinstance(payload.get("currency"), str):
+            order["currency"] = payload["currency"][:8]
+    path.write_text(json.dumps(order))
+    return {"status": "ok"}
+
+
 @app.get("/healthz")
 def healthz():
     """What a deploy can break, rather than whether a port is open. Booleans
@@ -435,6 +502,15 @@ def chunk_timestamp(path: Path) -> int:
         return int(path.name.split("-")[0])
     except ValueError:
         return 0
+
+
+def chunk_files(session_dir: Path) -> list:
+    """A session's event chunks, ordered — metadata files (order.json) live
+    in the same directory and must never be listed or replayed as chunks."""
+    return sorted(
+        (c for c in session_dir.glob("*.json") if SAFE_CHUNK.match(c.name)),
+        key=chunk_timestamp,
+    )
 
 
 def read_pool(project: Optional[str]) -> Optional[Path]:
@@ -576,18 +652,23 @@ def list_sessions(request: Request, project: Optional[str] = Query(None)):
     for entry in pool.iterdir() if pool.is_dir() else []:
         if not entry.is_dir():
             continue
-        chunks = sorted(entry.glob("*.json"), key=chunk_timestamp)
+        chunks = chunk_files(entry)
         if not chunks:
             continue
-        sessions.append(
-            {
-                "session_id": entry.name,
-                "first_seen": chunk_timestamp(chunks[0]),
-                "last_seen": chunk_timestamp(chunks[-1]),
-                "chunk_count": len(chunks),
-                "bytes": sum(c.stat().st_size for c in chunks),
-            }
-        )
+        info = {
+            "session_id": entry.name,
+            "first_seen": chunk_timestamp(chunks[0]),
+            "last_seen": chunk_timestamp(chunks[-1]),
+            "chunk_count": len(chunks),
+            "bytes": sum(c.stat().st_size for c in chunks),
+        }
+        order_path = entry / ORDER_FILE
+        if order_path.is_file():
+            try:
+                info["order"] = json.loads(order_path.read_text())
+            except Exception:
+                pass
+        sessions.append(info)
     sessions.sort(key=lambda s: s["last_seen"], reverse=True)
     return {"sessions": sessions}
 
@@ -610,7 +691,7 @@ def delete_session(request: Request, session_id: str, project: Optional[str] = Q
 def session_chunks(request: Request, session_id: str, project: Optional[str] = Query(None)):
     """Ordered chunk manifest; the player fetches chunks one by one."""
     require_read_access(request, project)
-    chunks = sorted(resolve_session(session_id, project).glob("*.json"), key=chunk_timestamp)
+    chunks = chunk_files(resolve_session(session_id, project))
     url = None
     if chunks:  # only the first chunk is opened; the rest stay on disk
         try:
@@ -655,7 +736,7 @@ def sweep_expired_sessions() -> int:
         for entry in pool.iterdir():
             if not entry.is_dir():
                 continue
-            chunks = sorted(entry.glob("*.json"), key=chunk_timestamp)
+            chunks = chunk_files(entry)
             newest = chunk_timestamp(chunks[-1]) if chunks else 0
             if newest < cutoff_ms:
                 shutil.rmtree(entry, ignore_errors=True)

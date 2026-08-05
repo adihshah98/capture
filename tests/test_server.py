@@ -219,6 +219,53 @@ class TestDelete(ServerCase):
         )
 
 
+class TestOrderEvents(ServerCase):
+    """The Shopify custom pixel posts checkout outcomes to /order; they show
+    up on the session in the list API but never as replayable chunks."""
+
+    def order(self, session_id, payload):
+        return request(
+            f"{self.base}/order?session_id={session_id}",
+            method="POST",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )[0]
+
+    def listed(self, session_id):
+        sessions = json.loads(request(f"{self.base}/api/sessions")[1])["sessions"]
+        return next(s for s in sessions if s["session_id"] == session_id)
+
+    def test_marks_a_recorded_session_as_purchased(self):
+        session = "o" * 32
+        self.assertEqual(self.ingest(session), 200)
+        self.assertEqual(self.order(session, {"event": "checkout_started"}), 200)
+        self.assertEqual(
+            self.order(
+                session,
+                {"event": "checkout_completed", "order_id": "1001", "total": 59.5, "currency": "USD"},
+            ),
+            200,
+        )
+        order = self.listed(session)["order"]
+        self.assertEqual(order["order_id"], "1001")
+        self.assertEqual(order["total"], 59.5)
+        self.assertEqual(order["currency"], "USD")
+        self.assertIn("purchased_at", order)
+        self.assertIn("checkout_started_at", order)
+
+    def test_marker_never_appears_as_a_chunk(self):
+        session = "q" * 32
+        self.assertEqual(self.ingest(session), 200)
+        self.assertEqual(self.order(session, {"event": "checkout_completed"}), 200)
+        manifest = json.loads(request(f"{self.base}/api/sessions/{session}/chunks")[1])
+        self.assertEqual(len(manifest["chunks"]), 1)
+        self.assertNotIn("order.json", [c["name"] for c in manifest["chunks"]])
+        self.assertEqual(self.listed(session)["chunk_count"], 1)
+
+    def test_unrecorded_session_is_404(self):
+        self.assertEqual(self.order("r" * 32, {"event": "checkout_completed"}), 404)
+
+
 class TestHealthz(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": "s3cret"}
 
@@ -286,6 +333,17 @@ class TestProjectTokens(ServerCase):
 
     def test_missing_token_is_rejected_once_projects_exist(self):
         self.assertEqual(self.ingest("i" * 32), 401)
+
+    def test_order_endpoint_requires_a_known_token(self):
+        session = "t" * 32
+        self.assertEqual(self.ingest(session, token=self.token), 200)
+        body = json.dumps({"event": "checkout_completed"}).encode()
+        self.assertEqual(
+            request(f"{self.base}/order?session_id={session}&token=cap_wrong", "POST", body)[0], 401
+        )
+        self.assertEqual(
+            request(f"{self.base}/order?session_id={session}&token={self.token}", "POST", body)[0], 200
+        )
 
     def test_project_sessions_are_isolated_from_the_default_pool(self):
         self.assertEqual(self.ingest("j" * 32, token=self.token), 200)

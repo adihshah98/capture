@@ -22,6 +22,9 @@
     #session-list .info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     #session-list .sid { font-weight: 600; font-size: 13px; }
     #session-list .meta { font-size: 11px; color: #6b7280; }
+    #session-list .order { align-self: flex-start; font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 999px; margin-top: 2px; }
+    #session-list .order.purchased { background: #dcfce7; color: #15803d; }
+    #session-list .order.started { background: #fef3c7; color: #92400e; }
     #session-list .del { flex: none; opacity: 0.45; border: 1px solid #d0d3d8; background: #fff; color: #6b7280; font-size: 11px; padding: 3px 8px; border-radius: 5px; cursor: pointer; }
     #session-list li:hover .del, #session-list .del:focus, #session-list .del.armed { opacity: 1; }
     #session-list .del.armed { border-color: #dc2626; color: #dc2626; font-weight: 600; }

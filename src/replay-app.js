@@ -143,6 +143,21 @@ async function loadSessions() {
       </div>
       <button class="del" title="Delete this recording">Delete</button>
     `;
+    // Order fields originate from checkout POSTs, so they are untrusted
+    // input: textContent, never the innerHTML template above.
+    const order = session.order;
+    if (order && (order.purchased_at || order.checkout_started_at)) {
+      const badge = document.createElement('span');
+      const purchased = Boolean(order.purchased_at);
+      badge.className = `order ${purchased ? 'purchased' : 'started'}`;
+      const amount =
+        typeof order.total === 'number'
+          ? ` · ${order.total.toFixed(2)}${order.currency ? ' ' + order.currency : ''}`
+          : '';
+      badge.textContent = purchased ? `Purchased${amount}` : 'Reached checkout';
+      if (order.order_id) badge.title = `Order ${order.order_id}`;
+      li.querySelector('.info').appendChild(badge);
+    }
     li.addEventListener('click', () => {
       document.querySelectorAll('#session-list li').forEach((el) => el.classList.remove('active'));
       li.classList.add('active');
