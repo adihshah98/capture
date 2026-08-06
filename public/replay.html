@@ -57,6 +57,9 @@
     #stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #fafafa; }
     #stage iframe { border: none; background: #fff; }
     #stage .replayer-wrapper { position: absolute; left: 50%; top: 50%; transform-origin: top left; }
+    .click-pulse { position: absolute; width: calc(52px / var(--rescale, 1)); height: calc(52px / var(--rescale, 1)); border: calc(3px / var(--rescale, 1)) solid #4f46e5; border-radius: 50%; pointer-events: none; z-index: 20; opacity: 0; animation: click-pulse 800ms ease-out 2; }
+    .click-pulse.rage { border-color: #dc2626; }
+    @keyframes click-pulse { 0% { transform: translate(-50%, -50%) scale(0.25); opacity: 0.9; } 70% { opacity: 0.5; } 100% { transform: translate(-50%, -50%) scale(1); opacity: 0; } }
     #player-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
     #skip-note { position: absolute; top: 12px; right: 12px; background: rgba(28, 30, 33, 0.75); color: #fff; font-size: 12px; padding: 4px 10px; border-radius: 999px; z-index: 2; }
     #asset-errors { font-size: 11px; color: #b45309; background: #fef3c7; border-radius: 999px; padding: 2px 8px; }
