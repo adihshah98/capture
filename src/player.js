@@ -74,6 +74,18 @@ export class CapturePlayer {
       .filter((e) => e.type === EventType.FullSnapshot)
       .map((e) => e.timestamp - this.startTs);
 
+    this.maxHeightByWidth = {};
+    for (const e of events) {
+      const d =
+        e.type === EventType.Meta ||
+        (e.type === EventType.IncrementalSnapshot && e.data.source === IncrementalSource.ViewportResize)
+          ? e.data
+          : null;
+      if (d && d.width) {
+        this.maxHeightByWidth[d.width] = Math.max(this.maxHeightByWidth[d.width] || 0, d.height);
+      }
+    }
+
     this.playing = false;
     this.ended = false;
     this.skipInactive = skipInactive;
@@ -102,7 +114,9 @@ export class CapturePlayer {
     };
 
     this.replayer.on('resize', (dims) => {
-      this.recDims = dims;
+      const height = this.maxHeightByWidth[dims.width] || dims.height;
+      if (this.recDims && this.recDims.width === dims.width && this.recDims.height === height) return;
+      this.recDims = { width: dims.width, height };
       this.rescale();
     });
     this.replayer.on('fullsnapshot-rebuilded', () => this.hookFrame());
