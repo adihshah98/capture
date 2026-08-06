@@ -42,27 +42,52 @@ function projectQuery() {
   return currentProject ? `?project=${encodeURIComponent(currentProject)}` : '';
 }
 
+const accountEl = document.getElementById('account');
+const accountEmailEl = document.getElementById('account-email');
+
+// Returns whether sessions are loadable: false means the empty state is
+// already on screen and loadSessions must not overwrite it with a 403.
 async function loadProjects() {
-  let projects = [];
+  let body;
   try {
-    projects = (await (await fetch('/api/projects')).json()).projects || [];
-  } catch {
-    /* older server without /api/projects — single-tenant behavior */
+    body = await fetchJson('/api/projects');
+  } catch (err) {
+    showListMessage(`Could not load projects. ${err.message}`);
+    return false;
   }
-  if (projects.length === 0) return;
-  projectSelectEl.hidden = false;
+  const projects = body.projects || [];
+  if (body.email) {
+    accountEmailEl.textContent = body.email;
+    accountEl.hidden = false;
+  }
+  projectSelectEl.innerHTML = '';
+  projectSelectEl.hidden = projects.length === 0;
+  if (projects.length === 0) {
+    currentProject = '';
+    if (body.email) {
+      showListMessage(
+        `You're signed in as ${body.email}, but no projects have been shared ` +
+          'with you yet. Ask your workspace admin to add you, then hit Refresh.'
+      );
+      return false;
+    }
+    return true;
+  }
   for (const project of projects) {
     const option = document.createElement('option');
     option.value = project.token;
     option.textContent = project.name;
     projectSelectEl.appendChild(option);
   }
-  currentProject = projects[0].token;
-  projectSelectEl.addEventListener('change', () => {
-    currentProject = projectSelectEl.value;
-    loadSessions();
-  });
+  if (!projects.some((p) => p.token === currentProject)) currentProject = projects[0].token;
+  projectSelectEl.value = currentProject;
+  return true;
 }
+
+projectSelectEl.addEventListener('change', () => {
+  currentProject = projectSelectEl.value;
+  loadSessions();
+});
 
 async function fetchJson(url, options) {
   let res;
@@ -543,5 +568,9 @@ for (const btn of filterButtons) {
   });
 }
 
-document.getElementById('refresh').addEventListener('click', loadSessions);
-loadProjects().then(loadSessions);
+async function refreshAll() {
+  if (await loadProjects()) loadSessions();
+}
+
+document.getElementById('refresh').addEventListener('click', refreshAll);
+refreshAll();

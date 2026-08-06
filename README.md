@@ -94,8 +94,7 @@ side to per-user logins backed by [WorkOS AuthKit](https://workos.com/docs/authk
 
 1. In the WorkOS dashboard: create an application, enable AuthKit, and add
    `https://capture.yourdomain.com/auth/callback` as a redirect URI.
-2. Create one WorkOS **Organization** per brand and invite that brand's
-   users to it.
+2. Create one WorkOS **Organization** per brand.
 3. On the server, set the environment and restart:
 
    ```bash
@@ -104,10 +103,13 @@ side to per-user logins backed by [WorkOS AuthKit](https://workos.com/docs/authk
    CAPTURE_OPERATORS=you@example.com   # comma-separated; these emails see every project
    ```
 
-4. Tie each project to its brand's organization:
+4. Tie each project to its brand's organization, then invite that brand's
+   users (they get an email link and land on their project after first
+   login):
 
    ```bash
    python server.py set-org cap_xxxxxxxx org_yyyyyyyy
+   python server.py invite teammate@brand.com cap_xxxxxxxx
    ```
 
 With both `WORKOS_*` vars set, `/replay.html` redirects to a hosted login
@@ -115,8 +117,11 @@ instead of prompting for the Basic password; sessions are 7-day HMAC-signed
 cookies (rotate `SESSION_SECRET` or the API key to log everyone out). A
 logged-in user sees exactly the projects whose `org_id` matches one of their
 organizations — the project selector, session lists, chunks, and the Delete
-button all scope to that. Operators see everything, including the legacy
-no-project pool. Unset the `WORKOS_*` vars to fall back to `REPLAY_PASSWORD`.
+button all scope to that. Membership is looked up live (cached for
+`ORG_CACHE_TTL_S`, default 60s), so adding or removing someone in WorkOS
+takes effect within a minute — no re-login needed. Operators see everything,
+including the legacy no-project pool. Unset the `WORKOS_*` vars to fall back
+to `REPLAY_PASSWORD`.
 The write side (`/ingest`, `/config`, bundles) is unaffected — the snippet
 still runs on brand pages with no login.
 

@@ -10,6 +10,7 @@ import secrets
 import shutil
 import string
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
@@ -76,7 +77,10 @@ async def replay_auth(request: Request, call_next):
     if protected and not REPLAY_AUTH_DISABLED:
         if WORKOS_ENABLED:
             session = read_session(request.cookies.get(SESSION_COOKIE))
-            if not session:
+            # Sessions minted before live org lookups carry an org snapshot
+            # but no user_id; rejecting them forces one re-login instead of
+            # trusting a stale access list.
+            if not session or not session.get("user_id"):
                 if path == "/replay.html":
                     return RedirectResponse("/login", status_code=302)
                 return JSONResponse(
@@ -131,7 +135,8 @@ REPLAY_AUTH_DISABLED = os.environ.get("REPLAY_AUTH_DISABLED") == "1"
 WORKOS_API_KEY = os.environ.get("WORKOS_API_KEY", "")
 WORKOS_CLIENT_ID = os.environ.get("WORKOS_CLIENT_ID", "")
 WORKOS_ENABLED = bool(WORKOS_API_KEY and WORKOS_CLIENT_ID)
-WORKOS_API = "https://api.workos.com"
+WORKOS_API = os.environ.get("WORKOS_API") or "https://api.workos.com"
+ORG_CACHE_TTL_S = float(os.environ.get("ORG_CACHE_TTL_S", "60"))
 
 OPERATORS = {e.strip().lower() for e in os.environ.get("CAPTURE_OPERATORS", "").split(",") if e.strip()}
 
@@ -527,14 +532,31 @@ def workos_authenticate(code: str) -> tuple:
         },
     )
     user = auth.get("user") or {}
-    orgs = {auth["organization_id"]} if auth.get("organization_id") else set()
-    if user.get("id"):
+    return (user.get("email") or "").lower(), user.get("id") or ""
+
+
+_org_cache: dict = {}
+
+
+def user_orgs(user_id: str) -> set:
+    now = time.time()
+    cached = _org_cache.get(user_id)
+    if cached and cached[0] > now:
+        return cached[1]
+    try:
         memberships = workos_call(
-            f"/user_management/organization_memberships?user_id={user['id']}&statuses=active",
+            "/user_management/organization_memberships"
+            f"?user_id={urllib.parse.quote(user_id)}&statuses=active&limit=100",
             bearer=True,
         )
-        orgs |= {m["organization_id"] for m in memberships.get("data", []) if m.get("organization_id")}
-    return (user.get("email") or "").lower(), sorted(orgs)
+        orgs = {m["organization_id"] for m in memberships.get("data", []) if m.get("organization_id")}
+    except Exception as exc:
+        print(f"auth: membership lookup failed for {user_id}: {exc}")
+        if cached:
+            return cached[1]  # stale access beats locking everyone out mid-outage
+        raise ApiError(503, "could not verify project access — try again shortly")
+    _org_cache[user_id] = (now + ORG_CACHE_TTL_S, orgs)
+    return orgs
 
 
 @app.get("/login")
@@ -567,11 +589,13 @@ def auth_callback(request: Request, code: Optional[str] = Query(None), state: Op
     if not code or not state or state != request.cookies.get(STATE_COOKIE):
         raise ApiError(401, "bad login attempt — start again at /login")
     try:
-        email, orgs = workos_authenticate(code)
+        email, user_id = workos_authenticate(code)
     except Exception as exc:
         print(f"auth: WorkOS code exchange failed: {exc}")
         raise ApiError(401, "login failed — start again at /login")
-    session = make_session({"email": email, "orgs": orgs, "exp": int(time.time()) + SESSION_TTL_S})
+    if not user_id:
+        raise ApiError(401, "login failed — start again at /login")
+    session = make_session({"email": email, "user_id": user_id, "exp": int(time.time()) + SESSION_TTL_S})
     response = RedirectResponse("/replay.html", status_code=302)
     response.set_cookie(
         SESSION_COOKIE, session, max_age=SESSION_TTL_S, httponly=True, secure=True, samesite="lax"
@@ -582,7 +606,7 @@ def auth_callback(request: Request, code: Optional[str] = Query(None), state: Op
 
 @app.get("/logout")
 def logout():
-    response = Response("Signed out.\n", media_type="text/plain")
+    response = RedirectResponse("/", status_code=302)
     response.delete_cookie(SESSION_COOKIE)
     return response
 
@@ -591,7 +615,7 @@ def allowed_projects(request: Request) -> Optional[set]:
     auth = getattr(request.state, "auth", None)
     if auth is None or (auth.get("email") or "").lower() in OPERATORS:
         return None
-    orgs = set(auth.get("orgs") or [])
+    orgs = user_orgs(auth.get("user_id") or "")
     return {t for t, meta in load_projects().items() if (meta or {}).get("org_id") in orgs}
 
 
@@ -613,7 +637,8 @@ def list_projects(request: Request):
     # holds recordings, so pre-project sessions stay reachable.
     if allowed is None and projects and any(entry.is_dir() for entry in DATA_DIR.iterdir()):
         projects.append({"token": "", "name": "(no project)"})
-    return {"projects": projects}
+    email = (getattr(request.state, "auth", None) or {}).get("email")
+    return {"projects": projects, **({"email": email} if email else {})}
 
 
 @app.get("/api/sessions")
@@ -811,6 +836,28 @@ def set_project_domains(token: str, domains: list) -> None:
         print(f"'{name}' now accepts recordings from any domain")
 
 
+def invite_user(email: str, target: str) -> None:
+    if not WORKOS_ENABLED:
+        print("invites need WORKOS_API_KEY and WORKOS_CLIENT_ID in the environment")
+        return
+    meta = load_projects().get(target)
+    org_id = (meta or {}).get("org_id") if meta is not None else target
+    if not (org_id or "").startswith("org_"):
+        print(f"'{target}' has no WorkOS org — pass an org_… id or run set-org first")
+        return
+    try:
+        invitation = workos_call(
+            "/user_management/invitations",
+            {"email": email, "organization_id": org_id},
+            bearer=True,
+        )
+    except urllib.error.HTTPError as err:
+        print(f"invite failed: {err.read().decode(errors='replace')}")
+        return
+    expires = invitation.get("expires_at") or "?"
+    print(f"invited {email} to {org_id} — they'll get an email link, valid until {expires}")
+
+
 def remove_project(token: str, purge: bool) -> None:
     projects = load_projects()
     if token not in projects:
@@ -843,10 +890,13 @@ if __name__ == "__main__":
         set_project_org(argv[1], argv[2])
     elif len(argv) >= 2 and argv[0] == "set-domains":
         set_project_domains(argv[1], argv[2:])
+    elif len(argv) >= 3 and argv[0] == "invite":
+        invite_user(argv[1], argv[2])
     else:
         print("usage: python server.py add-project <name>")
         print("       python server.py list-projects")
         print("       python server.py remove-project <token> [--purge]")
         print("       python server.py set-org <token> <workos_org_id>")
         print("       python server.py set-domains <token> [domain ...]")
+        print("       python server.py invite <email> <project_token_or_org_id>")
         print("run the server with: .venv/bin/uvicorn server:app --port 3000")
