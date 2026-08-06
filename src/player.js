@@ -16,15 +16,8 @@ const ACTIVITY_THRESHOLD_MS = 5000;
 const MIN_SKIP_MS = 2000;
 const END_EPSILON_MS = 50;
 
-// Order matters: the Shopify rule re-applies Dawn's scroll-trigger reveal
-// animation that rrweb's CSS handling drops (content stays at opacity 0
-// without it), then the blanket rule snaps every animation to its final
-// state — `animation: none` would instead freeze reveals at frame 0.
 const REPLAY_STYLE_RULES = [
   '@media (prefers-reduced-motion: no-preference) { .scroll-trigger:not(.scroll-trigger--offscreen).animate--slide-in { animation: var(--animation-slide-in) } }',
-  // 0s duration, not PostHog's 1ms: rrweb pauses animations while the player
-  // is paused, and a paused 1ms animation sits at frame 0 (hiding opacity-0
-  // reveals); a 0s one is finished the instant it applies, paused or not.
   '*, *::before, *::after { animation-duration: 0s !important; animation-delay: 0s !important; animation-iteration-count: 1 !important; animation-fill-mode: forwards !important; transition-duration: 0s !important; transition-delay: 0s !important; }',
 ];
 
@@ -112,8 +105,6 @@ export class CapturePlayer {
       this.recDims = dims;
       this.rescale();
     });
-    // Rebuilds clear the frame's listeners, so re-attach each time
-    // (same function refs = deduped while still attached).
     this.replayer.on('fullsnapshot-rebuilded', () => this.hookFrame());
     this.replayer.on('finish', () => {
       if (this.playing) this.finish();
@@ -138,8 +129,6 @@ export class CapturePlayer {
     return this.segments.find((s) => ms >= s.start && ms < s.end) || null;
   }
 
-  // If the events before `ms` hold no full snapshot (lost at capture time),
-  // there is nothing renderable there — clamp forward to the first snapshot.
   clampRenderable(ms) {
     const first = this.snapshotOffsets[0];
     return first !== undefined && ms < first ? first : ms;
@@ -220,8 +209,6 @@ export class CapturePlayer {
     else this.pause(target);
   }
 
-  // Rewinding into a skipped gap would just bounce forward to its end again,
-  // so land before the gap, applying only the not-yet-rewound remainder.
   seekBy(deltaMs) {
     const current = this.ended ? this.duration : this.replayer.getCurrentTime();
     let target = current + deltaMs;
@@ -250,10 +237,6 @@ export class CapturePlayer {
     this.skipInactive = on;
   }
 
-  // Seeking to a point before the visitor's first scroll leaves the previous
-  // scroll position in place: rrweb skips the initialOffset restore when the
-  // target's snapshot is the first full snapshot it already rendered. Replay
-  // the recorded document scroll ourselves — idempotent when rrweb got it right.
   applyRecordedScroll() {
     const doc = this.replayer.iframe.contentDocument;
     const win = this.replayer.iframe.contentWindow;
@@ -290,8 +273,6 @@ export class CapturePlayer {
     const h = this.mount.clientHeight;
     let scale = Math.min(w / this.recDims.width, h / this.recDims.height);
     if (!isFinite(scale) || scale <= 0) return;
-    // An identity transform triggers a Chrome compositing bug where the
-    // iframe layer paints outside its clipping bounds.
     if (Math.abs(scale - 1) < 0.001) scale = 0.999;
     this.replayer.wrapper.style.transform = `scale(${scale}) translate(-50%, -50%)`;
   }
@@ -304,7 +285,6 @@ export class CapturePlayer {
     try {
       this.replayer.destroy();
     } catch {
-      /* already torn down */
     }
   }
 }

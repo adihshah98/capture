@@ -1,6 +1,3 @@
-// The demo page reflects ?config= into CAPTURE_CONFIG, but the query string
-// must never reach recorderUrl/endpoint/configUrl: the page shares an origin
-// with the replay UI, so script execution there is a full compromise.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -52,8 +49,6 @@ test('consent options are tunable for demos', () => {
 
 test("the page's own default triggers survive", () => {
   const config = configFor(withConfig({ sampleRate: 1 }));
-  // Compared element-wise: the array is built inside the vm realm, so a
-  // deep-strict comparison fails on prototype identity alone.
   assert.equal(config.triggers.urls.length, 1);
   assert.equal(config.triggers.urls[0], '#record$');
   assert.equal(config.triggers.onException, true);

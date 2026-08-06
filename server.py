@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 @asynccontextmanager
 async def lifespan(_app):
-    # Runs at startup, so it may reference module state defined further down.
+
     if REPLAY_AUTH_DISABLED:
         print(
             "warning: REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
@@ -55,11 +55,8 @@ async def lifespan(_app):
     finally:
         task.cancel()
 
-
 app = FastAPI(title="capture", lifespan=lifespan)
 
-# Wildcard CORS is safe here: the read side is gated by auth that wildcard
-# CORS cannot carry, and DELETE is absent from the method list.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -67,19 +64,15 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-
 @app.middleware("http")
 async def replay_auth(request: Request, call_next):
-    # Normalized so /Api/ and //replay.html can't slip past a check that
-    # StaticFiles would still serve them from.
+
     path = re.sub(r"/+", "/", request.url.path).lower()
     protected = path.startswith("/api/") or path == "/replay.html"
     if protected and not REPLAY_AUTH_DISABLED:
         if WORKOS_ENABLED:
             session = read_session(request.cookies.get(SESSION_COOKIE))
-            # Sessions minted before live org lookups carry an org snapshot
-            # but no user_id; rejecting them forces one re-login instead of
-            # trusting a stale access list.
+
             if not session or not session.get("user_id"):
                 if path == "/replay.html":
                     return RedirectResponse("/login", status_code=302)
@@ -110,11 +103,9 @@ async def replay_auth(request: Request, call_next):
                 )
     return await call_next(request)
 
-
 @app.middleware("http")
 async def revalidate_static(request: Request, call_next):
-    # Without this, browsers heuristically cache bundles and keep running
-    # stale code after a deploy.
+
     response = await call_next(request)
     is_static = request.url.path.endswith((".js", ".css", ".html")) or request.url.path == "/"
     if is_static and "cache-control" not in response.headers:
@@ -147,15 +138,12 @@ SESSION_TTL_S = 7 * 24 * 3600
 SESSION_COOKIE = "capture_session"
 STATE_COOKIE = "capture_login_state"
 
-
 def _sign(raw: str) -> str:
     return hmac.new(SESSION_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
-
 
 def make_session(payload: dict) -> str:
     raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return f"{raw}.{_sign(raw)}"
-
 
 def read_session(cookie: Optional[str]) -> Optional[dict]:
     if not cookie or "." not in cookie:
@@ -171,7 +159,6 @@ def read_session(cookie: Optional[str]) -> Optional[dict]:
         return None
     return payload
 
-
 def load_projects() -> dict:
     try:
         projects = json.loads(PROJECTS_PATH.read_text())
@@ -182,10 +169,8 @@ def load_projects() -> dict:
         print(f"projects: data/projects.json unusable: {exc}")
         return {}
 
-
 def project_sessions_dir(token: str) -> Path:
     return PROJECTS_DIR / token / "sessions"
-
 
 def resolve_sessions_dir(token: Optional[str], projects: dict) -> Optional[Path]:
     if not projects:
@@ -193,7 +178,6 @@ def resolve_sessions_dir(token: Optional[str], projects: dict) -> Optional[Path]
     if token and SAFE_ID.match(token) and token in projects:
         return project_sessions_dir(token)
     return None
-
 
 def require_allowed_domain(request: Request, meta: Optional[dict]) -> None:
     domains = (meta or {}).get("domains") or []
@@ -204,7 +188,6 @@ def require_allowed_domain(request: Request, meta: Optional[dict]) -> None:
     if not any(host == d or host.endswith("." + d) for d in domains):
         raise ApiError(403, "domain not allowed for this project")
 
-
 def session_pools() -> list:
     pools = [DATA_DIR]
     if PROJECTS_DIR.is_dir():
@@ -214,16 +197,14 @@ def session_pools() -> list:
     return pools
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-# Old style: <ts>-<rand>.json; new style: <ts>-<window8>-<rand>.json
-SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
 
+SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
 
 def chunk_window(path) -> Optional[str]:
     parts = path.name.rsplit(".", 1)[0].split("-")
     return parts[1] if len(parts) == 3 else None
 MAX_BODY_BYTES = 50 * 1024 * 1024
-# Bounding the compressed body alone is not enough: a 50 MB gzip expands to
-# gigabytes.
+
 MAX_DECOMPRESSED_BYTES = int(os.environ.get("MAX_DECOMPRESSED_BYTES", 32 * 1024 * 1024))
 
 MAX_PROJECT_BYTES = int(os.environ.get("MAX_PROJECT_BYTES", 2 * 1024**3))
@@ -231,24 +212,18 @@ MIN_FREE_DISK_BYTES = int(os.environ.get("MIN_FREE_DISK_BYTES", 1024**3))
 
 RETENTION_DAYS = float(os.environ.get("RETENTION_DAYS", "30"))
 
-
 def gunzip(body: bytes, limit: int) -> bytes:
-    # Unlike gzip.decompress, enforces a ceiling on the decompressed size.
+
     stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
     raw = stream.decompress(body, limit)
     if stream.unconsumed_tail:
         raise ValueError("decompressed payload too large")
     return raw
 
-
 def dir_bytes(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*.json") if f.is_file())
 
-
-# Scanned once, then tracked as chunks are written — walking every chunk on
-# each ingest would cost more than the write itself.
 _pool_bytes: dict = {}
-
 
 def pool_bytes(pool: Path) -> int:
     if pool not in _pool_bytes:
@@ -257,24 +232,20 @@ def pool_bytes(pool: Path) -> int:
 
 CONFIG_PATH = DATA_ROOT / "config.json"
 
-
 class ApiError(Exception):
     def __init__(self, status: int, message: str):
         self.status = status
         self.message = message
 
-
 @app.exception_handler(ApiError)
 async def api_error_response(_request, exc: ApiError) -> JSONResponse:
     return JSONResponse({"error": exc.message}, status_code=exc.status)
-
 
 def resolve_pool(project: Optional[str]) -> Path:
     pool = read_pool(project)
     if pool is None:
         raise ApiError(404, "unknown project")
     return pool
-
 
 def resolve_session(session_id: str, project: Optional[str]) -> Path:
     if not SAFE_ID.match(session_id):
@@ -283,7 +254,6 @@ def resolve_session(session_id: str, project: Optional[str]) -> Path:
     if not path.is_dir():
         raise ApiError(404, "not found")
     return path
-
 
 @app.post("/ingest")
 async def ingest(
@@ -301,7 +271,6 @@ async def ingest(
         raise ApiError(401, "unknown project token")
     require_allowed_domain(request, projects.get(token))
 
-    # Before the body is read, so an abusive client is cheap to reject.
     if MIN_FREE_DISK_BYTES and shutil.disk_usage(DATA_ROOT).free < MIN_FREE_DISK_BYTES:
         raise ApiError(507, "server storage full")
     if MAX_PROJECT_BYTES:
@@ -342,8 +311,6 @@ async def ingest(
         if meta:
             meta_path.write_text(json.dumps(meta))
 
-    # Timestamp orders chunks; the window prefix lets the manifest group them
-    # per tab without opening a single file.
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     window_prefix = re.sub(r"[^a-f0-9]", "", str(payload.get("window_id") or ""))[:8]
     parts = [str(int(time.time() * 1000)), window_prefix, suffix]
@@ -362,12 +329,10 @@ async def ingest(
 
     return {"status": "ok", "stored": len(events)}
 
-
 ORDER_FILE = "order.json"
 ORDER_MAX_BODY_BYTES = 4096
 
 VISITOR_FILE = "visitor.json"
-
 
 @app.post("/order")
 async def order_event(
@@ -375,17 +340,14 @@ async def order_event(
     session_id: str = Query(""),
     token: Optional[str] = Query(None),
 ):
-    # Shopify's checkout runs no theme code, so the recorder can't run there;
-    # a web pixel posts the outcome instead, stored beside the chunks.
+
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
     pool = resolve_sessions_dir(token, load_projects())
     if pool is None:
         raise ApiError(401, "unknown project token")
     session_dir = pool / session_id
-    # Annotate only sessions that were actually recorded — creating
-    # directories here would let anyone holding the (public) token fill the
-    # disk with junk sessions.
+
     if not session_dir.is_dir():
         raise ApiError(404, "unknown session")
 
@@ -418,8 +380,7 @@ async def order_event(
         if isinstance(payload.get("order_id"), str):
             order["order_id"] = payload["order_id"][:128]
         total = payload.get("total")
-        # The bounds also exclude NaN/Infinity, which browsers' JSON.parse
-        # would choke on when the session list is served back.
+
         if isinstance(total, (int, float)) and not isinstance(total, bool) and -1e15 < total < 1e15:
             order["total"] = total
         if isinstance(payload.get("currency"), str):
@@ -427,10 +388,9 @@ async def order_event(
     path.write_text(json.dumps(order))
     return {"status": "ok"}
 
-
 @app.get("/healthz")
 def healthz():
-    # Booleans only: this is unauthenticated.
+
     checks = {}
 
     try:
@@ -453,18 +413,15 @@ def healthz():
     )
     checks["replay_auth_enabled"] = bool(REPLAY_PASSWORD or WORKOS_ENABLED) and not REPLAY_AUTH_DISABLED
 
-    # Auth off is a deliberate local-dev choice: reported, but not a failure.
     healthy = all(v for k, v in checks.items() if k != "replay_auth_enabled")
     return JSONResponse(
         {"status": "ok" if healthy else "degraded", "checks": checks},
         status_code=200 if healthy else 503,
     )
 
-
 @app.get("/config")
 def remote_config(token: Optional[str] = Query(None)):
-    # Missing or invalid files degrade to {} — a bad config must never stop
-    # recording.
+
     config_path = CONFIG_PATH
     if token and SAFE_ID.match(token) and token in load_projects():
         project_config = PROJECTS_DIR / token / "config.json"
@@ -480,9 +437,8 @@ def remote_config(token: Optional[str] = Query(None)):
         print(f"config: serving defaults, {config_path.name} unusable: {exc}")
         cfg = {}
     response = JSONResponse(cfg)
-    response.headers["Cache-Control"] = "no-cache"  # clients cache via their own TTL
+    response.headers["Cache-Control"] = "no-cache"
     return response
-
 
 def chunk_timestamp(path: Path) -> int:
     try:
@@ -490,15 +446,12 @@ def chunk_timestamp(path: Path) -> int:
     except ValueError:
         return 0
 
-
 def chunk_files(session_dir: Path) -> list:
-    # Metadata files (order.json, visitor.json) share the directory and must
-    # never be listed or replayed as chunks.
+
     return sorted(
         (c for c in session_dir.glob("*.json") if SAFE_CHUNK.match(c.name)),
         key=chunk_timestamp,
     )
-
 
 def read_pool(project: Optional[str]) -> Optional[Path]:
     if not project:
@@ -506,7 +459,6 @@ def read_pool(project: Optional[str]) -> Optional[Path]:
     if SAFE_ID.match(project) and project in load_projects():
         return project_sessions_dir(project)
     return None
-
 
 def workos_call(path: str, payload: Optional[dict] = None, bearer: bool = False) -> dict:
     req = urllib.request.Request(
@@ -519,7 +471,6 @@ def workos_call(path: str, payload: Optional[dict] = None, bearer: bool = False)
     )
     with urllib.request.urlopen(req, timeout=10) as res:
         return json.load(res)
-
 
 def workos_authenticate(code: str) -> tuple:
     auth = workos_call(
@@ -534,9 +485,7 @@ def workos_authenticate(code: str) -> tuple:
     user = auth.get("user") or {}
     return (user.get("email") or "").lower(), user.get("id") or ""
 
-
 _org_cache: dict = {}
-
 
 def user_orgs(user_id: str) -> set:
     now = time.time()
@@ -553,11 +502,10 @@ def user_orgs(user_id: str) -> set:
     except Exception as exc:
         print(f"auth: membership lookup failed for {user_id}: {exc}")
         if cached:
-            return cached[1]  # stale access beats locking everyone out mid-outage
+            return cached[1]
         raise ApiError(503, "could not verify project access — try again shortly")
     _org_cache[user_id] = (now + ORG_CACHE_TTL_S, orgs)
     return orgs
-
 
 @app.get("/login")
 def login():
@@ -581,13 +529,12 @@ def login():
     response.set_cookie(STATE_COOKIE, state, max_age=600, httponly=True, secure=True, samesite="lax")
     return response
 
-
 @app.get("/auth/callback")
 def auth_callback(request: Request, code: Optional[str] = Query(None), state: Optional[str] = Query(None)):
     if not WORKOS_ENABLED:
         raise ApiError(503, "login not configured")
     if not code or not state or state != request.cookies.get(STATE_COOKIE):
-        # WorkOS invitation acceptance redirects here with no state; restart the flow.
+
         return RedirectResponse("/login", status_code=302)
     try:
         email, user_id = workos_authenticate(code)
@@ -604,13 +551,11 @@ def auth_callback(request: Request, code: Optional[str] = Query(None), state: Op
     response.delete_cookie(STATE_COOKIE)
     return response
 
-
 @app.get("/logout")
 def logout():
     response = RedirectResponse("/", status_code=302)
     response.delete_cookie(SESSION_COOKIE)
     return response
-
 
 def allowed_projects(request: Request) -> Optional[set]:
     auth = getattr(request.state, "auth", None)
@@ -619,12 +564,10 @@ def allowed_projects(request: Request) -> Optional[set]:
     orgs = user_orgs(auth.get("user_id") or "")
     return {t for t, meta in load_projects().items() if (meta or {}).get("org_id") in orgs}
 
-
 def require_read_access(request: Request, project: Optional[str]) -> None:
     allowed = allowed_projects(request)
     if allowed is not None and (not project or project not in allowed):
         raise ApiError(403, "not your project")
-
 
 @app.get("/api/projects")
 def list_projects(request: Request):
@@ -634,13 +577,11 @@ def list_projects(request: Request):
         for token, meta in load_projects().items()
         if allowed is None or token in allowed
     ]
-    # The legacy pool shows as a blank token for operators while it still
-    # holds recordings, so pre-project sessions stay reachable.
+
     if allowed is None and projects and any(entry.is_dir() for entry in DATA_DIR.iterdir()):
         projects.append({"token": "", "name": "(no project)"})
     email = (getattr(request.state, "auth", None) or {}).get("email")
     return {"projects": projects, **({"email": email} if email else {})}
-
 
 @app.get("/api/sessions")
 def list_sessions(request: Request, project: Optional[str] = Query(None)):
@@ -677,19 +618,16 @@ def list_sessions(request: Request, project: Optional[str] = Query(None)):
     sessions.sort(key=lambda s: s["last_seen"], reverse=True)
     return {"sessions": sessions}
 
-
 @app.delete("/api/sessions/{session_id}")
 def delete_session(request: Request, session_id: str, project: Optional[str] = Query(None)):
-    # DELETE is absent from the CORS allowlist, so only the replay UI's own
-    # origin can reach this.
+
     require_read_access(request, project)
     session_dir = resolve_session(session_id, project)
     freed = dir_bytes(session_dir)
     shutil.rmtree(session_dir, ignore_errors=True)
-    _pool_bytes.pop(session_dir.parent, None)  # freed bytes belong back in the quota
+    _pool_bytes.pop(session_dir.parent, None)
     print(f"deleted session {session_id} ({freed} bytes)")
     return {"status": "deleted", "session_id": session_id, "bytes_freed": freed}
-
 
 @app.get("/api/sessions/{session_id}/chunks")
 def session_chunks(request: Request, session_id: str, project: Optional[str] = Query(None)):
@@ -710,9 +648,8 @@ def session_chunks(request: Request, session_id: str, project: Optional[str] = Q
         }
         for c in chunks
     ]
-    windows = list(dict.fromkeys(c["window"] for c in manifest))  # by first appearance
+    windows = list(dict.fromkeys(c["window"] for c in manifest))
     return {"session_id": session_id, "url": url, "windows": windows, "chunks": manifest}
-
 
 @app.get("/api/sessions/{session_id}/chunks/{chunk_name}")
 def session_chunk(request: Request, session_id: str, chunk_name: str, project: Optional[str] = Query(None)):
@@ -722,14 +659,13 @@ def session_chunk(request: Request, session_id: str, chunk_name: str, project: O
     path = resolve_pool(project) / session_id / chunk_name
     if not path.is_file():
         raise ApiError(404, "not found")
-    # Immutable, so the browser may cache them across scrubbing re-visits.
+
     return FileResponse(
         path, media_type="application/json", headers={"Cache-Control": "max-age=86400"}
     )
 
-
 def sweep_expired_sessions() -> int:
-    # Empty directories count as expired.
+
     if RETENTION_DAYS <= 0:
         return 0
     cutoff_ms = (time.time() - RETENTION_DAYS * 86400) * 1000
@@ -744,19 +680,15 @@ def sweep_expired_sessions() -> int:
                 shutil.rmtree(entry, ignore_errors=True)
                 removed += 1
     if removed:
-        _pool_bytes.clear()  # freed space must count against the quota again
+        _pool_bytes.clear()
     return removed
 
-
-# Registered last so /ingest and /api/* win; serves index.html at "/".
 app.mount("/", StaticFiles(directory=BASE_DIR / "public", html=True), name="static")
-
 
 PUBLIC_URL_FILE = DATA_ROOT / "public_url"
 
-
 def public_base_url() -> str:
-    # The file covers CLI runs, which don't load the systemd environment.
+
     try:
         from_file = PUBLIC_URL_FILE.read_text()
     except Exception:
@@ -765,7 +697,6 @@ def public_base_url() -> str:
         if value:
             return value.strip().rstrip("/")
     return "https://capture.example.com"
-
 
 def add_project(name: str) -> None:
     token = "cap_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=24))
@@ -788,12 +719,10 @@ def add_project(name: str) -> None:
         f"data/projects/{token}/config.json (falls back to data/config.json)"
     )
 
-
 def pool_usage(pool: Path) -> tuple:
     if not pool.is_dir():
         return 0, 0
     return sum(1 for d in pool.iterdir() if d.is_dir()), dir_bytes(pool)
-
 
 def list_projects_cli() -> None:
     projects = load_projects()
@@ -806,7 +735,6 @@ def list_projects_cli() -> None:
         org = (meta or {}).get("org_id") or "no org — operators only"
         print(f"{token}  {name}  —  {count} session(s), {used / 1024**2:.1f} MB  —  {org}")
 
-
 def set_project_org(token: str, org_id: str) -> None:
     projects = load_projects()
     if token not in projects:
@@ -816,7 +744,6 @@ def set_project_org(token: str, org_id: str) -> None:
     PROJECTS_PATH.write_text(json.dumps(projects, indent=2))
     name = (projects[token] or {}).get("name") or token
     print(f"'{name}' is now readable by members of WorkOS organization {org_id}")
-
 
 def set_project_domains(token: str, domains: list) -> None:
     projects = load_projects()
@@ -835,7 +762,6 @@ def set_project_domains(token: str, domains: list) -> None:
         print(f"'{name}' now accepts recordings only from {', '.join(cleaned)} (and subdomains)")
     else:
         print(f"'{name}' now accepts recordings from any domain")
-
 
 def invite_user(email: str, target: str) -> None:
     if not WORKOS_ENABLED:
@@ -858,7 +784,6 @@ def invite_user(email: str, target: str) -> None:
     expires = invitation.get("expires_at") or "?"
     print(f"invited {email} to {org_id} — they'll get an email link, valid until {expires}")
 
-
 def remove_project(token: str, purge: bool) -> None:
     projects = load_projects()
     if token not in projects:
@@ -875,7 +800,6 @@ def remove_project(token: str, purge: bool) -> None:
         print(f"deleted {count} stored session(s), {used / 1024**2:.1f} MB")
     elif count:
         print(f"kept {count} session(s), {used / 1024**2:.1f} MB — re-run with --purge to erase")
-
 
 if __name__ == "__main__":
     import sys

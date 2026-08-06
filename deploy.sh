@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# The box only admits CloudFront, so the deploy is checked twice — on the
-# origin, then through the CDN. A failed check rolls back the previous code.
 set -euo pipefail
 
 HOST="${CAPTURE_HOST:-ec2-user@ec2-35-167-249-40.us-west-2.compute.amazonaws.com}"
@@ -16,7 +14,6 @@ ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail
 cd /opt/capture
 
-# data/ is excluded: recordings are never part of the rollback.
 rm -rf .rollback && mkdir .rollback
 cp -a server.py requirements.txt public .rollback/ 2>/dev/null || true
 
@@ -25,7 +22,6 @@ tar xzf /tmp/capture-deploy.tar.gz
 .venv/bin/pip install -q -r requirements.txt
 sudo systemctl restart capture
 
-# /healthz fails on a broken deploy, not just a closed port.
 for i in $(seq 1 30); do
   if curl -sf -o /tmp/health.json localhost/healthz; then
     echo "origin health: $(cat /tmp/health.json)"
@@ -47,10 +43,8 @@ fi
 exit 1
 REMOTE
 
-# A CloudFront or security-group change can break the public path while the
-# box itself is fine.
 fail=0
-check() { # description expected-status(es, space-separated) url
+check() {
   actual=$(curl -s -o /dev/null -w '%{http_code}' "$3")
   case " $2 " in
     *" $actual "*)
@@ -66,11 +60,9 @@ check "health"                 200 "$PUBLIC_URL/healthz"
 check "snippet"                200 "$PUBLIC_URL/capture.js"
 check "recorder bundle"        200 "$PUBLIC_URL/recorder.bundle.js"
 check "remote config"          200 "$PUBLIC_URL/config"
-# 401 in Basic-password mode, 302-to-login in WorkOS mode — gated either way.
 check "replay UI is gated"     "401 302" "$PUBLIC_URL/replay.html"
 check "read API is gated"      401 "$PUBLIC_URL/api/sessions"
 
-# Served, not just present: a truncated or stale build returns 200 too.
 if curl -sf "$PUBLIC_URL/capture.js" | grep -q "recorder.bundle.js"; then
   printf '  ok    %-34s\n' "snippet content"
 else

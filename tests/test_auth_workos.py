@@ -1,7 +1,3 @@
-# No real WorkOS traffic: session cookies are minted with the same HMAC
-# scheme the server uses (SESSION_SECRET pinned via the environment), and
-# WORKOS_API points at a local stub that serves org memberships, so live
-# lookups, validation, expiry, and scoping run without the code-exchange path.
 
 import base64
 import hashlib
@@ -22,7 +18,6 @@ SECRET = "test-session-secret"
 MEMBERSHIPS = {"user_alpha": ["org_alpha"], "user_beta": ["org_beta"]}
 STUB_CALLS = []
 
-
 class WorkOSStub(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -40,7 +35,6 @@ class WorkOSStub(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-
 STUB = http.server.ThreadingHTTPServer(("127.0.0.1", 0), WorkOSStub)
 threading.Thread(target=STUB.serve_forever, daemon=True).start()
 
@@ -53,13 +47,10 @@ WORKOS_ENV = {
     "CAPTURE_OPERATORS": "op@example.com",
 }
 
-
 class NoRedirect(urllib.request.HTTPRedirectHandler):
-    # /login 302s to the WorkOS authorize URL; following it would leave the
-    # test box.
+
     def redirect_request(self, *args, **kwargs):
         return None
-
 
 def request_no_redirect(url, headers=None):
     opener = urllib.request.build_opener(NoRedirect)
@@ -70,22 +61,18 @@ def request_no_redirect(url, headers=None):
     except urllib.error.HTTPError as err:
         return err.code, dict(err.headers), err.read()
 
-
 def sign_cookie(payload, secret=SECRET):
     raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     sig = hmac.new(secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
     return f"capture_session={raw}.{sig}"
-
 
 def session_cookie(email, user_id, secret=SECRET, exp_in=3600):
     return sign_cookie(
         {"email": email, "user_id": user_id, "exp": int(time.time()) + exp_in}, secret
     )
 
-
 class TestWorkOSScoping(ServerCase):
-    # TTL 0 keeps every request's membership lookup fresh, so access-change
-    # tests need no sleeps; caching itself is covered separately below.
+
     env = {**WORKOS_ENV, "ORG_CACHE_TTL_S": "0"}
 
     @classmethod
@@ -132,7 +119,7 @@ class TestWorkOSScoping(ServerCase):
         self.assertEqual(headers.get("location"), "/login")
 
     def test_callback_with_code_but_no_state_restarts_login(self):
-        # The invitation-acceptance flow lands here with only a code.
+
         status, headers, _ = request_no_redirect(f"{self.base}/auth/callback?code=x")
         self.assertEqual(status, 302)
         self.assertEqual(headers.get("location"), "/login")
@@ -228,7 +215,6 @@ class TestWorkOSScoping(ServerCase):
     def test_ingest_still_needs_only_the_project_token(self):
         self.assertEqual(self.ingest("w" * 32, token="cap_alpha"), 200)
 
-
 class TestMembershipCache(ServerCase):
     env = {**WORKOS_ENV, "ORG_CACHE_TTL_S": "60"}
 
@@ -251,7 +237,6 @@ class TestMembershipCache(ServerCase):
         finally:
             del MEMBERSHIPS["user_cached"]
         self.assertEqual(STUB_CALLS.count("user_cached"), 1)
-
 
 if __name__ == "__main__":
     unittest.main()

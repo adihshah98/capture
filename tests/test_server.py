@@ -1,6 +1,3 @@
-# Each case boots a real uvicorn process against a throwaway CAPTURE_DATA_DIR,
-# so tests exercise what actually ships — middleware order, env parsing and
-# all — rather than an in-process approximation.
 
 import gzip
 import json
@@ -19,22 +16,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 UVICORN = REPO / ".venv" / "bin" / "uvicorn"
 
-
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
-
 def request(url, method="GET", data=None, headers=None):
-    # HTTP errors are (status, body) values here, not raises.
+
     req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
     try:
         with urllib.request.urlopen(req, timeout=10) as res:
             return res.status, res.read()
     except urllib.error.HTTPError as err:
         return err.code, err.read()
-
 
 class ServerCase(unittest.TestCase):
     env: dict = {}
@@ -86,7 +80,6 @@ class ServerCase(unittest.TestCase):
         return request(url, method="POST", data=body,
                        headers={"Content-Type": "application/octet-stream", **(headers or {})})[0]
 
-
 class TestIngestValidation(ServerCase):
     def test_accepts_a_valid_batch(self):
         self.assertEqual(self.ingest("s" * 32), 200)
@@ -105,7 +98,6 @@ class TestIngestValidation(ServerCase):
     def test_undecompressable_body_is_rejected(self):
         self.assertEqual(self.ingest("v" * 32, raw=b"not gzip", gzipped=False), 400)
 
-
 class TestGzipBomb(ServerCase):
     env = {"MAX_DECOMPRESSED_BYTES": str(1024 * 1024)}
 
@@ -118,14 +110,12 @@ class TestGzipBomb(ServerCase):
         self.assertEqual(self.ingest("x" * 32, raw=bomb, gzipped=False), 400)
         self.assertEqual(request(f"{self.base}/config")[0], 200)
 
-
 class TestQuota(ServerCase):
     env = {"MAX_PROJECT_BYTES": "1"}
 
     def test_over_quota_returns_429(self):
-        self.ingest("y" * 32)  # first write establishes usage
+        self.ingest("y" * 32)
         self.assertEqual(self.ingest("z" * 32), 429)
-
 
 class TestDiskFloor(ServerCase):
     env = {"MIN_FREE_DISK_BYTES": str(10**18)}
@@ -133,13 +123,11 @@ class TestDiskFloor(ServerCase):
     def test_low_disk_returns_507(self):
         self.assertEqual(self.ingest("a" * 32), 507)
 
-
 class TestLimitsDisabled(ServerCase):
     env = {"MAX_PROJECT_BYTES": "0", "MIN_FREE_DISK_BYTES": "0"}
 
     def test_zero_disables_the_checks(self):
         self.assertEqual(self.ingest("b" * 32), 200)
-
 
 class TestReplayAuthFailsClosed(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": ""}
@@ -157,7 +145,6 @@ class TestReplayAuthFailsClosed(ServerCase):
     def test_write_side_stays_open(self):
         self.assertEqual(request(f"{self.base}/config")[0], 200)
         self.assertEqual(request(f"{self.base}/capture.js")[0], 200)
-
 
 class TestReplayAuthWithPassword(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": "s3cret"}
@@ -181,7 +168,6 @@ class TestReplayAuthWithPassword(ServerCase):
 
     def test_ingest_needs_no_password(self):
         self.assertEqual(self.ingest("c" * 32), 200)
-
 
 class TestDelete(ServerCase):
     def test_delete_removes_only_the_named_session(self):
@@ -207,7 +193,6 @@ class TestDelete(ServerCase):
         self.assertEqual(
             request(f"{self.base}/api/sessions/{'f' * 32}?project=cap_nope", method="DELETE")[0], 404
         )
-
 
 class TestOrderEvents(ServerCase):
     def order(self, session_id, payload):
@@ -251,7 +236,6 @@ class TestOrderEvents(ServerCase):
 
     def test_unrecorded_session_is_404(self):
         self.assertEqual(self.order("r" * 32, {"event": "checkout_completed"}), 404)
-
 
 class TestVisitorId(ServerCase):
     EVENTS = [{"type": 4, "data": {}}]
@@ -310,7 +294,6 @@ class TestVisitorId(ServerCase):
         self.ingest(session, {"events": self.EVENTS, "url": "https://brand.example/" + "a" * 3000})
         self.assertEqual(len(self.listed(session)["url"]), 2048)
 
-
 class TestHealthz(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": "s3cret"}
 
@@ -331,7 +314,6 @@ class TestHealthz(ServerCase):
         self.assertNotIn("cap_", body)
         self.assertNotIn("s3cret", body)
 
-
 class TestHealthzDegraded(ServerCase):
     env = {"MIN_FREE_DISK_BYTES": str(10**18)}
 
@@ -342,7 +324,6 @@ class TestHealthzDegraded(ServerCase):
         self.assertEqual(payload["status"], "degraded")
         self.assertFalse(payload["checks"]["disk_above_floor"])
 
-
 class TestHealthzUnwritableStorage(ServerCase):
     def test_503_when_storage_cannot_be_written(self):
         self.assertEqual(request(f"{self.base}/healthz")[0], 200)
@@ -352,17 +333,16 @@ class TestHealthzUnwritableStorage(ServerCase):
             status, body = request(f"{self.base}/healthz")
             self.assertEqual(status, 503)
             self.assertFalse(json.loads(body)["checks"]["storage_writable"])
-            # /config still answers 200 — which is why it was a bad health check.
+
             self.assertEqual(request(f"{self.base}/config")[0], 200)
         finally:
             os.chmod(self.data_dir, mode)
-
 
 class TestProjectTokens(ServerCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        # Written after boot: load_projects() reads from disk per request.
+
         cls.token = "cap_testtokentesttokentest"
         (cls.data_dir / "projects.json").write_text(
             json.dumps({cls.token: {"name": "Test", "created_at": 0}})
@@ -395,7 +375,6 @@ class TestProjectTokens(ServerCase):
         self.assertIn("j" * 32, [s["session_id"] for s in scoped["sessions"]])
         self.assertNotIn("j" * 32, [s["session_id"] for s in default["sessions"]])
 
-
 class TestDomainAllowlist(ServerCase):
     @classmethod
     def setUpClass(cls):
@@ -426,9 +405,7 @@ class TestDomainAllowlist(ServerCase):
     def test_referer_is_the_fallback(self):
         self.assertEqual(self.send("f" * 32, Referer="https://shop.brand.com/lp?x=1"), 200)
 
-
 class TestProjectCli(unittest.TestCase):
-    """The CLI runs from a shell, not systemd, so it resolves its own paths."""
 
     def setUp(self):
         self.data_dir = Path(tempfile.mkdtemp(prefix="capture-cli-"))
@@ -446,7 +423,7 @@ class TestProjectCli(unittest.TestCase):
         return result.stdout + result.stderr
 
     def test_startup_prints_no_deprecation_warning(self):
-        # on_event was deprecated and printed on every CLI invocation.
+
         out = self.run_cli("list-projects")
         self.assertNotIn("DeprecationWarning", out)
         self.assertNotIn("on_event is deprecated", out)
@@ -484,7 +461,6 @@ class TestProjectCli(unittest.TestCase):
         token = created.split("token: ")[1].split()[0]
         self.assertIn(token, self.run_cli("list-projects"))
 
-        # Revoking keeps recordings unless --purge is passed.
         sessions = self.data_dir / "projects" / token / "sessions" / "s1"
         sessions.mkdir(parents=True)
         (sessions / "1-abcdef.json").write_text('{"events":[1]}')
@@ -503,7 +479,6 @@ class TestProjectCli(unittest.TestCase):
 
         self.run_cli("remove-project", token, "--purge")
         self.assertFalse((self.data_dir / "projects" / token).exists())
-
 
 if __name__ == "__main__":
     if not UVICORN.exists():

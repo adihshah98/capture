@@ -1,4 +1,3 @@
-// Runs against public/capture.js — the artifact that is actually served.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,7 +14,7 @@ function run({ pageOrigin, snippetSrc = `${CAPTURE_ORIGIN}/capture.js`, pageConf
   const sandbox = {
     console: { error: (...a) => errors.push(a.join(' ')), warn: () => {} },
     URL,
-    setTimeout: (fn) => fn(), // the snippet's non-idle path, run synchronously
+    setTimeout: (fn) => fn(),
     addEventListener: () => {},
     location: { origin: pageOrigin },
     document: {
