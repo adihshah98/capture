@@ -1,4 +1,5 @@
 import { record } from 'rrweb';
+import { startClickCapture } from './clicks.js';
 import { config } from './config.js';
 import { getSession } from './identity.js';
 import { status, setStatus, setSessionId } from './state.js';
@@ -6,6 +7,15 @@ import { pushEvent, flush, resetBuffer, scheduleFlush, stopFlushTimer } from './
 import { gatesSatisfied, checkUrlTriggers } from './triggers.js';
 
 export let stopFn = null;
+
+let stopClicks = null;
+
+function stopClickListener() {
+  if (stopClicks) {
+    stopClicks();
+    stopClicks = null;
+  }
+}
 
 const INTERACTIVE_SOURCES = new Set([1, 2, 3, 5, 6]);
 const isInteractive = (event) =>
@@ -22,6 +32,7 @@ export function stopRecording(nextStatus) {
   setStatus(nextStatus);
   resetBuffer();
   stopFlushTimer();
+  stopClickListener();
   if (stopFn) {
     stopFn();
     stopFn = null;
@@ -39,6 +50,7 @@ function onSessionRotated(next) {
   if (!next.sampled) {
     setStatus('disabled');
     setTimeout(() => {
+      stopClickListener();
       if (stopFn) {
         stopFn();
         stopFn = null;
@@ -98,6 +110,10 @@ export function startRecording() {
       input: 'last',
     },
   });
+  stopClicks = startClickCapture(
+    (payload) => record.addCustomEvent('capture-click', payload),
+    config
+  );
   scheduleFlush();
   checkUrlTriggers();
 }

@@ -1,5 +1,6 @@
 import { currentProject, fetchJson, projectQuery, setProject } from './api.js';
 import { formatBytes, formatDuration, formatTime, pagePath } from './format.js';
+import { paramChips } from './params.js';
 import { clearPlayer, loadSession, loadedSessionId } from './session-player.js';
 
 const projectSelectEl = document.getElementById('project-select');
@@ -13,6 +14,7 @@ const FILTERS = {
   all: () => true,
   checkout: (s) => Boolean(s.order),
   purchased: (s) => Boolean(s.order && s.order.purchased_at),
+  rage: (s) => Boolean(s.interactions && s.interactions.rage),
 };
 
 function showListMessage(message) {
@@ -96,8 +98,10 @@ function renderSessionList() {
       <button class="del" title="Delete this recording">Delete</button>
     `;
     const page = li.querySelector('.page');
-    page.textContent = pagePath(session.url);
+    page.textContent = pagePath(session.url).split('?')[0];
     page.title = session.url || '';
+    const chips = paramChips(session.url, 3);
+    if (chips) li.querySelector('.info').appendChild(chips);
     li.title = `${session.chunk_count} chunks · ${formatBytes(session.bytes)}`;
     const order = session.order;
     if (order && (order.purchased_at || order.checkout_started_at)) {
@@ -110,6 +114,13 @@ function renderSessionList() {
           : '';
       badge.textContent = purchased ? `Purchased${amount}` : 'Reached checkout';
       if (order.order_id) badge.title = `Order ${order.order_id}`;
+      li.querySelector('.info').appendChild(badge);
+    }
+    const rage = session.interactions && session.interactions.rage;
+    if (rage) {
+      const badge = document.createElement('span');
+      badge.className = 'order rage';
+      badge.textContent = `${rage} rage click${rage > 1 ? 's' : ''}`;
       li.querySelector('.info').appendChild(badge);
     }
     li.addEventListener('click', () => {

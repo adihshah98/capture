@@ -1,4 +1,5 @@
 import { formatOffset, pagePath } from './format.js';
+import { paramChips } from './params.js';
 import { player } from './session-player.js';
 
 const timelineListEl = document.getElementById('timeline-list');
@@ -47,10 +48,27 @@ export function renderTimeline(events, navigations, session) {
       entries.push({ t: event.timestamp, kind: 'idle', css: 'kind-idle', detail: 'no interaction — recording paused' });
     } else if (tag === 'capture-idle-end') {
       entries.push({ t: event.timestamp, kind: 'resumed', css: 'kind-idle', detail: 'activity resumed' });
+    } else if (tag === 'capture-click') {
+      const payload = event.data.payload || {};
+      const label = payload.text ? `“${payload.text}”` : payload.selector || '';
+      entries.push({
+        t: event.timestamp,
+        kind: payload.rage ? 'rage' : 'click',
+        css: payload.rage ? 'kind-rage' : 'kind-click',
+        detail: payload.rage ? `rage click — ${label}` : label,
+        title: payload.selector,
+      });
     }
   }
   for (const nav of navigations) {
-    entries.push({ t: nav.t, kind: 'page', css: 'kind-page', detail: pagePath(nav.url).split('?')[0], title: nav.url });
+    entries.push({
+      t: nav.t,
+      kind: 'page',
+      css: 'kind-page',
+      detail: pagePath(nav.url).split('?')[0],
+      title: nav.url,
+      paramsUrl: nav.url,
+    });
   }
   entries.sort((a, b) => a.t - b.t);
 
@@ -72,7 +90,7 @@ export function renderTimeline(events, navigations, session) {
   timelineCountEl.textContent = entries.length ? `(${entries.length})` : '';
   clearTimeline();
   if (entries.length === 0) {
-    timelineListEl.innerHTML = '<li class="empty">No triggers, idle gaps or navigations in this recording.</li>';
+    timelineListEl.innerHTML = '<li class="empty">No clicks, triggers, idle gaps or navigations in this recording.</li>';
     return;
   }
   for (const entry of entries) {
@@ -84,6 +102,10 @@ export function renderTimeline(events, navigations, session) {
     ts.title = new Date(entry.t).toLocaleTimeString();
     li.querySelector('.kind').textContent = entry.kind;
     li.querySelector('.detail').textContent = entry.detail;
+    if (entry.paramsUrl) {
+      const chips = paramChips(entry.paramsUrl, 4);
+      if (chips) li.querySelector('.detail').appendChild(chips);
+    }
     if (entry.title) li.title = entry.title;
     li.addEventListener('click', () => player && player.seekTo(entry.t - syncStart));
     timelineRows.push({ el: li, t: entry.t });

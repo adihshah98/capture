@@ -32,6 +32,13 @@
     #session-list .order { align-self: flex-start; font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 999px; margin-top: 2px; }
     #session-list .order.purchased { background: #dcfce7; color: #15803d; }
     #session-list .order.started { background: #fef3c7; color: #92400e; }
+    #session-list .order.rage { background: #fee2e2; color: #b91c1c; }
+    .params { display: inline-flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; vertical-align: middle; }
+    .param { font-size: 10px; font-family: ui-monospace, Menlo, monospace; background: #f0f2f5; color: #6b7280; border-radius: 4px; padding: 0 5px; line-height: 16px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .param.marketing { background: #eef2ff; color: #4f46e5; }
+    .param.more { background: none; border: 1px dashed #d0d3d8; }
+    #session-title .params { margin-left: 8px; }
+    #timeline-list .detail .params { margin-left: 6px; }
     #session-list .del { flex: none; opacity: 0.45; border: 1px solid #d0d3d8; background: #fff; color: #6b7280; font-size: 11px; padding: 3px 8px; border-radius: 5px; cursor: pointer; }
     #session-list li:hover .del, #session-list .del:focus, #session-list .del.armed { opacity: 1; }
     #session-list .del.armed { border-color: #dc2626; color: #dc2626; font-weight: 600; }
@@ -82,6 +89,8 @@
     #timeline-list .kind-trigger .kind, #timeline-list .kind-trigger .detail { color: #0f766e; }
     #timeline-list .kind-idle .kind, #timeline-list .kind-idle .detail { color: #d97706; }
     #timeline-list .kind-order .kind, #timeline-list .kind-order .detail { color: #15803d; font-weight: 600; }
+    #timeline-list .kind-click .detail { color: #1c1e21; }
+    #timeline-list .kind-rage .kind, #timeline-list .kind-rage .detail { color: #dc2626; font-weight: 600; }
     #timeline-list li:not(.empty) { cursor: pointer; }
     #timeline-list li.future { opacity: 0.4; }
     #timeline-list li.current { background: #eef2ff; box-shadow: inset 2px 0 0 #4f46e5; }
@@ -102,6 +111,7 @@
         <button data-filter="all" class="active">All</button>
         <button data-filter="checkout">Checkout</button>
         <button data-filter="purchased">Purchased</button>
+        <button data-filter="rage">Rage</button>
       </div>
       <ul id="session-list"></ul>
     </aside>
@@ -142,7 +152,7 @@
         <div class="devtools-tabs">
           <button id="tab-timeline" class="active">Timeline <span class="count" id="timeline-count"></span></button>
         </div>
-        <ul id="timeline-list"><li class="empty">Triggers, idle gaps and navigations appear here.</li></ul>
+        <ul id="timeline-list"><li class="empty">Clicks, triggers, idle gaps and navigations appear here.</li></ul>
       </section>
     </main>
   </div>

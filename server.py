@@ -325,6 +325,7 @@ async def ingest(
             }
         )
     )
+    index_interactions(session_dir, events)
     _pool_bytes[pool] = pool_bytes(pool) + chunk_path.stat().st_size
 
     return {"status": "ok", "stored": len(events)}
@@ -333,6 +334,33 @@ ORDER_FILE = "order.json"
 ORDER_MAX_BODY_BYTES = 4096
 
 VISITOR_FILE = "visitor.json"
+
+INTERACTIONS_FILE = "interactions.json"
+
+def index_interactions(session_dir: Path, events: list) -> None:
+    clicks = rage = 0
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != 5:
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict) or data.get("tag") != "capture-click":
+            continue
+        clicks += 1
+        payload = data.get("payload")
+        if isinstance(payload, dict) and payload.get("rage"):
+            rage += 1
+    if not clicks:
+        return
+    path = session_dir / INTERACTIONS_FILE
+    try:
+        counts = json.loads(path.read_text())
+        if not isinstance(counts, dict):
+            counts = {}
+    except Exception:
+        counts = {}
+    counts["clicks"] = int(counts.get("clicks") or 0) + clicks
+    counts["rage"] = int(counts.get("rage") or 0) + rage
+    path.write_text(json.dumps(counts))
 
 @app.post("/order")
 async def order_event(
@@ -612,6 +640,14 @@ def list_sessions(request: Request, project: Optional[str] = Query(None)):
             try:
                 meta = json.loads(meta_path.read_text())
                 info.update({k: meta[k] for k in ("visitor_id", "url") if isinstance(meta.get(k), str)})
+            except Exception:
+                pass
+        interactions_path = entry / INTERACTIONS_FILE
+        if interactions_path.is_file():
+            try:
+                interactions = json.loads(interactions_path.read_text())
+                if isinstance(interactions, dict):
+                    info["interactions"] = interactions
             except Exception:
                 pass
         sessions.append(info)

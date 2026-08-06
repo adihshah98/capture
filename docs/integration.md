@@ -50,6 +50,10 @@ Content-Security-Policy, see [Content-Security-Policy](#content-security-policy-
   rest of the URL is kept intact.
 - **Console output and network requests are not captured at all.** The
   recording is the DOM and user interactions only.
+- **Clicks on buttons and links are labeled with the element's visible
+  text** (e.g. “Buy now”) so they can be listed next to the replay. The
+  label honors the masking rules above, is never taken from text inputs,
+  and anything resembling a card or phone number is scrubbed from it.
 - **Return visits are grouped by a random visitor identifier** stored in
   the visitor's browser. It is a random UUID that says nothing about the
   person: never linked to accounts, emails, or IP addresses, and never

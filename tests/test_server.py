@@ -294,6 +294,45 @@ class TestVisitorId(ServerCase):
         self.ingest(session, {"events": self.EVENTS, "url": "https://brand.example/" + "a" * 3000})
         self.assertEqual(len(self.listed(session)["url"]), 2048)
 
+class TestInteractions(ServerCase):
+    def click(self, payload):
+        return {"type": 5, "data": {"tag": "capture-click", "payload": payload}}
+
+    def listed(self, session_id):
+        sessions = json.loads(request(f"{self.base}/api/sessions")[1])["sessions"]
+        return next(s for s in sessions if s["session_id"] == session_id)
+
+    def test_clicks_are_counted_across_batches(self):
+        session = "click" + "x" * 27
+        self.ingest(session, {"events": [
+            self.click({"selector": "button#buy", "text": "Buy now"}),
+            self.click({"selector": "button#buy", "rage": True}),
+            {"type": 3, "data": {"source": 2}},
+        ]})
+        self.ingest(session, {"events": [self.click({"selector": "a.nav"})]})
+        self.assertEqual(self.listed(session)["interactions"], {"clicks": 3, "rage": 1})
+
+    def test_sidecar_never_appears_as_a_chunk(self):
+        session = "click2" + "x" * 26
+        self.ingest(session, {"events": [self.click({"selector": "button#buy"})]})
+        manifest = json.loads(request(f"{self.base}/api/sessions/{session}/chunks")[1])
+        self.assertNotIn("interactions.json", [c["name"] for c in manifest["chunks"]])
+
+    def test_sessions_without_clicks_have_no_interactions(self):
+        session = "click3" + "x" * 26
+        self.ingest(session, {"events": [{"type": 3, "data": {"source": 2}}]})
+        self.assertNotIn("interactions", self.listed(session))
+
+    def test_malformed_click_events_never_break_ingest(self):
+        session = "click4" + "x" * 26
+        status = self.ingest(session, {"events": [
+            {"type": 5, "data": {"tag": "capture-click", "payload": "junk"}},
+            {"type": 5, "data": "junk"},
+            {"type": 5},
+        ]})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.listed(session)["interactions"], {"clicks": 1, "rage": 0})
+
 class TestHealthz(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": "s3cret"}
 
