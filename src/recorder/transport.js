@@ -1,11 +1,12 @@
 import { record } from 'rrweb';
 import { redactUrl } from '../redact.js';
+import { beaconEvents } from './beacon.js';
 import { config } from './config.js';
 import { status, sessionId, windowId, visitorId } from './state.js';
 import { tryTransition } from './triggers.js';
 import { abort, stopFn } from './recording.js';
 
-const KEEPALIVE_MAX_BYTES = 60 * 1024;
+const KEEPALIVE_SAFE_BYTES = 51 * 1024;
 
 let buffer = [];
 let bufferBytes = 0;
@@ -76,33 +77,25 @@ function requeue(events) {
   }
 }
 
-export async function flush(useKeepalive) {
-  if (status !== 'active' || buffer.length === 0 || inFlight) return;
-  let events = buffer;
+function ingestUrl(compressed) {
+  const params = new URLSearchParams({ session_id: sessionId, window_id: windowId });
+  if (config.token) params.set('token', config.token);
+  if (compressed) params.set('compression', 'gzip-js');
+  return `${config.endpoint}?${params}`;
+}
+
+async function flushAsync() {
+  if (inFlight) return;
+  const events = buffer;
   resetBuffer();
   inFlight = true;
 
   try {
-    let { body, compressed } = await gzipBody(payloadFor(events));
-
-    let dropped = 0;
-    while (useKeepalive && bodyBytes(body) > KEEPALIVE_MAX_BYTES && events.length > 1) {
-      const keep = Math.floor(events.length / 2);
-      dropped += events.length - keep;
-      events = events.slice(0, keep);
-      ({ body, compressed } = await gzipBody(payloadFor(events)));
-    }
-    if (dropped) {
-      console.warn(`capture: dropped ${dropped} trailing event(s) over the keepalive limit`);
-    }
-
-    const params = new URLSearchParams({ session_id: sessionId, window_id: windowId });
-    if (config.token) params.set('token', config.token);
-    if (compressed) params.set('compression', 'gzip-js');
-    const res = await fetch(`${config.endpoint}?${params}`, {
+    const { body, compressed } = await gzipBody(payloadFor(events));
+    const res = await fetch(ingestUrl(compressed), {
       method: 'POST',
       body,
-      keepalive: Boolean(useKeepalive),
+      keepalive: bodyBytes(body) < KEEPALIVE_SAFE_BYTES,
       headers: { 'Content-Type': compressed ? 'application/octet-stream' : 'application/json' },
     });
 
@@ -117,6 +110,40 @@ export async function flush(useKeepalive) {
     requeue(events);
   } finally {
     inFlight = false;
+  }
+}
+
+function flushBeacon() {
+  const events = buffer;
+  resetBuffer();
+  const url = ingestUrl(false);
+  beaconEvents(
+    events,
+    (batch) => payloadFor(batch),
+    (json) => {
+      try {
+        return Boolean(
+          navigator.sendBeacon && navigator.sendBeacon(url, new Blob([json], { type: 'text/plain' }))
+        );
+      } catch {
+        return false;
+      }
+    },
+    (json) => {
+      try {
+        fetch(url, { method: 'POST', body: json, headers: { 'Content-Type': 'application/json' } });
+      } catch {
+      }
+    }
+  );
+}
+
+export function flush(useKeepalive) {
+  if (status !== 'active' || buffer.length === 0) return;
+  if (useKeepalive) {
+    flushBeacon();
+  } else {
+    return flushAsync();
   }
 }
 

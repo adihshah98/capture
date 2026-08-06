@@ -33,6 +33,7 @@ async function boot() {
   }
 
   window.addEventListener('pagehide', () => flush(true));
+  window.addEventListener('beforeunload', () => flush(true));
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flush(true);
   });
