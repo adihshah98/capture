@@ -1,9 +1,13 @@
-import rrwebPlayer from 'rrweb-player';
-import 'rrweb-player/dist/style.css';
+import { ACTIVE_SOURCES, CapturePlayer } from './player.js';
 
 const projectSelectEl = document.getElementById('project-select');
 const sessionListEl = document.getElementById('session-list');
 const playerHostEl = document.getElementById('player-host');
+const stageEl = document.getElementById('stage');
+const controlsEl = document.getElementById('controls');
+const playerMsgEl = document.getElementById('player-msg');
+const skipNoteEl = document.getElementById('skip-note');
+const assetErrorsEl = document.getElementById('asset-errors');
 const sessionTitleEl = document.getElementById('session-title');
 const loadProgressEl = document.getElementById('load-progress');
 const windowTabsEl = document.getElementById('window-tabs');
@@ -11,6 +15,17 @@ const windowTabsEl = document.getElementById('window-tabs');
 const timelineListEl = document.getElementById('timeline-list');
 
 let player = null;
+
+addEventListener('keydown', (e) => {
+  if (!player || e.target.closest('input, select, textarea, button')) return;
+  if (e.code === 'Space') {
+    e.preventDefault();
+    player.toggle();
+  } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+    e.preventDefault();
+    player.seekBy(e.code === 'ArrowRight' ? 5000 : -5000);
+  }
+});
 
 function formatTime(ms) {
   return new Date(ms).toLocaleString();
@@ -27,10 +42,24 @@ function formatDuration(ms) {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
+function formatOffset(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
 function pagePath(url) {
   try {
     const u = new URL(url);
     return u.pathname + u.search;
+  } catch {
+    return url || '';
+  }
+}
+
+function hostPath(url) {
+  try {
+    const u = new URL(url);
+    return u.host + u.pathname;
   } catch {
     return url || '';
   }
@@ -86,6 +115,7 @@ async function loadProjects() {
 
 projectSelectEl.addEventListener('change', () => {
   currentProject = projectSelectEl.value;
+  clearPlayer();
   loadSessions();
 });
 
@@ -167,7 +197,7 @@ function renderSessionList() {
     li.innerHTML = `
       <div class="info">
         <span class="sid">${session.session_id.slice(0, 8)}…</span>
-        <span class="meta">${formatTime(session.last_seen)} · ${formatDuration(session.last_seen - session.first_seen)}</span>
+        <span class="meta">${formatTime(session.first_seen)} · ${formatDuration(session.last_seen - session.first_seen)}</span>
         <span class="page"></span>
       </div>
       <button class="del" title="Delete this recording">Delete</button>
@@ -235,6 +265,11 @@ function renderSessionList() {
       appendSession(session, false);
     }
   }
+
+  if (!loadedSessionId) {
+    const first = sessionListEl.querySelector('li:not(.visitor-header)');
+    if (first) first.click();
+  }
 }
 
 // Two clicks to delete, inline rather than confirm(): the page never blocks
@@ -270,10 +305,6 @@ async function deleteSession(sessionId, button) {
 let timelineRows = [];
 let syncStart = 0; // absolute timestamp of the session's first event
 
-function seekTo(timestamp) {
-  if (player) player.goto(Math.max(0, timestamp - syncStart));
-}
-
 function syncList(rows, currentMs) {
   let currentIdx = -1;
   for (let i = 0; i < rows.length; i++) {
@@ -291,27 +322,25 @@ function syncList(rows, currentMs) {
   }
 }
 
-// rrweb IncrementalSource values for real user interaction: MouseMove(1),
-// MouseInteraction(2), Scroll(3), Input(5), TouchMove(6).
-const INTERACTIVE_SOURCES = new Set([1, 2, 3, 5, 6]);
+const pcToggleEl = document.getElementById('pc-toggle');
+const pcCurEl = document.getElementById('pc-cur');
+const pcDurEl = document.getElementById('pc-dur');
+const pcBarEl = document.getElementById('pc-bar');
+const pcGapsEl = document.getElementById('pc-gaps');
+const pcHistEl = document.getElementById('pc-hist');
+const pcFillEl = document.getElementById('pc-fill');
+const pcDotEl = document.getElementById('pc-dot');
+const pcSpeedsEl = document.getElementById('pc-speeds');
+const pcSkipEl = document.querySelector('#pc-skip input');
+const pcFsEl = document.getElementById('pc-fs');
 
-// pointer-events: none keeps the canvas click-through, so seeking on the
-// progress bar underneath works untouched.
-function attachActivityBar(events) {
-  if (!player) return;
-  const progressEl = playerHostEl.querySelector('.rr-progress');
-  if (!progressEl) return;
-  const meta = player.getMetaData();
-  if (!meta.totalTime) return;
-
+function drawHistogram(events, duration) {
   const BUCKETS = 120;
   const counts = new Array(BUCKETS).fill(0);
+  const start = events[0].timestamp;
   for (const e of events) {
-    if (e.type === 3 && INTERACTIVE_SOURCES.has(e.data && e.data.source)) {
-      const i = Math.min(
-        BUCKETS - 1,
-        Math.floor(((e.timestamp - meta.startTime) / meta.totalTime) * BUCKETS)
-      );
+    if (e.type === 3 && ACTIVE_SOURCES.has(e.data && e.data.source)) {
+      const i = Math.min(BUCKETS - 1, Math.floor(((e.timestamp - start) / duration) * BUCKETS));
       counts[i] += 1;
     }
   }
@@ -321,52 +350,94 @@ function attachActivityBar(events) {
   );
   const max = Math.max(...smooth, 1);
 
-  const canvas = document.createElement('canvas');
-  canvas.className = 'activity-bar';
-  const width = Math.max(progressEl.clientWidth, 200);
-  const height = 16;
-  canvas.width = width * devicePixelRatio;
-  canvas.height = height * devicePixelRatio;
-  const ctx = canvas.getContext('2d');
+  const width = Math.max(pcBarEl.clientWidth, 200);
+  const height = 14;
+  pcHistEl.width = width * devicePixelRatio;
+  pcHistEl.height = height * devicePixelRatio;
+  const ctx = pcHistEl.getContext('2d');
   ctx.scale(devicePixelRatio, devicePixelRatio);
-  ctx.fillStyle = 'rgba(79, 70, 229, 0.45)';
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = 'rgba(79, 70, 229, 0.4)';
   const bw = width / BUCKETS;
   for (let i = 0; i < BUCKETS; i++) {
     if (!smooth[i]) continue;
     const h = Math.max(2, (smooth[i] / max) * height);
     ctx.fillRect(i * bw, height - h, Math.max(1, bw - 0.5), h);
   }
-  progressEl.style.position = 'relative';
-  progressEl.appendChild(canvas);
 }
 
-function attachTimeSync() {
+function renderScrubberChrome(p) {
+  pcDurEl.textContent = formatOffset(p.duration);
+  pcGapsEl.innerHTML = '';
+  for (const seg of p.segments) {
+    if (seg.isActive || seg.end - seg.start < 2000) continue;
+    const band = document.createElement('div');
+    band.style.left = `${(seg.start / p.duration) * 100}%`;
+    band.style.width = `${((seg.end - seg.start) / p.duration) * 100}%`;
+    pcGapsEl.appendChild(band);
+  }
+  drawHistogram(p.events, p.duration);
+}
+
+function updateScrubber(ms) {
   if (!player) return;
-  syncStart = player.getMetaData().startTime;
-  syncList(timelineRows, 0);
-  player.addEventListener('ui-update-current-time', ({ payload }) => {
-    syncList(timelineRows, payload);
-  });
+  const pct = Math.min(100, (ms / player.duration) * 100);
+  pcFillEl.style.width = `${pct}%`;
+  pcDotEl.style.left = `${pct}%`;
+  pcCurEl.textContent = formatOffset(ms);
 }
 
-function renderPanel(listEl, countId, items, emptyText, buildRow) {
-  document.getElementById(countId).textContent = items.length ? `(${items.length})` : '';
-  listEl.innerHTML = '';
-  if (items.length === 0) {
-    listEl.innerHTML = `<li class="empty">${emptyText}</li>`;
-    return [];
-  }
-  const rows = [];
-  for (const item of items) {
-    const li = buildRow(item);
-    li.addEventListener('click', () => seekTo(item.t));
-    rows.push({ el: li, t: item.t });
-    listEl.appendChild(li);
-  }
-  return rows;
+function updatePlayState(state) {
+  pcToggleEl.textContent = state === 'playing' ? '⏸' : '▶';
+  if (state === 'ended') skipNoteEl.hidden = true;
 }
 
-function renderTimeline(events, navigations) {
+let skipNoteTimer;
+function showSkipNote(skippedMs) {
+  skipNoteEl.textContent = `skipped ${formatDuration(skippedMs)} idle`;
+  skipNoteEl.hidden = false;
+  clearTimeout(skipNoteTimer);
+  skipNoteTimer = setTimeout(() => {
+    skipNoteEl.hidden = true;
+  }, 900);
+}
+
+function showAssetErrors(count) {
+  assetErrorsEl.textContent = `${count} asset${count > 1 ? 's' : ''} failed to load`;
+  assetErrorsEl.hidden = false;
+}
+
+function barSeek(e) {
+  if (!player) return;
+  const rect = pcBarEl.getBoundingClientRect();
+  const pct = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  player.seekTo(pct * player.duration);
+}
+
+pcBarEl.addEventListener('pointerdown', (e) => {
+  pcBarEl.setPointerCapture(e.pointerId);
+  barSeek(e);
+});
+pcBarEl.addEventListener('pointermove', (e) => {
+  if (pcBarEl.hasPointerCapture(e.pointerId) && e.buttons) barSeek(e);
+});
+
+pcToggleEl.addEventListener('click', () => player && player.toggle());
+pcSpeedsEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-speed]');
+  if (!btn || !player) return;
+  player.setSpeed(Number(btn.dataset.speed));
+  for (const b of pcSpeedsEl.querySelectorAll('button')) b.classList.toggle('active', b === btn);
+});
+pcSkipEl.addEventListener('change', () => player && player.setSkipInactive(pcSkipEl.checked));
+pcFsEl.addEventListener('click', () => {
+  (document.fullscreenElement
+    ? document.exitFullscreen()
+    : playerHostEl.requestFullscreen()
+  ).catch(() => {});
+});
+
+function renderTimeline(events, navigations, session) {
   const marker = (e) => e.type === 5 && e.data && e.data.tag;
   const entries = [];
 
@@ -382,18 +453,46 @@ function renderTimeline(events, navigations) {
     }
   }
   for (const nav of navigations) {
-    entries.push({ t: nav.t, kind: 'page', css: 'kind-page', detail: nav.url });
+    entries.push({ t: nav.t, kind: 'page', css: 'kind-page', detail: pagePath(nav.url).split('?')[0], title: nav.url });
   }
   entries.sort((a, b) => a.t - b.t);
 
-  timelineRows = renderPanel(timelineListEl, 'timeline-count', entries, 'No triggers, idle gaps or navigations in this recording.', (entry) => {
+  const order = session && session.order;
+  if (events.length && order && (order.purchased_at || order.checkout_started_at)) {
+    const amount =
+      typeof order.total === 'number'
+        ? ` — purchased ${order.total.toFixed(2)}${order.currency ? ' ' + order.currency : ''}`
+        : '';
+    entries.push({
+      t: events[events.length - 1].timestamp,
+      kind: order.purchased_at ? 'purchased' : 'checkout',
+      css: 'kind-order',
+      detail: `continued to checkout${order.purchased_at ? amount : ''}`,
+    });
+  }
+
+  const start = events.length ? events[0].timestamp : entries.length ? entries[0].t : 0;
+  document.getElementById('timeline-count').textContent = entries.length ? `(${entries.length})` : '';
+  timelineListEl.innerHTML = '';
+  timelineRows = [];
+  if (entries.length === 0) {
+    timelineListEl.innerHTML = '<li class="empty">No triggers, idle gaps or navigations in this recording.</li>';
+    return;
+  }
+  for (const entry of entries) {
     const li = document.createElement('li');
     li.className = entry.css;
-    li.innerHTML = `<span class="ts">${new Date(entry.t).toLocaleTimeString()}</span><span class="kind"></span><span class="detail"></span>`;
+    li.innerHTML = `<span class="ts"></span><span class="kind"></span><span class="detail"></span>`;
+    const ts = li.querySelector('.ts');
+    ts.textContent = formatOffset(entry.t - start);
+    ts.title = new Date(entry.t).toLocaleTimeString();
     li.querySelector('.kind').textContent = entry.kind;
     li.querySelector('.detail').textContent = entry.detail;
-    return li;
-  });
+    if (entry.title) li.title = entry.title;
+    li.addEventListener('click', () => player && player.seekTo(entry.t - syncStart));
+    timelineRows.push({ el: li, t: entry.t });
+    timelineListEl.appendChild(li);
+  }
 }
 
 // Guards the async chunk loop: bumped whenever the user picks a session,
@@ -401,34 +500,29 @@ function renderTimeline(events, navigations) {
 let loadSeq = 0;
 let loadedSessionId = null;
 
-function resetPlayerPanes() {
-  player = null;
-  playerHostEl.innerHTML = '';
+function clearPlayer() {
+  loadSeq += 1;
+  loadedSessionId = null;
+  destroyPlayer();
   windowTabsEl.innerHTML = '';
   timelineListEl.innerHTML = '';
   timelineRows = [];
   loadProgressEl.textContent = '';
-}
-
-function clearPlayer() {
-  loadSeq += 1;
-  loadedSessionId = null;
-  resetPlayerPanes();
   sessionTitleEl.textContent = 'Select a session';
+  sessionTitleEl.title = '';
 }
 
 function showPlayerMessage(message) {
-  resetPlayerPanes();
-  const p = document.createElement('p');
-  p.className = 'empty';
-  p.textContent = message;
-  playerHostEl.appendChild(p);
+  destroyPlayer();
+  playerMsgEl.textContent = message;
+  playerMsgEl.hidden = false;
 }
 
 async function loadSession(sessionId) {
   const seq = ++loadSeq;
   loadedSessionId = sessionId;
   sessionTitleEl.textContent = `Session ${sessionId}`;
+  sessionTitleEl.title = '';
 
   let manifest;
   try {
@@ -440,7 +534,8 @@ async function loadSession(sessionId) {
   }
   if (seq !== loadSeq) return;
   if (manifest.url) {
-    sessionTitleEl.textContent = `Session ${sessionId.slice(0, 8)}… — ${manifest.url}`;
+    sessionTitleEl.textContent = `Session ${sessionId.slice(0, 8)}… — ${hostPath(manifest.url)}`;
+    sessionTitleEl.title = manifest.url;
   }
 
   // A multi-tab session is several independent rrweb streams (one full
@@ -480,83 +575,81 @@ async function loadSession(sessionId) {
   playWindow(sessionId, byWindow.get(defaultWindow), defaultWindow, seq);
 }
 
+function destroyPlayer() {
+  if (player) player.destroy();
+  player = null;
+  stageEl.innerHTML = '';
+  stageEl.appendChild(skipNoteEl);
+  stageEl.appendChild(playerMsgEl);
+  skipNoteEl.hidden = true;
+  playerMsgEl.hidden = true;
+  controlsEl.hidden = true;
+  assetErrorsEl.hidden = true;
+}
+
 async function playWindow(sessionId, chunks, windowKey, seq) {
   for (const btn of windowTabsEl.querySelectorAll('button')) {
     btn.classList.toggle('active', btn.dataset.window === windowKey);
   }
-  playerHostEl.innerHTML = '';
-  player = null;
-  const allEvents = [];
+  destroyPlayer();
 
-  // Start the player on the first chunk (it always begins with a full
-  // snapshot) and stream the rest in via addEvent() — playback starts
-  // without waiting for the whole session.
-  let lastError = null;
-  const navigations = [];
-  for (let i = 0; i < chunks.length; i++) {
-    let events;
-    try {
-      const chunk = await fetchJson(
-        `/api/sessions/${sessionId}/chunks/${chunks[i].name}${projectQuery()}`
-      );
-      events = chunk.events || [];
-      // Each chunk records the URL it was flushed from, so a change between
-      // chunks is a navigation the event stream alone would not show.
-      const previous = navigations.length ? navigations[navigations.length - 1].url : null;
-      if (chunk.url && chunk.url !== previous) {
-        navigations.push({ url: chunk.url, t: events.length ? events[0].timestamp : chunk.received_at });
-      }
-    } catch (err) {
-      lastError = err; // skip corrupt chunk, same policy as the server
-      continue;
-    }
-    if (seq !== loadSeq) return;
-    events.sort((a, b) => a.timestamp - b.timestamp);
-    allEvents.push(...events);
-
-    if (!player && allEvents.length >= 2) {
-      player = new rrwebPlayer({
-        target: playerHostEl,
-        props: {
-          events: allEvents.slice(),
-          autoPlay: true,
-          skipInactive: true,
-          showController: true,
-          width: playerHostEl.clientWidth,
-          height: Math.max(420, Math.round(playerHostEl.clientWidth * 0.56)),
-        },
-      });
-      window.__player = player; // debug handle
-    } else if (player) {
-      for (const event of events) player.addEvent(event);
-      // Autoplay can drain the tiny initial timeline before these events
-      // arrive: the state machine stays 'playing' but the internal timer has
-      // stopped, so appended events never play and the play button is inert.
-      // A goto() rebuilds the timer over the full timeline.
-      if (player.getReplayer().getCurrentTime() <= 0) player.goto(0, true);
-    }
-
-    loadProgressEl.textContent =
-      i + 1 < chunks.length ? `loading ${i + 1}/${chunks.length} chunks…` : '';
-  }
-
+  let loaded = 0;
+  loadProgressEl.textContent = `loading 0/${chunks.length} chunks…`;
+  const results = await Promise.all(
+    chunks.map((c) =>
+      fetchJson(`/api/sessions/${sessionId}/chunks/${c.name}${projectQuery()}`)
+        .then((chunk) => {
+          loadProgressEl.textContent = `loading ${++loaded}/${chunks.length} chunks…`;
+          return chunk;
+        })
+        .catch(() => null) // skip corrupt chunk, same policy as the server
+    )
+  );
   if (seq !== loadSeq) return;
-  if (!player) {
-    showPlayerMessage(
-      lastError
-        ? `Could not load this session. ${lastError.message}`
-        : 'Not enough events to replay yet.'
-    );
-  }
-  renderTimeline(allEvents, navigations);
-  attachTimeSync();
-  attachActivityBar(allEvents);
+  loadProgressEl.textContent = '';
 
-  // Final safety net for the drained-timer wedge (see above): if the whole
-  // session is loaded and the playhead never moved, restart from the top.
-  if (player && player.getReplayer().getCurrentTime() <= 0) {
-    player.goto(0, true);
+  const allEvents = [];
+  const navigations = [];
+  for (const chunk of results.filter(Boolean)) {
+    const events = chunk.events || [];
+    // Each chunk records the URL it was flushed from, so a change between
+    // chunks is a navigation the event stream alone would not show.
+    // Hash-only changes are scroll anchors, not navigations.
+    const previous = navigations.length ? navigations[navigations.length - 1].url : null;
+    if (chunk.url && (!previous || chunk.url.split('#')[0] !== previous.split('#')[0])) {
+      navigations.push({ url: chunk.url, t: events.length ? events[0].timestamp : chunk.received_at });
+    }
+    allEvents.push(...events);
   }
+  allEvents.sort((a, b) => a.timestamp - b.timestamp);
+
+  const session = allSessions.find((s) => s.session_id === sessionId);
+  if (allEvents.length < 2) {
+    showPlayerMessage(
+      results.includes(null) ? 'Could not load this session.' : 'Not enough events to replay yet.'
+    );
+    renderTimeline(allEvents, navigations, session);
+    return;
+  }
+
+  syncStart = allEvents[0].timestamp;
+  renderTimeline(allEvents, navigations, session);
+  player = new CapturePlayer({
+    events: allEvents,
+    mount: stageEl,
+    speed: Number(pcSpeedsEl.querySelector('.active').dataset.speed),
+    skipInactive: pcSkipEl.checked,
+    onTime: (ms) => {
+      updateScrubber(ms);
+      syncList(timelineRows, ms);
+    },
+    onState: updatePlayState,
+    onSkip: showSkipNote,
+    onAssetErrors: showAssetErrors,
+  });
+  controlsEl.hidden = false;
+  renderScrubberChrome(player);
+  updateScrubber(0);
 }
 
 const filterButtons = document.querySelectorAll('#session-filter button');

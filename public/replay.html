@@ -39,27 +39,49 @@
     #session-list li.visitor-header { display: block; cursor: default; padding: 10px 8px 2px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }
     #session-list li.visitor-header:hover { background: none; }
     #session-list li.grouped { margin-left: 8px; border-left: 2px solid #e3e5e8; border-radius: 0 6px 6px 0; }
-    main { display: flex; flex-direction: column; gap: 12px; min-width: 0; overflow-y: auto; }
-    .title-row { display: flex; align-items: baseline; gap: 8px; }
+    main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; grid-template-rows: auto minmax(0, 1fr); gap: 12px; min-width: 0; min-height: 0; }
+    .title-row { display: flex; align-items: baseline; gap: 8px; grid-column: 1 / -1; }
     #window-tabs { display: flex; gap: 4px; }
     #window-tabs button { font-size: 11px; padding: 2px 10px; border-radius: 999px; border: 1px solid #d0d3d8; background: #fff; cursor: pointer; color: #6b7280; }
     #window-tabs button.active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
     #session-title { font-size: 14px; font-weight: 600; }
     #load-progress { font-size: 12px; font-weight: 400; color: #6b7280; }
-    #player-host { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; padding: 8px; }
-    .activity-bar { position: absolute; left: 0; bottom: 100%; width: 100%; height: 16px; pointer-events: none; }
-    .devtools-panel { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; }
+    #player-host { position: relative; background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+    #player-host:fullscreen { border-radius: 0; }
+    #stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #fafafa; }
+    #stage iframe { border: none; background: #fff; }
+    #stage .replayer-wrapper { position: absolute; left: 50%; top: 50%; transform-origin: top left; }
+    #player-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+    #skip-note { position: absolute; top: 12px; right: 12px; background: rgba(28, 30, 33, 0.75); color: #fff; font-size: 12px; padding: 4px 10px; border-radius: 999px; z-index: 2; }
+    #asset-errors { font-size: 11px; color: #b45309; background: #fef3c7; border-radius: 999px; padding: 2px 8px; }
+    #controls { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid #e3e5e8; background: #fff; user-select: none; }
+    #controls button { border: none; background: none; cursor: pointer; font-size: 14px; color: #1c1e21; padding: 2px 6px; border-radius: 6px; }
+    #controls button:hover { background: #f0f2f5; }
+    .pc-time { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #6b7280; min-width: 42px; text-align: center; }
+    #pc-bar { position: relative; flex: 1; height: 28px; cursor: pointer; touch-action: none; }
+    .pc-track { position: absolute; left: 0; right: 0; top: 50%; height: 4px; margin-top: -2px; background: #e3e5e8; border-radius: 2px; }
+    #pc-gaps { position: absolute; inset: 0; pointer-events: none; }
+    #pc-gaps div { position: absolute; top: 50%; height: 4px; margin-top: -2px; background: repeating-linear-gradient(90deg, #d0d3d8 0 4px, #ebedf0 4px 8px); border-radius: 2px; }
+    #pc-hist { position: absolute; left: 0; bottom: 50%; margin-bottom: 3px; width: 100%; height: 14px; pointer-events: none; }
+    #pc-fill { position: absolute; left: 0; top: 50%; height: 4px; margin-top: -2px; width: 0; background: #4f46e5; border-radius: 2px; pointer-events: none; }
+    #pc-dot { position: absolute; top: 50%; left: 0; width: 12px; height: 12px; margin: -6px 0 0 -6px; background: #4f46e5; border-radius: 50%; pointer-events: none; }
+    #pc-speeds { display: flex; gap: 2px; }
+    #pc-speeds button { font-size: 12px; color: #6b7280; }
+    #pc-speeds button.active { background: #4f46e5; color: #fff; }
+    #pc-skip { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #6b7280; cursor: pointer; white-space: nowrap; }
+    .devtools-panel { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; display: flex; flex-direction: column; min-height: 0; }
     .devtools-tabs { display: flex; gap: 4px; padding: 8px 10px 0; border-bottom: 1px solid #e3e5e8; }
     .devtools-tabs button { border: none; background: none; padding: 6px 12px; font-size: 12px; font-weight: 600; color: #6b7280; cursor: pointer; border-bottom: 2px solid transparent; }
     .devtools-tabs button.active { color: #1c1e21; border-bottom-color: #4f46e5; }
     .devtools-tabs .count { font-weight: 400; color: #9ca3af; }
-    #timeline-list { list-style: none; margin: 0; padding: 6px 0; max-height: 220px; overflow-y: auto; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
-    #timeline-list li { display: flex; gap: 10px; padding: 4px 14px; border-bottom: 1px solid #f0f2f5; }
+    #timeline-list { list-style: none; margin: 0; padding: 6px 0; flex: 1; overflow-y: auto; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    #timeline-list li { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 4px 14px; border-bottom: 1px solid #f0f2f5; }
     #timeline-list .ts { color: #9ca3af; flex-shrink: 0; }
     #timeline-list .kind { flex-shrink: 0; width: 84px; font-weight: 600; color: #6b7280; }
     #timeline-list .detail { min-width: 0; overflow-wrap: anywhere; }
     #timeline-list .kind-trigger .kind, #timeline-list .kind-trigger .detail { color: #0f766e; }
     #timeline-list .kind-idle .kind, #timeline-list .kind-idle .detail { color: #d97706; }
+    #timeline-list .kind-order .kind, #timeline-list .kind-order .detail { color: #15803d; font-weight: 600; }
     #timeline-list li:not(.empty) { cursor: pointer; }
     #timeline-list li.future { opacity: 0.4; }
     #timeline-list li.current { background: #eef2ff; box-shadow: inset 2px 0 0 #4f46e5; }
@@ -88,8 +110,34 @@
         <div id="session-title">Select a session</div>
         <div id="window-tabs"></div>
         <span id="load-progress"></span>
+        <span id="asset-errors" title="Resources the recorded page references could not be fetched during replay" hidden></span>
       </div>
-      <div id="player-host"></div>
+      <div id="player-host">
+        <div id="stage">
+          <div id="skip-note" hidden></div>
+          <div id="player-msg" class="empty" hidden></div>
+        </div>
+        <div id="controls" hidden>
+          <button id="pc-toggle" title="Play / pause (space)">⏸</button>
+          <span id="pc-cur" class="pc-time">00:00</span>
+          <div id="pc-bar">
+            <div class="pc-track"></div>
+            <div id="pc-gaps"></div>
+            <canvas id="pc-hist"></canvas>
+            <div id="pc-fill"></div>
+            <div id="pc-dot"></div>
+          </div>
+          <span id="pc-dur" class="pc-time">00:00</span>
+          <div id="pc-speeds">
+            <button data-speed="1" class="active">1x</button>
+            <button data-speed="2">2x</button>
+            <button data-speed="4">4x</button>
+            <button data-speed="8">8x</button>
+          </div>
+          <label id="pc-skip" title="Jump over idle stretches"><input type="checkbox" checked />skip idle</label>
+          <button id="pc-fs" title="Fullscreen">⛶</button>
+        </div>
+      </div>
       <section class="devtools-panel">
         <div class="devtools-tabs">
           <button id="tab-timeline" class="active">Timeline <span class="count" id="timeline-count"></span></button>

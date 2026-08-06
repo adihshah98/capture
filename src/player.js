@@ -1,0 +1,310 @@
+import { Replayer, EventType, IncrementalSource } from 'rrweb';
+import 'rrweb/dist/style.css';
+
+export const ACTIVE_SOURCES = new Set([
+  IncrementalSource.MouseMove,
+  IncrementalSource.MouseInteraction,
+  IncrementalSource.Scroll,
+  IncrementalSource.ViewportResize,
+  IncrementalSource.Input,
+  IncrementalSource.TouchMove,
+  IncrementalSource.MediaInteraction,
+  IncrementalSource.Drag,
+]);
+
+const ACTIVITY_THRESHOLD_MS = 5000;
+const MIN_SKIP_MS = 2000;
+const END_EPSILON_MS = 50;
+
+// Order matters: the Shopify rule re-applies Dawn's scroll-trigger reveal
+// animation that rrweb's CSS handling drops (content stays at opacity 0
+// without it), then the blanket rule snaps every animation to its final
+// state — `animation: none` would instead freeze reveals at frame 0.
+const REPLAY_STYLE_RULES = [
+  '@media (prefers-reduced-motion: no-preference) { .scroll-trigger:not(.scroll-trigger--offscreen).animate--slide-in { animation: var(--animation-slide-in) } }',
+  // 0s duration, not PostHog's 1ms: rrweb pauses animations while the player
+  // is paused, and a paused 1ms animation sits at frame 0 (hiding opacity-0
+  // reveals); a 0s one is finished the instant it applies, paused or not.
+  '*, *::before, *::after { animation-duration: 0s !important; animation-delay: 0s !important; animation-iteration-count: 1 !important; animation-fill-mode: forwards !important; transition-duration: 0s !important; transition-delay: 0s !important; }',
+];
+
+function isActiveEvent(e) {
+  return (
+    e.type === EventType.FullSnapshot ||
+    e.type === EventType.Meta ||
+    (e.type === EventType.IncrementalSnapshot && ACTIVE_SOURCES.has(e.data && e.data.source))
+  );
+}
+
+function buildSegments(events) {
+  const t0 = events[0].timestamp;
+  const duration = Math.max(events[events.length - 1].timestamp - t0, 1);
+  const active = [];
+  let seg = null;
+  for (const e of events) {
+    if (!isActiveEvent(e)) continue;
+    const t = e.timestamp - t0;
+    if (seg && t - seg.end <= ACTIVITY_THRESHOLD_MS) {
+      seg.end = t;
+    } else {
+      if (seg) active.push(seg);
+      seg = { start: t, end: t };
+    }
+  }
+  if (seg) active.push(seg);
+
+  const segments = [];
+  let cursor = 0;
+  for (const a of active) {
+    if (a.start > cursor) segments.push({ start: cursor, end: a.start, isActive: false });
+    segments.push({ start: a.start, end: a.end, isActive: true });
+    cursor = a.end;
+  }
+  if (cursor < duration) segments.push({ start: cursor, end: duration, isActive: false });
+  return { segments, duration };
+}
+
+export class CapturePlayer {
+  constructor({ events, mount, speed = 1, skipInactive = true, onTime, onState, onSkip, onAssetErrors }) {
+    this.events = events;
+    this.mount = mount;
+    this.onTime = onTime || (() => {});
+    this.onState = onState || (() => {});
+    this.onSkip = onSkip || (() => {});
+    this.onAssetErrors = onAssetErrors || (() => {});
+
+    const { segments, duration } = buildSegments(events);
+    this.segments = segments;
+    this.duration = duration;
+    this.startTs = events[0].timestamp;
+    this.snapshotOffsets = events
+      .filter((e) => e.type === EventType.FullSnapshot)
+      .map((e) => e.timestamp - this.startTs);
+
+    this.playing = false;
+    this.ended = false;
+    this.skipInactive = skipInactive;
+    this.failedAssets = new Set();
+    this.scrollTimers = [];
+    this.recDims = null;
+
+    this.replayer = new Replayer(events, {
+      root: mount,
+      speed,
+      skipInactive: false,
+      useVirtualDom: false,
+      triggerFocus: false,
+      insertStyleRules: REPLAY_STYLE_RULES,
+      mouseTail: { strokeStyle: 'rgba(79, 70, 229, 0.5)', lineWidth: 2, duration: 700 },
+    });
+
+    this.muteRejections = (e) => e.preventDefault();
+    this.trackAssetError = (e) => {
+      const el = e.target;
+      const url = el && (el.src || el.href);
+      if (url && !this.failedAssets.has(url)) {
+        this.failedAssets.add(url);
+        this.onAssetErrors(this.failedAssets.size);
+      }
+    };
+
+    this.replayer.on('resize', (dims) => {
+      this.recDims = dims;
+      this.rescale();
+    });
+    // Rebuilds clear the frame's listeners, so re-attach each time
+    // (same function refs = deduped while still attached).
+    this.replayer.on('fullsnapshot-rebuilded', () => this.hookFrame());
+    this.replayer.on('finish', () => {
+      if (this.playing) this.finish();
+    });
+    this.hookFrame();
+
+    this.resizeObserver = new ResizeObserver(() => this.rescale());
+    this.resizeObserver.observe(mount);
+
+    this.tick = this.tick.bind(this);
+    this.play(0);
+  }
+
+  hookFrame() {
+    const win = this.replayer.iframe.contentWindow;
+    if (!win) return;
+    win.addEventListener('unhandledrejection', this.muteRejections);
+    win.addEventListener('error', this.trackAssetError, true);
+  }
+
+  segmentAt(ms) {
+    return this.segments.find((s) => ms >= s.start && ms < s.end) || null;
+  }
+
+  // If the events before `ms` hold no full snapshot (lost at capture time),
+  // there is nothing renderable there — clamp forward to the first snapshot.
+  clampRenderable(ms) {
+    const first = this.snapshotOffsets[0];
+    return first !== undefined && ms < first ? first : ms;
+  }
+
+  tick() {
+    if (!this.playing) return;
+    let t = this.replayer.getCurrentTime();
+    if (t >= this.duration - END_EPSILON_MS) {
+      this.finish();
+      return;
+    }
+    const seg = this.segmentAt(t);
+    if (this.skipInactive && seg && !seg.isActive && seg.end - seg.start >= MIN_SKIP_MS) {
+      if (seg.end >= this.duration - END_EPSILON_MS) {
+        this.finish();
+        return;
+      }
+      this.onSkip(seg.end - t);
+      this.replayer.play(seg.end);
+      this.scheduleScrollFix();
+      t = seg.end;
+    }
+    this.onTime(t);
+    this.raf = requestAnimationFrame(this.tick);
+  }
+
+  play(fromMs) {
+    const from =
+      fromMs != null ? fromMs : this.ended ? 0 : this.replayer.getCurrentTime();
+    this.ended = false;
+    this.playing = true;
+    this.replayer.play(this.clampRenderable(Math.max(0, Math.min(from, this.duration))));
+    this.scheduleScrollFix();
+    this.onState('playing');
+    cancelAnimationFrame(this.raf);
+    this.raf = requestAnimationFrame(this.tick);
+  }
+
+  pause(atMs) {
+    cancelAnimationFrame(this.raf);
+    this.playing = false;
+    if (atMs != null) {
+      const at = this.clampRenderable(Math.max(0, Math.min(atMs, this.duration)));
+      this.replayer.pause(at);
+      this.scheduleScrollFix();
+      this.onTime(at);
+    } else {
+      this.replayer.pause();
+    }
+    this.onState(this.ended ? 'ended' : 'paused');
+  }
+
+  finish() {
+    cancelAnimationFrame(this.raf);
+    this.playing = false;
+    this.ended = true;
+    this.replayer.pause(this.duration);
+    this.scheduleScrollFix();
+    this.onTime(this.duration);
+    this.onState('ended');
+  }
+
+  toggle() {
+    if (this.playing) this.pause();
+    else this.play(this.ended ? 0 : undefined);
+  }
+
+  seekTo(ms, opts = {}) {
+    const target = this.clampRenderable(Math.max(0, Math.min(ms, this.duration)));
+    const resume = opts.play != null ? opts.play : this.playing;
+    if (target >= this.duration - END_EPSILON_MS && !resume) {
+      this.finish();
+      return;
+    }
+    this.ended = false;
+    if (resume) this.play(target);
+    else this.pause(target);
+  }
+
+  // Rewinding into a skipped gap would just bounce forward to its end again,
+  // so land before the gap, applying only the not-yet-rewound remainder.
+  seekBy(deltaMs) {
+    const current = this.ended ? this.duration : this.replayer.getCurrentTime();
+    let target = current + deltaMs;
+    if (deltaMs < 0 && this.skipInactive) {
+      const seg = this.segmentAt(target);
+      if (seg && !seg.isActive && seg.end - seg.start >= MIN_SKIP_MS) {
+        const remaining = Math.max(-deltaMs - Math.max(current - seg.end, 0), 0);
+        target = seg.start - remaining;
+      }
+    }
+    this.seekTo(target);
+  }
+
+  setSpeed(speed) {
+    if (this.playing) {
+      const t = this.replayer.getCurrentTime();
+      this.replayer.pause();
+      this.replayer.setConfig({ speed });
+      this.replayer.play(t);
+    } else {
+      this.replayer.setConfig({ speed });
+    }
+  }
+
+  setSkipInactive(on) {
+    this.skipInactive = on;
+  }
+
+  // Seeking to a point before the visitor's first scroll leaves the previous
+  // scroll position in place: rrweb skips the initialOffset restore when the
+  // target's snapshot is the first full snapshot it already rendered. Replay
+  // the recorded document scroll ourselves — idempotent when rrweb got it right.
+  applyRecordedScroll() {
+    const doc = this.replayer.iframe.contentDocument;
+    const win = this.replayer.iframe.contentWindow;
+    if (!doc || !win) return;
+    const docId = this.replayer.getMirror().getId(doc);
+    const t = this.startTs + this.replayer.getCurrentTime();
+    let x = 0;
+    let y = 0;
+    for (const e of this.events) {
+      if (e.timestamp > t) break;
+      if (e.type === EventType.FullSnapshot && e.data.initialOffset) {
+        x = e.data.initialOffset.left;
+        y = e.data.initialOffset.top;
+      } else if (
+        e.type === EventType.IncrementalSnapshot &&
+        e.data.source === IncrementalSource.Scroll &&
+        e.data.id === docId
+      ) {
+        x = e.data.x;
+        y = e.data.y;
+      }
+    }
+    win.scrollTo({ left: x, top: y, behavior: 'auto' });
+  }
+
+  scheduleScrollFix() {
+    this.scrollTimers.forEach(clearTimeout);
+    this.scrollTimers = [90, 400].map((ms) => setTimeout(() => this.applyRecordedScroll(), ms));
+  }
+
+  rescale() {
+    if (!this.recDims) return;
+    const w = this.mount.clientWidth;
+    const h = this.mount.clientHeight;
+    let scale = Math.min(w / this.recDims.width, h / this.recDims.height);
+    if (!isFinite(scale) || scale <= 0) return;
+    // An identity transform triggers a Chrome compositing bug where the
+    // iframe layer paints outside its clipping bounds.
+    if (Math.abs(scale - 1) < 0.001) scale = 0.999;
+    this.replayer.wrapper.style.transform = `scale(${scale}) translate(-50%, -50%)`;
+  }
+
+  destroy() {
+    cancelAnimationFrame(this.raf);
+    this.scrollTimers.forEach(clearTimeout);
+    this.resizeObserver.disconnect();
+    this.playing = false;
+    try {
+      this.replayer.destroy();
+    } catch {
+      /* already torn down */
+    }
+  }
+}
