@@ -1,6 +1,6 @@
 import { formatOffset, pagePath } from './format.js';
-import { paramChips } from './params.js';
 import { player } from './session-player.js';
+import { clearUrlTable, renderUrlTable } from './url-table.js';
 
 const timelineListEl = document.getElementById('timeline-list');
 const timelineCountEl = document.getElementById('timeline-count');
@@ -15,6 +15,7 @@ export function setSyncStart(t) {
 export function clearTimeline() {
   timelineListEl.innerHTML = '';
   timelineRows = [];
+  clearUrlTable();
 }
 
 export function syncTimeline(currentMs) {
@@ -61,14 +62,7 @@ export function renderTimeline(events, navigations, session) {
     }
   }
   for (const nav of navigations) {
-    entries.push({
-      t: nav.t,
-      kind: 'page',
-      css: 'kind-page',
-      detail: pagePath(nav.url).split('?')[0],
-      title: nav.url,
-      paramsUrl: nav.url,
-    });
+    entries.push({ t: nav.t, kind: 'page', css: 'kind-page', detail: pagePath(nav.url).split('?')[0], title: nav.url });
   }
   entries.sort((a, b) => a.t - b.t);
 
@@ -89,6 +83,7 @@ export function renderTimeline(events, navigations, session) {
   const start = events.length ? events[0].timestamp : entries.length ? entries[0].t : 0;
   timelineCountEl.textContent = entries.length ? `(${entries.length})` : '';
   clearTimeline();
+  renderUrlTable(navigations);
   if (entries.length === 0) {
     timelineListEl.innerHTML = '<li class="empty">No clicks, triggers, idle gaps or navigations in this recording.</li>';
     return;
@@ -102,10 +97,6 @@ export function renderTimeline(events, navigations, session) {
     ts.title = new Date(entry.t).toLocaleTimeString();
     li.querySelector('.kind').textContent = entry.kind;
     li.querySelector('.detail').textContent = entry.detail;
-    if (entry.paramsUrl) {
-      const chips = paramChips(entry.paramsUrl, 4);
-      if (chips) li.querySelector('.detail').appendChild(chips);
-    }
     if (entry.title) li.title = entry.title;
     li.addEventListener('click', () => player && player.seekTo(entry.t - syncStart));
     timelineRows.push({ el: li, t: entry.t });

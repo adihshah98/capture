@@ -1,6 +1,5 @@
 import { currentProject, fetchJson, projectQuery, setProject } from './api.js';
 import { formatBytes, formatDuration, formatTime, pagePath } from './format.js';
-import { paramChips } from './params.js';
 import { clearPlayer, loadSession, loadedSessionId } from './session-player.js';
 
 const projectSelectEl = document.getElementById('project-select');
@@ -98,10 +97,8 @@ function renderSessionList() {
       <button class="del" title="Delete this recording">Delete</button>
     `;
     const page = li.querySelector('.page');
-    page.textContent = pagePath(session.url).split('?')[0];
+    page.textContent = pagePath(session.url);
     page.title = session.url || '';
-    const chips = paramChips(session.url, 3);
-    if (chips) li.querySelector('.info').appendChild(chips);
     li.title = `${session.chunk_count} chunks · ${formatBytes(session.bytes)}`;
     const order = session.order;
     if (order && (order.purchased_at || order.checkout_started_at)) {
