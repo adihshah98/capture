@@ -75,9 +75,23 @@ export async function loadSession(sessionId) {
     return;
   }
   const bytesOf = (chunks) => chunks.reduce((n, c) => n + c.bytes, 0);
-  const defaultWindow = [...byWindow.entries()].sort(
-    (a, b) => bytesOf(b[1]) - bytesOf(a[1])
-  )[0][0];
+  const session = allSessions.find((s) => s.session_id === sessionId);
+  const checkoutAt = session && session.order && session.order.checkout_started_at;
+  let checkoutWindow = null;
+  if (checkoutAt) {
+    let latest = -Infinity;
+    for (const [key, chunks] of byWindow) {
+      for (const chunk of chunks) {
+        if (chunk.timestamp <= checkoutAt + 5000 && chunk.timestamp > latest) {
+          latest = chunk.timestamp;
+          checkoutWindow = key;
+        }
+      }
+    }
+  }
+  const defaultWindow =
+    checkoutWindow ??
+    [...byWindow.entries()].sort((a, b) => bytesOf(b[1]) - bytesOf(a[1]))[0][0];
 
   windowTabsEl.innerHTML = '';
   if (byWindow.size > 1) {
@@ -86,7 +100,9 @@ export async function loadSession(sessionId) {
       n += 1;
       const btn = document.createElement('button');
       btn.textContent = `Tab ${n}`;
-      btn.title = `${chunks.length} chunks · ${formatBytes(bytesOf(chunks))}`;
+      btn.title =
+        `${chunks.length} chunks · ${formatBytes(bytesOf(chunks))}` +
+        (key === checkoutWindow ? ' · reached checkout from this tab' : '');
       btn.dataset.window = key;
       btn.addEventListener('click', () => {
         playWindow(sessionId, byWindow.get(key), key, ++loadSeq);
