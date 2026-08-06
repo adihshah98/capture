@@ -587,7 +587,8 @@ def auth_callback(request: Request, code: Optional[str] = Query(None), state: Op
     if not WORKOS_ENABLED:
         raise ApiError(503, "login not configured")
     if not code or not state or state != request.cookies.get(STATE_COOKIE):
-        raise ApiError(401, "bad login attempt — start again at /login")
+        # WorkOS invitation acceptance redirects here with no state; restart the flow.
+        return RedirectResponse("/login", status_code=302)
     try:
         email, user_id = workos_authenticate(code)
     except Exception as exc:

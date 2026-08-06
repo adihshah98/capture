@@ -126,9 +126,16 @@ class TestWorkOSScoping(ServerCase):
         self.assertIn("/user_management/authorize", location)
         self.assertIn("client_test_fake", location)
 
-    def test_callback_without_matching_state_is_rejected(self):
-        status, _ = request(f"{self.base}/auth/callback?code=x&state=y")
-        self.assertEqual(status, 401)
+    def test_callback_without_matching_state_restarts_login(self):
+        status, headers, _ = request_no_redirect(f"{self.base}/auth/callback?code=x&state=y")
+        self.assertEqual(status, 302)
+        self.assertEqual(headers.get("location"), "/login")
+
+    def test_callback_with_code_but_no_state_restarts_login(self):
+        # The invitation-acceptance flow lands here with only a code.
+        status, headers, _ = request_no_redirect(f"{self.base}/auth/callback?code=x")
+        self.assertEqual(status, 302)
+        self.assertEqual(headers.get("location"), "/login")
 
     def test_basic_credentials_do_not_work_in_workos_mode(self):
         creds = base64.b64encode(b"any:whatever").decode()
