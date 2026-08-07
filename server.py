@@ -886,6 +886,14 @@ def list_sessions(
     next_cursor = f"{sessions[-1]['last_seen']}:{sessions[-1]['session_id']}" if more else None
     return {"sessions": sessions, "total": total, "cursor": next_cursor}
 
+@app.get("/api/sessions/{session_id}")
+def get_session(request: Request, session_id: str, project: Optional[str] = Query(None)):
+    require_read_access(request, project)
+    info = session_info(resolve_session(session_id, project))
+    if info is None:
+        raise ApiError(404, "not found")
+    return info
+
 @app.delete("/api/sessions/{session_id}")
 def delete_session(request: Request, session_id: str, project: Optional[str] = Query(None)):
 

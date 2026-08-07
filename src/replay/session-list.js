@@ -27,6 +27,16 @@ function sessionsUrl(cursor) {
   return `/api/sessions?${params}`;
 }
 
+export async function findSession(sessionId) {
+  const loaded = allSessions.find((s) => s.session_id === sessionId);
+  if (loaded) return loaded;
+  try {
+    return await fetchJson(`/api/sessions/${sessionId}${projectQuery()}`);
+  } catch {
+    return undefined;
+  }
+}
+
 function showListMessage(message) {
   sessionListEl.innerHTML = '';
   const li = document.createElement('li');
