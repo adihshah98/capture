@@ -11,11 +11,68 @@
     header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; background: #fff; border-bottom: 1px solid #e3e5e8; }
     header h1 { font-size: 16px; margin: 0; }
     header button { margin-left: auto; border: 1px solid #d0d3d8; background: #fff; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+    #mode-switch { display: flex; gap: 2px; margin-left: 8px; border: 1px solid #d0d3d8; border-radius: 6px; padding: 2px; background: #f5f6f8; }
+    #mode-switch button { margin-left: 0; border: none; background: transparent; border-radius: 4px; padding: 5px 12px; font-size: 13px; font-weight: 600; color: #6b7280; cursor: pointer; }
+    #mode-switch button.active { background: #fff; color: #1c1e21; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
     #account { font-size: 12px; color: #6b7280; }
     #account a { color: #4f46e5; text-decoration: none; margin-left: 8px; }
     #account a:hover { text-decoration: underline; }
     #project-select { border: 1px solid #d0d3d8; background: #fff; border-radius: 6px; padding: 6px 8px; font-size: 13px; }
     .layout { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px 20px; height: calc(100vh - 53px); }
+    body.mode-insights .layout { display: none; }
+    #insights { display: none; padding: 16px 20px; height: calc(100vh - 53px); }
+    body.mode-insights #insights { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+    .insights-tabs { display: flex; gap: 4px; }
+    .insights-tabs button { border: 1px solid #d0d3d8; background: #fff; border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 600; color: #6b7280; cursor: pointer; }
+    .insights-tabs button.active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+    .insights-tabs button:disabled { opacity: 0.45; cursor: default; }
+    .insights-panel { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+    .insights-toolbar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #e3e5e8; flex-wrap: wrap; }
+    .insights-toolbar h2 { font-size: 14px; margin: 0; text-transform: none; letter-spacing: 0; color: #1c1e21; padding: 0; }
+    .insights-toolbar .meta { font-size: 12px; color: #6b7280; }
+    .insights-toolbar .spacer { flex: 1; }
+    #cohort-run { border: 1px solid #4f46e5; background: #4f46e5; color: #fff; border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+    #cohort-run:hover:not(:disabled) { background: #4338ca; }
+    #cohort-run:disabled { background: #f0f2f5; border-color: #d0d3d8; color: #9ca3af; cursor: default; }
+    #cohort-table-wrap { flex: 1; overflow: auto; }
+    #cohort-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    #cohort-table th, #cohort-table td { text-align: left; padding: 10px 14px; border-bottom: 1px solid #f0f2f5; }
+    #cohort-table th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; background: #fafafa; position: sticky; top: 0; }
+    #cohort-table tr.openable { cursor: pointer; }
+    #cohort-table tr.openable:hover { background: #f8fafc; }
+    #cohort-table .sid { font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+    #cohort-table .badge, .insight-card .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
+    #cohort-table .badge.purchased, .insight-card .badge.purchased { background: #dcfce7; color: #15803d; }
+    #cohort-table .badge.all, .insight-card .badge.all { background: #eef2ff; color: #4338ca; }
+    #cohort-table .badge.done, .insight-card .badge.done { background: #dcfce7; color: #15803d; }
+    #cohort-table .badge.running, .insight-card .badge.running { background: #fef3c7; color: #92400e; }
+    #cohort-table .badge.queued, .insight-card .badge.queued { background: #f3f4f6; color: #6b7280; }
+    #cohort-table .badge.error, .insight-card .badge.error { background: #fee2e2; color: #b91c1c; }
+    #cohort-empty { padding: 24px 16px; color: #9ca3af; font-size: 13px; }
+    .insights-placeholder { padding: 24px 16px; color: #9ca3af; font-size: 13px; }
+    .insights-panel[hidden] { display: none !important; }
+    #insights-compare { overflow: hidden; }
+    #compare-body { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px 16px; }
+    .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+    @media (max-width: 900px) { .compare-grid { grid-template-columns: 1fr; } }
+    .compare-col h3 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; }
+    .compare-col h3 .n { color: #9ca3af; font-weight: 500; text-transform: none; letter-spacing: 0; }
+    .insight-card { border: 1px solid #e3e5e8; border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; background: #fff; }
+    .insight-card.pending { opacity: 0.7; }
+    .insight-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .insight-card-head .sid { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 600; }
+    .insight-card-head .open { margin-left: auto; border: 1px solid #d0d3d8; background: #fff; border-radius: 5px; padding: 2px 8px; font-size: 11px; color: #4f46e5; cursor: pointer; }
+    .insight-card-head .open:hover { background: #f0f2f5; }
+    .insight-standout { font-size: 13px; line-height: 1.45; color: #1c1e21; margin: 0 0 8px; }
+    .insight-card details { font-size: 13px; line-height: 1.5; }
+    .insight-card summary { cursor: pointer; color: #4f46e5; font-size: 12px; font-weight: 600; user-select: none; }
+    .insight-card .md { margin-top: 8px; }
+    .insight-card .md h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; margin: 12px 0 4px; }
+    .insight-card .md p { margin: 0 0 8px; }
+    .insight-card .md ul { margin: 0 0 8px; padding-left: 18px; }
+    .insight-card .md li { margin-bottom: 3px; }
+    .insight-card .status-note { font-size: 12px; color: #9ca3af; margin: 0; }
+    .insight-card .status-note.error { color: #b91c1c; }
     aside { background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; overflow-y: auto; }
     aside h2, section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; padding: 12px 14px 4px; margin: 0; }
     #session-list { list-style: none; margin: 0; padding: 6px; }
@@ -120,6 +177,10 @@
 <body>
   <header>
     <h1>📼 Capture — Session Replay</h1>
+    <div id="mode-switch">
+      <button type="button" data-mode="replay" class="active">Replay</button>
+      <button type="button" data-mode="insights">Insights</button>
+    </div>
     <select id="project-select" hidden></select>
     <button id="refresh">Refresh</button>
     <span id="account" hidden><span id="account-email"></span><a href="/logout">Sign out</a></span>
@@ -188,6 +249,35 @@
         </div>
       </section>
     </main>
+  </div>
+  <div id="insights">
+    <div class="insights-tabs">
+      <button type="button" data-insights-tab="compare" class="active">Compare</button>
+      <button type="button" data-insights-tab="queue">Queue</button>
+      <button type="button" data-insights-tab="review" disabled title="Available after structured themes">Review</button>
+    </div>
+    <section class="insights-panel" id="insights-compare">
+      <div class="insights-toolbar">
+        <h2 id="compare-label">Purchased vs all</h2>
+        <span class="meta" id="compare-progress">No cohort yet</span>
+        <span class="spacer"></span>
+        <button type="button" id="cohort-run-compare" disabled>Run sample cohort (5+5)</button>
+      </div>
+      <div id="compare-body">
+        <div class="insights-placeholder">Run a sample cohort to compare write-ups for purchased vs other sessions side by side.</div>
+      </div>
+    </section>
+    <section class="insights-panel" id="insights-queue" hidden>
+      <div class="insights-toolbar">
+        <h2 id="cohort-label">Sample cohort</h2>
+        <span class="meta" id="cohort-progress">No cohort yet</span>
+        <span class="spacer"></span>
+        <button type="button" id="cohort-run" disabled>Run sample cohort (5+5)</button>
+      </div>
+      <div id="cohort-table-wrap">
+        <div id="cohort-empty">Run a sample cohort to analyze 5 purchased and 5 other sessions. Open any row to watch it in Replay.</div>
+      </div>
+    </section>
   </div>
   <script src="/replay.bundle.js"></script>
 </body>

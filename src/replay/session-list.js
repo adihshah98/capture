@@ -3,6 +3,7 @@ import { parseHash, writeHash } from './deeplink.js';
 import { formatBytes, formatDuration, formatTime, pagePath } from './format.js';
 import { clearPlayer, loadSession, loadedSessionId, setPendingSeek } from './session-player.js';
 import { setAnalysisEnabled } from './analysis.js';
+import { setInsightsAnalysisEnabled } from './insights.js';
 
 const boot = parseHash();
 
@@ -56,6 +57,7 @@ async function loadProjects() {
   }
   const projects = body.projects || [];
   setAnalysisEnabled(body.analysis_enabled);
+  setInsightsAnalysisEnabled(body.analysis_enabled);
   if (body.email) {
     accountEmailEl.textContent = body.email;
     accountEl.hidden = false;

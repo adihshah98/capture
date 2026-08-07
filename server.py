@@ -944,19 +944,113 @@ def session_chunk(request: Request, session_id: str, chunk_name: str, project: O
 _analysis_tasks: dict = {}
 # One Chromium at a time — a t3.micro cannot survive concurrent extractions.
 _analysis_worker_lock = asyncio.Lock()
+_cohort_tasks: dict = {}
 
 def _analysis_key(session_dir: Path) -> str:
     return str(session_dir.resolve())
 
-async def _run_analysis_job(session_dir: Path, chunk_names: list) -> None:
+def _cohort_key(pool: Path) -> str:
+    return str(pool.resolve())
+
+async def _run_analysis_job(session_dir: Path, chunk_names: list, force: bool = True) -> None:
     analyze.write_job(session_dir, "running")
     try:
         async with _analysis_worker_lock:
-            await analyze.analyze_session(session_dir, chunk_names, force=True)
+            await analyze.analyze_session(session_dir, chunk_names, force=force)
     except Exception as exc:
         analyze.write_job(session_dir, "error", error=str(exc))
     finally:
         _analysis_tasks.pop(_analysis_key(session_dir), None)
+
+def _require_analysis_runtime() -> None:
+    if not analyze.ANALYSIS_ENABLED:
+        raise ApiError(503, "analysis is not configured on this server")
+    if not analyze.runtime_present():
+        raise ApiError(503, "analysis runtime is unavailable on this server")
+
+async def _start_session_analysis(session_dir: Path, force: bool = False) -> dict:
+    """Queue (or return) per-session analysis — shared by the single-session API and cohorts."""
+    chunks = chunk_files(session_dir)
+    if not chunks:
+        raise ApiError(400, "this session has no chunks to analyze")
+
+    if not force:
+        cached = analyze.read_analysis(session_dir)
+        if cached:
+            if "status" not in cached:
+                cached = {**cached, "status": "done"}
+            return cached
+
+    key = _analysis_key(session_dir)
+    existing = _analysis_tasks.get(key)
+    if existing and not existing.done():
+        return {"status": "running", "accepted": True}
+
+    job = analyze.read_job(session_dir)
+    if job and job.get("status") == "running" and (existing is None or existing.done()):
+        # Stale status from a crashed worker — allow a fresh start.
+        analyze.clear_job(session_dir)
+
+    if force:
+        analyze.clear_analysis(session_dir)
+
+    analyze.write_job(session_dir, "running")
+    task = asyncio.create_task(
+        _run_analysis_job(session_dir, [c.name for c in chunks], force=True)
+    )
+    _analysis_tasks[key] = task
+    return {"status": "running", "accepted": True}
+
+async def _await_session_analysis(session_dir: Path, force: bool = False) -> None:
+    """Run one session through the shared analysis queue and wait until it settles."""
+    result = await _start_session_analysis(session_dir, force=force)
+    if result.get("status") == "done":
+        return
+    key = _analysis_key(session_dir)
+    task = _analysis_tasks.get(key)
+    if task is not None:
+        await task
+    job = analyze.read_job(session_dir)
+    if job and job.get("status") == "error":
+        raise RuntimeError(job.get("error") or "analysis failed")
+    if not analyze.read_analysis(session_dir):
+        raise RuntimeError("analysis finished without a result")
+
+async def _run_cohort_job(pool: Path, force: bool = False) -> None:
+    key = _cohort_key(pool)
+    try:
+        cohort = analyze.read_cohort(pool)
+        if not cohort:
+            return
+        cohort = {**cohort, "status": "running"}
+        analyze.write_cohort(pool, cohort)
+
+        for entry in cohort.get("sessions") or []:
+            session_dir = pool / entry["session_id"]
+            if not force and analyze.read_analysis(session_dir):
+                entry["status"] = "done"
+                entry["analysis"] = analyze.ANALYSIS_FILE
+                entry.pop("error", None)
+                analyze.write_cohort(pool, cohort)
+                continue
+
+            entry["status"] = "running"
+            entry.pop("error", None)
+            analyze.write_cohort(pool, cohort)
+            try:
+                await _await_session_analysis(session_dir, force=force)
+                entry["status"] = "done"
+                entry["analysis"] = analyze.ANALYSIS_FILE
+                entry.pop("error", None)
+            except Exception as exc:
+                entry["status"] = "error"
+                entry["error"] = getattr(exc, "message", None) or str(exc) or "analysis failed"
+            analyze.write_cohort(pool, cohort)
+
+        final = analyze.enrich_cohort_status(pool, analyze.read_cohort(pool) or cohort)
+        analyze.write_cohort(pool, final)
+    finally:
+        _cohort_tasks.pop(key, None)
 
 @app.get("/api/sessions/{session_id}/analysis")
 def get_analysis(request: Request, session_id: str, project: Optional[str] = Query(None)):
@@ -980,41 +1074,63 @@ async def create_analysis(
     force: bool = Query(False),
 ):
     require_read_access(request, project)
-    if not analyze.ANALYSIS_ENABLED:
-        raise ApiError(503, "analysis is not configured on this server")
-    if not analyze.runtime_present():
-        raise ApiError(503, "analysis runtime is unavailable on this server")
+    _require_analysis_runtime()
     session_dir = resolve_session(session_id, project)
-    chunks = chunk_files(session_dir)
-    if not chunks:
-        raise ApiError(400, "this session has no chunks to analyze")
+    result = await _start_session_analysis(session_dir, force=force)
+    if result.get("accepted"):
+        return JSONResponse({"status": "running"}, status_code=202)
+    return result
 
-    if not force:
-        cached = analyze.read_analysis(session_dir)
-        if cached:
-            if "status" not in cached:
-                cached = {**cached, "status": "done"}
-            return cached
+@app.get("/api/cohort")
+def get_cohort(request: Request, project: Optional[str] = Query(None)):
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    cohort = analyze.read_cohort(pool)
+    if not cohort:
+        raise ApiError(404, "no cohort yet")
+    live = analyze.enrich_cohort_status(pool, cohort)
+    # Persist refreshed status so a crashed runner still shows accurate counts.
+    if live.get("sessions") != cohort.get("sessions") or live.get("status") != cohort.get("status"):
+        analyze.write_cohort(pool, live)
+    return analyze.attach_cohort_insights(pool, live)
 
-    key = _analysis_key(session_dir)
-    existing = _analysis_tasks.get(key)
-    if existing and not existing.done():
+@app.post("/api/cohort")
+async def create_cohort(
+    request: Request,
+    project: Optional[str] = Query(None),
+    purchased: int = Query(5, ge=0, le=50),
+    all_n: int = Query(5, ge=0, le=50, alias="all"),
+    force: bool = Query(False),
+):
+    require_read_access(request, project)
+    _require_analysis_runtime()
+    pool = resolve_pool(project)
+    key = _cohort_key(pool)
+    existing_task = _cohort_tasks.get(key)
+    if existing_task and not existing_task.done():
+        cohort = analyze.read_cohort(pool)
+        if cohort:
+            return JSONResponse(
+                analyze.attach_cohort_insights(pool, analyze.enrich_cohort_status(pool, cohort)),
+                status_code=202,
+            )
         return JSONResponse({"status": "running"}, status_code=202)
 
-    job = analyze.read_job(session_dir)
-    if job and job.get("status") == "running" and (existing is None or existing.done()):
-        # Stale status from a crashed worker — allow a fresh start.
-        analyze.clear_job(session_dir)
+    with _index_lock:
+        conn = index_conn()
+        cohort = analyze.build_cohort(conn, pool_key(pool), purchased, all_n)
 
-    if force:
-        analyze.clear_analysis(session_dir)
+    if not cohort["sessions"]:
+        raise ApiError(400, "no sessions matched the purchased/all sample")
 
-    analyze.write_job(session_dir, "running")
-    task = asyncio.create_task(
-        _run_analysis_job(session_dir, [c.name for c in chunks])
+    analyze.write_cohort(pool, {**cohort, "status": "running"})
+    task = asyncio.create_task(_run_cohort_job(pool, force=force))
+    _cohort_tasks[key] = task
+    return JSONResponse(
+        analyze.attach_cohort_insights(pool, analyze.enrich_cohort_status(pool, cohort)),
+        status_code=202,
     )
-    _analysis_tasks[key] = task
-    return JSONResponse({"status": "running"}, status_code=202)
+
 
 def sweep_expired_sessions() -> int:
 

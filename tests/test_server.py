@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -687,6 +688,136 @@ class TestAnalysisStatus(ServerCase):
         )
         self.assertEqual(status, 503)
         self.assertIn("not configured", json.loads(body)["error"])
+
+
+class TestCohort(ServerCase):
+    env = {"GEMINI_API_KEY": "test-key-not-used-when-cached"}
+
+    def order(self, session_id, payload):
+        return request(
+            f"{self.base}/order?session_id={session_id}",
+            method="POST",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )[0]
+
+    def seed_analysis(self, sid):
+        session = self.data_dir / "sessions" / sid
+        (session / "analysis.json").write_text(
+            json.dumps({"text": f"write-up for {sid[:8]}", "model": "test", "frame_count": 1, "warnings": []})
+        )
+
+    def test_get_without_cohort_is_404(self):
+        status, body = request(f"{self.base}/api/cohort")
+        self.assertEqual(status, 404)
+        self.assertIn("no cohort", json.loads(body)["error"])
+
+    def test_samples_purchased_and_all_and_reuses_cached_analysis(self):
+        purchased = [f"buy{i}" + "x" * 28 for i in range(3)]
+        plain = [f"all{i}" + "x" * 28 for i in range(4)]
+        for sid in purchased:
+            self.assertEqual(self.ingest(sid), 200)
+            self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
+            self.seed_analysis(sid)
+        for sid in plain:
+            self.assertEqual(self.ingest(sid), 200)
+            self.seed_analysis(sid)
+
+        status, body = request(
+            f"{self.base}/api/cohort?purchased=2&all=2",
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 202, body)
+        cohort = json.loads(body)
+        self.assertEqual(cohort["purchased_n"], 2)
+        self.assertEqual(cohort["all_n"], 2)
+        self.assertEqual(len(cohort["sessions"]), 4)
+        filters = {s["filter"] for s in cohort["sessions"]}
+        self.assertEqual(filters, {"purchased", "all"})
+        purchased_ids = {s["session_id"] for s in cohort["sessions"] if s["filter"] == "purchased"}
+        all_ids = {s["session_id"] for s in cohort["sessions"] if s["filter"] == "all"}
+        self.assertTrue(purchased_ids <= set(purchased))
+        self.assertTrue(all_ids <= set(plain))
+        self.assertFalse(purchased_ids & all_ids)
+
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            status, body = request(f"{self.base}/api/cohort")
+            self.assertEqual(status, 200)
+            cohort = json.loads(body)
+            if cohort["status"] == "done" and cohort["progress"]["done"] == 4:
+                break
+            time.sleep(0.1)
+        self.assertEqual(cohort["status"], "done")
+        self.assertEqual(cohort["progress"]["done"], 4)
+        self.assertEqual(cohort["progress"]["error"], 0)
+        for entry in cohort["sessions"]:
+            self.assertEqual(entry["status"], "done")
+            self.assertEqual(entry["analysis"], "analysis.json")
+            self.assertTrue(entry.get("text", "").startswith("write-up for"))
+            self.assertIn("standout", entry)
+
+        saved = json.loads((self.data_dir / "cohort.json").read_text())
+        self.assertEqual(saved["id"], cohort["id"])
+        self.assertEqual(len(saved["sessions"]), 4)
+        # Write-ups are response-only — not bloating cohort.json on disk.
+        for entry in saved["sessions"]:
+            self.assertNotIn("text", entry)
+
+
+class TestCohortUnavailable(ServerCase):
+    env = {"GEMINI_API_KEY": ""}
+
+    def test_post_without_key_is_unavailable(self):
+        sid = "d" * 32
+        self.assertEqual(self.ingest(sid), 200)
+        status, body = request(f"{self.base}/api/cohort", method="POST", data=b"")
+        self.assertEqual(status, 503)
+        self.assertIn("not configured", json.loads(body)["error"])
+
+
+class TestCohortSampling(unittest.TestCase):
+    def test_sample_prefers_newest_and_splits_filters(self):
+        import analyze
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+                pool TEXT, session_id TEXT, first_seen INTEGER, last_seen INTEGER,
+                chunk_count INTEGER, bytes INTEGER, visitor_id TEXT, url TEXT,
+                "order" TEXT, interactions TEXT, device TEXT
+            )
+            """
+        )
+        rows = [
+            ("", "oldbuy" + "x" * 26, 1, 10, 1, 1, None, None, json.dumps({"purchased_at": 1}), None, None),
+            ("", "newbuy" + "x" * 26, 1, 30, 1, 1, None, None, json.dumps({"purchased_at": 2}), json.dumps({"clicks": 3}), None),
+            ("", "oldall" + "x" * 26, 1, 5, 1, 1, None, None, None, None, None),
+            ("", "newall" + "x" * 26, 1, 40, 1, 1, None, None, None, json.dumps({"clicks": 2}), None),
+            ("", "nochunk" + "x" * 25, 1, 50, 0, 0, None, None, json.dumps({"purchased_at": 3}), None, None),
+        ]
+        conn.executemany(
+            'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+            rows,
+        )
+        sampled = analyze.sample_cohort_rows(conn, "", purchased_n=1, all_n=1)
+        self.assertEqual(
+            [(s["session_id"], s["filter"]) for s in sampled],
+            [("newbuy" + "x" * 26, "purchased"), ("newall" + "x" * 26, "all")],
+        )
+
+    def test_standout_line_prefers_what_stands_out_section(self):
+        import analyze
+
+        text = (
+            "## What they did\nWent to cart.\n\n"
+            "## What stands out\n- Shipping fee surprise at checkout.\n- Also size chart.\n"
+        )
+        self.assertEqual(analyze.standout_line(text), "Shipping fee surprise at checkout.")
+        self.assertEqual(analyze.standout_line("## Hello\nPlain opener."), "Plain opener.")
+
 
 
 if __name__ == "__main__":

@@ -4,12 +4,18 @@ The extractor drives the same CapturePlayer the replay UI uses, so animations
 are frozen and recorded scroll offsets are re-applied exactly as they are on
 screen. Stepping that player yields a frame per second of activity — the page
 as the visitor saw it change, rather than a single end-state snapshot.
+
+Also owns the Phase-0 cohort sample: pick N purchased + N all sessions, persist
+`cohort.json`, and leave the server to queue per-session analysis against it.
 """
 
+import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
+import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
@@ -19,6 +25,9 @@ BASE_DIR = Path(__file__).resolve().parent
 ANALYSIS_FILE = "analysis.json"
 ANALYSIS_STATUS_FILE = "analysis.status.json"
 ANALYSIS_DIR = ".analysis"
+COHORT_FILE = "cohort.json"
+# Same shape as server.SAFE_CHUNK — keep local so the CLI does not import server.
+SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
@@ -129,6 +138,200 @@ def clear_analysis(session_dir: Path) -> None:
     """Drop a finished result so a re-analyze starts clean."""
     (session_dir / ANALYSIS_FILE).unlink(missing_ok=True)
     shutil.rmtree(session_dir / ANALYSIS_DIR, ignore_errors=True)
+
+
+def cohort_path(pool: Path) -> Path:
+    """cohort.json lives next to the sessions directory (project root / data root)."""
+    return pool.parent / COHORT_FILE
+
+
+def read_cohort(pool: Path) -> Optional[dict]:
+    path = cohort_path(pool)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def write_cohort(pool: Path, cohort: dict) -> dict:
+    cohort = {**cohort, "updated_at": int(time.time() * 1000)}
+    path = cohort_path(pool)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cohort, indent=2))
+    return cohort
+
+
+def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
+    """Refresh per-session status from analysis.json / analysis.status.json on disk."""
+    sessions = []
+    done = running = queued = errors = 0
+    for entry in cohort.get("sessions") or []:
+        row = dict(entry)
+        # Insights text is attached on read for the API — never persist it here.
+        row.pop("text", None)
+        row.pop("standout", None)
+        row.pop("model", None)
+        row.pop("frame_count", None)
+        session_dir = pool / row["session_id"]
+        cached = read_analysis(session_dir)
+        job = read_job(session_dir)
+        if cached:
+            row["status"] = "done"
+            row["analysis"] = ANALYSIS_FILE
+            row.pop("error", None)
+            done += 1
+        elif job and job.get("status") == "running":
+            row["status"] = "running"
+            running += 1
+        elif job and job.get("status") == "error":
+            row["status"] = "error"
+            row["error"] = job.get("error") or row.get("error") or "analysis failed"
+            errors += 1
+        elif row.get("status") == "error":
+            errors += 1
+        elif row.get("status") == "done":
+            done += 1
+        else:
+            row["status"] = "queued"
+            queued += 1
+        sessions.append(row)
+
+    status = cohort.get("status") or "queued"
+    if status not in ("queued", "running", "done", "error"):
+        status = "queued"
+    if running or (queued and status == "running"):
+        status = "running"
+    elif errors and done + errors >= len(sessions) and not queued and not running:
+        status = "error" if done == 0 else "done"
+    elif done >= len(sessions) and sessions:
+        status = "done"
+    elif not sessions:
+        status = "done"
+
+    return {
+        **cohort,
+        "status": status,
+        "sessions": sessions,
+        "progress": {
+            "total": len(sessions),
+            "done": done,
+            "running": running,
+            "queued": queued,
+            "error": errors,
+        },
+    }
+
+
+def standout_line(text: str) -> str:
+    """First useful line under ## What stands out, else the first non-heading line."""
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in text.splitlines()]
+    in_standout = False
+    for line in lines:
+        if re.match(r"^#{1,4}\s+what stands out\s*$", line, re.I):
+            in_standout = True
+            continue
+        if in_standout:
+            if re.match(r"^#{1,4}\s+", line):
+                break
+            bullet = re.match(r"^[-*]\s+(.*)$", line)
+            if bullet and bullet.group(1).strip():
+                return bullet.group(1).strip()
+            if line:
+                return line
+    for line in lines:
+        if line and not re.match(r"^#{1,4}\s+", line):
+            return re.sub(r"^[-*]\s+", "", line)
+    return ""
+
+
+def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
+    """Attach analysis write-ups for Compare — response-only, not written to cohort.json."""
+    sessions = []
+    for entry in cohort.get("sessions") or []:
+        row = dict(entry)
+        if row.get("status") == "done":
+            cached = read_analysis(pool / row["session_id"])
+            if cached and isinstance(cached.get("text"), str) and cached["text"].strip():
+                row["text"] = cached["text"]
+                row["standout"] = standout_line(cached["text"])
+                if cached.get("model"):
+                    row["model"] = cached["model"]
+                if cached.get("frame_count") is not None:
+                    row["frame_count"] = cached["frame_count"]
+        sessions.append(row)
+    return {**cohort, "sessions": sessions}
+
+
+def sample_cohort_rows(
+    conn: sqlite3.Connection,
+    pool: str,
+    purchased_n: int,
+    all_n: int,
+) -> list:
+    """Newest purchased + newest non-purchased sessions that have at least one chunk.
+
+    Prefers sessions with recorded clicks when breaking ties on recency, so thin
+    bounce recordings are less likely to fill the sample.
+    """
+    activity = "coalesce(json_extract(interactions, '$.clicks'), 0)"
+    purchased = conn.execute(
+        f"""
+        SELECT session_id FROM sessions
+        WHERE pool = ?
+          AND chunk_count > 0
+          AND json_extract("order", '$.purchased_at') IS NOT NULL
+        ORDER BY last_seen DESC, {activity} DESC, session_id DESC
+        LIMIT ?
+        """,
+        (pool, purchased_n),
+    ).fetchall()
+    purchased_ids = {row[0] for row in purchased}
+
+    all_rows = conn.execute(
+        f"""
+        SELECT session_id FROM sessions
+        WHERE pool = ?
+          AND chunk_count > 0
+          AND json_extract("order", '$.purchased_at') IS NULL
+        ORDER BY last_seen DESC, {activity} DESC, session_id DESC
+        LIMIT ?
+        """,
+        (pool, all_n + len(purchased_ids)),
+    ).fetchall()
+
+    sessions = [{"session_id": sid, "filter": "purchased", "status": "queued"} for (sid,) in purchased]
+    for (sid,) in all_rows:
+        if sid in purchased_ids:
+            continue
+        sessions.append({"session_id": sid, "filter": "all", "status": "queued"})
+        if sum(1 for s in sessions if s["filter"] == "all") >= all_n:
+            break
+    return sessions
+
+
+def build_cohort(
+    conn: sqlite3.Connection,
+    pool_key: str,
+    purchased_n: int = 5,
+    all_n: int = 5,
+) -> dict:
+    now = int(time.time() * 1000)
+    sessions = sample_cohort_rows(conn, pool_key, purchased_n, all_n)
+    return {
+        "id": f"cohort-{now}",
+        "label": f"Sample {purchased_n}+{all_n}",
+        "created_at": now,
+        "updated_at": now,
+        "status": "queued",
+        "purchased_n": purchased_n,
+        "all_n": all_n,
+        "sessions": sessions,
+    }
 
 
 async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> dict:
@@ -287,3 +490,109 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
     analysis_path.write_text(json.dumps(result))
     clear_job(session_dir)
     return result
+
+
+def _cli_data_root() -> Path:
+    return Path(os.environ.get("CAPTURE_DATA_DIR") or BASE_DIR / "data")
+
+
+def _cli_pool(project: Optional[str]) -> Path:
+    root = _cli_data_root()
+    if not project:
+        return root / "sessions"
+    return root / "projects" / project / "sessions"
+
+
+async def _cli_run_cohort(pool: Path, pool_key: str, purchased_n: int, all_n: int, force: bool) -> int:
+    index = _cli_data_root() / "index.db"
+    if not index.is_file():
+        print(f"no session index at {index} — start the server once to build it")
+        return 1
+    if not ANALYSIS_ENABLED:
+        print("analysis is not configured — set GEMINI_API_KEY")
+        return 1
+    if not runtime_present():
+        print("analysis runtime unavailable — need node, extract.mjs, and the replayer bundle")
+        return 1
+
+    conn = sqlite3.connect(index)
+    try:
+        cohort = build_cohort(conn, pool_key, purchased_n, all_n)
+    finally:
+        conn.close()
+
+    if not cohort["sessions"]:
+        print("no sessions matched the purchased/all sample")
+        write_cohort(pool, cohort)
+        return 1
+
+    write_cohort(pool, {**cohort, "status": "running"})
+    print(f"{cohort['label']}: {len(cohort['sessions'])} session(s) → {cohort_path(pool)}")
+
+    for entry in cohort["sessions"]:
+        session_dir = pool / entry["session_id"]
+        chunk_names = sorted(
+            (c.name for c in session_dir.iterdir() if c.is_file() and SAFE_CHUNK.match(c.name))
+        )
+        if not chunk_names:
+            entry["status"] = "error"
+            entry["error"] = "no chunks to analyze"
+            write_cohort(pool, cohort)
+            print(f"  {entry['filter']:9} {entry['session_id'][:8]}… error (no chunks)")
+            continue
+
+        entry["status"] = "running"
+        write_cohort(pool, cohort)
+        print(f"  {entry['filter']:9} {entry['session_id'][:8]}… running", flush=True)
+        try:
+            if force:
+                clear_analysis(session_dir)
+            await analyze_session(session_dir, chunk_names, force=force)
+            entry["status"] = "done"
+            entry["analysis"] = ANALYSIS_FILE
+            entry.pop("error", None)
+            print(f"  {entry['filter']:9} {entry['session_id'][:8]}… done")
+        except Exception as exc:
+            entry["status"] = "error"
+            entry["error"] = str(exc)
+            write_job(session_dir, "error", error=str(exc))
+            print(f"  {entry['filter']:9} {entry['session_id'][:8]}… error ({exc})")
+        write_cohort(pool, cohort)
+
+    final = enrich_cohort_status(pool, cohort)
+    write_cohort(pool, final)
+    prog = final["progress"]
+    print(
+        f"{final['status']}: {prog['done']} done · {prog['error']} error · "
+        f"{prog['queued']} queued of {prog['total']}"
+    )
+    return 0 if prog["error"] == 0 and prog["done"] == prog["total"] else 1
+
+
+def main(argv: Optional[list] = None) -> int:
+    parser = argparse.ArgumentParser(description="Capture session analysis")
+    sub = parser.add_subparsers(dest="cmd")
+
+    cohort_p = sub.add_parser("cohort", help="Sample purchased+all sessions and analyze them")
+    cohort_p.add_argument("--purchased", type=int, default=5, help="purchased sample size (default 5)")
+    cohort_p.add_argument("--all", type=int, default=5, dest="all_n", help="all/non-purchase sample size (default 5)")
+    cohort_p.add_argument("--project", default="", help="project token (default: no-project pool)")
+    cohort_p.add_argument("--force", action="store_true", help="re-analyze even when analysis.json exists")
+
+    args = parser.parse_args(argv)
+    if args.cmd == "cohort":
+        if args.purchased < 0 or args.all_n < 0:
+            print("sample sizes must be >= 0")
+            return 1
+        pool = _cli_pool(args.project or None)
+        pool_key = "" if not args.project else args.project
+        return asyncio.run(
+            _cli_run_cohort(pool, pool_key, args.purchased, args.all_n, args.force)
+        )
+
+    parser.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

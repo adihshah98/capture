@@ -20,7 +20,7 @@ const escapeHtml = (s) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 /** Minimal renderer for the headings, bullets and bold the prompt asks for. */
-function renderMarkdown(md) {
+export function renderMarkdown(md) {
   const html = [];
   let inList = false;
   for (const raw of md.split('\n')) {

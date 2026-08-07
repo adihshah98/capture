@@ -1,5 +1,6 @@
 import { refreshAll } from './replay/session-list.js';
 import { player } from './replay/session-player.js';
+import { initInsights, refreshCohort } from './replay/insights.js';
 
 addEventListener('keydown', (e) => {
   if (!player || e.target.closest('input, select, textarea, button')) return;
@@ -15,5 +16,11 @@ addEventListener('keydown', (e) => {
   }
 });
 
-document.getElementById('refresh').addEventListener('click', refreshAll);
+document.getElementById('refresh').addEventListener('click', () => {
+  refreshAll();
+  if (document.body.classList.contains('mode-insights')) {
+    refreshCohort().catch(() => {});
+  }
+});
+initInsights();
 refreshAll();
