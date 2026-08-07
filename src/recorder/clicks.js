@@ -1,8 +1,9 @@
 const CLICKABLE =
-  'a,button,select,summary,label,input[type=button],input[type=submit],input[type=reset],input[type=checkbox],input[type=radio],[role=button],[onclick]';
+  'a,button,select,summary,label,img,input[type=button],input[type=submit],input[type=reset],input[type=checkbox],input[type=radio],[role=button],[onclick]';
 const MAX_LEVELS = 5;
 const MAX_SELECTOR = 200;
 const MAX_TEXT = 64;
+const MAX_SRC = 300;
 
 const scrub = (raw) =>
   raw
@@ -75,6 +76,17 @@ export function textFor(el, maskSelector) {
   return '';
 }
 
+export function imageFor(el) {
+  const img = (el.tagName || '').toLowerCase() === 'img' ? el : el.querySelector && el.querySelector('img');
+  if (!img) return null;
+  const src = img.currentSrc || img.getAttribute('src') || '';
+  if (!src || src.startsWith('data:')) return null;
+  const out = { src: src.slice(0, MAX_SRC) };
+  const alt = img.getAttribute('alt');
+  if (alt) out.alt = scrub(alt);
+  return out;
+}
+
 export function createRageTracker({ count = 3, radiusPx = 30, windowMs = 1000 } = {}) {
   let recent = [];
   return (x, y, t) => {
@@ -101,11 +113,14 @@ export function startClickCapture(emit, { blockSelector, maskTextSelector } = {}
     let el = target.closest(CLICKABLE);
     if (!el && (rage || getComputedStyle(target).cursor === 'pointer')) el = target;
     if (!el) return;
+    const image = el.closest(masked) ? null : imageFor(el);
     emit({
       selector: selectorFor(el),
       text: el.closest(masked) ? '' : textFor(el, masked),
+      tag: (el.tagName || '').toLowerCase(),
       x: Math.round(event.clientX),
       y: Math.round(event.clientY),
+      ...(image ? { image } : {}),
       ...(rage ? { rage: true } : {}),
     });
   };
