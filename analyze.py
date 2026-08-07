@@ -5,8 +5,10 @@ are frozen and recorded scroll offsets are re-applied exactly as they are on
 screen. Stepping that player yields a frame per second of activity — the page
 as the visitor saw it change, rather than a single end-state snapshot.
 
-Also owns the Phase-0 cohort sample: pick N purchased + N all sessions, persist
-`cohort.json`, and leave the server to queue per-session analysis against it.
+Also owns cohorts: pick N purchased + N all sessions, persist the sample under
+`cohorts/<id>.json`, and leave the server to queue per-session analysis against
+it. A cohort is immutable once sampled, so a "cut" across it (Meta vs Google,
+campaign A vs B) can be analysed by the model once and cached forever beside it.
 """
 
 import argparse
@@ -255,6 +257,35 @@ def list_cohorts(pool: Path) -> list:
 def latest_cohort(pool: Path) -> Optional[dict]:
     cohorts = list_cohorts(pool)
     return cohorts[0] if cohorts else None
+
+
+def cuts_path(pool: Path, cohort_id: str) -> Path:
+    return cohorts_dir(pool) / f"{safe_cohort_id(cohort_id)}{CUTS_SUFFIX}"
+
+
+def read_cuts(pool: Path, cohort_id: str) -> dict:
+    """All cached cut analyses for a cohort, keyed by cut_key()."""
+    try:
+        path = cuts_path(pool, cohort_id)
+    except ValueError:
+        return {}
+    data = _read_cohort_file(path)
+    return data if isinstance(data, dict) else {}
+
+
+def read_cut(pool: Path, cohort_id: str, key: str) -> Optional[dict]:
+    cut = read_cuts(pool, cohort_id).get(key)
+    return cut if isinstance(cut, dict) else None
+
+
+def write_cut(pool: Path, cohort_id: str, key: str, cut: dict) -> dict:
+    """Cache one cut. A done cohort is immutable, so this never needs busting."""
+    path = cuts_path(pool, cohort_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cuts = read_cuts(pool, cohort_id)
+    cuts[key] = cut
+    path.write_text(json.dumps(cuts, indent=2))
+    return cut
 
 
 def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
