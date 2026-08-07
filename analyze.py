@@ -1,9 +1,9 @@
-"""Session analysis: reconstruct the page, measure attention, ask Gemini about it.
+"""Session analysis: replay the session headlessly, then ask Gemini about it.
 
-The extractor rebuilds the recorded DOM with the same rrweb Replayer the replay
-UI uses, so images load from the customer's origin exactly as they do on screen.
-That single pass yields both element geometry (rrweb snapshots store no
-coordinates) and screenshots of the regions the visitor actually dwelled on.
+The extractor drives the same CapturePlayer the replay UI uses, so animations
+are frozen and recorded scroll offsets are re-applied exactly as they are on
+screen. Stepping that player yields a frame per second of activity — the page
+as the visitor saw it change, rather than a single end-state snapshot.
 """
 
 import asyncio
@@ -21,8 +21,12 @@ ANALYSIS_DIR = ".analysis"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-ANALYZE_TIMEOUT_S = float(os.environ.get("ANALYZE_TIMEOUT_S", "180"))
-MAX_SHOTS_TO_MODEL = int(os.environ.get("ANALYZE_MAX_SHOTS", "6"))
+ANALYZE_TIMEOUT_S = float(os.environ.get("ANALYZE_TIMEOUT_S", "300"))
+
+# Frames come one per second of activity; dead air is skipped, so a long
+# session with a little interaction stays cheap. 0 leaves the count uncapped.
+ANALYZE_FPS = float(os.environ.get("ANALYZE_FPS", "1"))
+ANALYZE_MAX_FRAMES = int(os.environ.get("ANALYZE_MAX_FRAMES", "0"))
 
 ANALYSIS_ENABLED = bool(GEMINI_API_KEY)
 
@@ -31,30 +35,33 @@ REPLAYER_BUNDLE = BASE_DIR / "src" / "analyze" / "replayer.bundle.js"
 
 SYSTEM_PROMPT = """You analyse one recorded web session for a product team.
 
-You receive a measured digest and screenshots of the regions the visitor kept on
-screen longest. The dwell numbers are measured from scroll events, with idle
-gaps already removed. The screenshots show what the visitor actually saw.
+You receive a measured digest and a chronological sequence of frames from the
+session replay, sampled about once per second through the parts of the session
+where something was happening. Each frame is labelled [MM:SS]. A jump between
+consecutive timestamps means the page sat untouched, not that something is
+missing.
 
-Ground every claim in the digest. Never invent a section, image, or number that
-is not there. If the warnings mention images that failed to load, do not
-describe what those regions look like.
+Ground every claim in the digest and the frames. Never invent a number, a page,
+or an element you cannot see. If the warnings mention assets that failed to
+load, do not describe what those parts of the page look like.
 
-Say "on screen", not "looked at" or "read". Scroll position proves a region was
-displayed; it does not prove attention. This distinction matters — do not blur
-it.
+The frames prove what was displayed and what changed. They do not prove where
+the visitor's eyes went. Say "on screen" or "reached", not "looked at" or
+"read". This distinction matters — do not blur it.
 
 Write four short markdown sections:
 
-## Where attention went
-Which sections held the visitor longest, with the measured seconds. Name what is
-in them, using the screenshots for anything visual (product imagery, supplement
-facts, trust signals like a doctor's endorsement or review counts).
+## What they did
+The path through the session in order, citing [MM:SS]. What the page showed,
+what they scrolled past, what opened or changed.
 
-## What they skipped
-Sections passed quickly or never reached.
+## Where they slowed down
+Stretches where the page sat on one view, and what was on screen then. Cite the
+timestamps. Note long jumps between frames as time the page was left untouched.
 
 ## Engagement and friction
-What they clicked, in order. Call out rage clicks and repeated interactions.
+What they clicked, in order, with timestamps. Call out rage clicks and repeated
+interactions. Use the frames to say what the click did — or failed to do.
 
 ## What stands out
 Two or three observations a product team could act on. If the evidence is thin,
@@ -97,6 +104,9 @@ async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> 
         str(session_dir),
         str(out_dir),
         str(REPLAYER_BUNDLE),
+        # Positional, and ahead of the variadic chunk names.
+        str(ANALYZE_FPS),
+        str(ANALYZE_MAX_FRAMES),
         *chunk_names,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -122,9 +132,16 @@ def _seconds(ms) -> float:
     return round((ms or 0) / 1000, 1)
 
 
+def _clock(ms) -> str:
+    """MM:SS, the same vocabulary the frame labels use."""
+    total = int((ms or 0) // 1000)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
 def prompt_digest(digest: dict) -> dict:
     """Trim the digest to what the model needs, in seconds rather than ms."""
     session = digest.get("session") or {}
+    frames = digest.get("frames") or []
     return {
         "session": {
             "duration_s": _seconds(session.get("durationMs")),
@@ -132,56 +149,53 @@ def prompt_digest(digest: dict) -> dict:
             "idle_s": _seconds(session.get("idleMs")),
             "viewport": session.get("viewport"),
             "page_height_px": session.get("pageHeight"),
+            "max_scroll_px": session.get("maxScrollPx"),
             "pages": session.get("urls") or [],
         },
-        "sections_by_time_on_screen": [
-            {
-                "label": s.get("label"),
-                "seconds_on_screen": _seconds(s.get("dwellMs")),
-                "trust_signal": s.get("trustSignal", False),
-                "images": [
-                    {"alt": i.get("alt") or None, "loaded": i.get("loaded", True)}
-                    for i in (s.get("images") or [])
-                ],
-            }
-            for s in (digest.get("sections") or [])
-        ],
         "clicks_in_order": [
             {
+                "at": _clock(c.get("atMs")),
                 "at_s": _seconds(c.get("atMs")),
                 "label": c.get("text") or None,
                 "element": c.get("tag") or None,
-                "in_section": c.get("section"),
+                "selector": c.get("selector") or None,
                 "image_alt": (c.get("image") or {}).get("alt"),
                 "rage_click": c.get("rage", False),
             }
             for c in (digest.get("clicks") or [])
         ],
+        "frames_at": [_clock(f.get("atMs")) for f in frames],
         "warnings": digest.get("warnings") or [],
     }
 
 
-async def call_gemini(digest: dict, shots: list) -> str:
+async def call_gemini(digest: dict, frames: list) -> str:
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=GEMINI_API_KEY)
 
+    usable = [f for f in frames if Path(f["file"]).is_file()]
+
     parts = [
         types.Part.from_text(
             text="Measured digest for this session:\n\n"
             + json.dumps(prompt_digest(digest), indent=2)
-        )
+        ),
+        types.Part.from_text(
+            text=f"\n{len(usable)} frames follow in chronological order, sampled "
+            "through the active parts of the session. Each is labelled with its "
+            "timestamp in the recording."
+        ),
     ]
-    for shot in shots[:MAX_SHOTS_TO_MODEL]:
-        path = Path(shot["file"])
-        if not path.is_file():
-            continue
+    # Label before the image: the model attributes a caption to what follows it
+    # far more reliably than to what precedes it.
+    for frame in usable:
+        parts.append(types.Part.from_text(text=f"[{_clock(frame['atMs'])}]"))
         parts.append(
-            types.Part.from_text(text=f"Screenshot of the section titled: {shot['label']}")
-        )
-        parts.append(
-            types.Part.from_bytes(data=path.read_bytes(), mime_type="image/jpeg")
+            types.Part.from_bytes(
+                data=Path(frame["file"]).read_bytes(), mime_type="image/jpeg"
+            )
         )
 
     response = await client.aio.models.generate_content(
@@ -216,16 +230,13 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
     if digest.get("error"):
         raise RuntimeError(digest["error"])
 
-    text = await call_gemini(digest, digest.get("screenshots") or [])
+    text = await call_gemini(digest, digest.get("frames") or [])
 
     result = {
         "text": text,
         "model": GEMINI_MODEL,
         "created_at": int(time.time() * 1000),
-        "sections": [
-            {"label": s.get("label"), "seconds": _seconds(s.get("dwellMs"))}
-            for s in (digest.get("sections") or [])[:8]
-        ],
+        "frame_count": len(digest.get("frames") or []),
         "warnings": digest.get("warnings") or [],
     }
     analysis_path.write_text(json.dumps(result))
