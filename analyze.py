@@ -197,7 +197,122 @@ def clear_job(session_dir: Path) -> None:
 def clear_analysis(session_dir: Path) -> None:
     """Drop a finished result so a re-analyze starts clean."""
     (session_dir / ANALYSIS_FILE).unlink(missing_ok=True)
+    (session_dir / ANALYSIS_INSIGHTS_FILE).unlink(missing_ok=True)
     shutil.rmtree(session_dir / ANALYSIS_DIR, ignore_errors=True)
+
+
+def insights_path(session_dir: Path) -> Path:
+    return session_dir / ANALYSIS_INSIGHTS_FILE
+
+
+def read_insights(session_dir: Path) -> Optional[dict]:
+    path = insights_path(session_dir)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def write_insights(session_dir: Path, insights: dict) -> dict:
+    path = insights_path(session_dir)
+    path.write_text(json.dumps(insights, indent=2))
+    return insights
+
+
+def empty_insights(error: Optional[str] = None) -> dict:
+    out = {
+        "themes": [],
+        "friction": [],
+        "pages": [],
+        "outcome_signals": [],
+        "confidence": "low",
+    }
+    if error:
+        out["error"] = error
+    return out
+
+
+def _slug_tag(raw: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower()).strip("_")
+    return slug[:64]
+
+
+def normalize_theme(raw) -> Optional[str]:
+    if not isinstance(raw, str):
+        return None
+    tag = raw.strip().lower()
+    if not tag:
+        return None
+    if tag in THEME_VOCAB:
+        return tag
+    if tag.startswith("other:"):
+        slug = _slug_tag(tag[6:])
+        return f"other:{slug}" if slug else None
+    # Free-form → other:<slug> so cohorts stay countable.
+    slug = _slug_tag(tag)
+    return f"other:{slug}" if slug else None
+
+
+def normalize_insights(raw) -> dict:
+    """Map model output onto the controlled vocabularies."""
+    if not isinstance(raw, dict):
+        return empty_insights("insights were not an object")
+
+    themes = []
+    seen = set()
+    for item in raw.get("themes") or []:
+        theme = normalize_theme(item)
+        if theme and theme not in seen:
+            seen.add(theme)
+            themes.append(theme)
+
+    pages = []
+    seen_pages = set()
+    for item in raw.get("pages") or []:
+        if not isinstance(item, str):
+            continue
+        page = item.strip().lower()
+        if page in PAGE_VOCAB and page not in seen_pages:
+            seen_pages.add(page)
+            pages.append(page)
+
+    signals = []
+    seen_signals = set()
+    for item in raw.get("outcome_signals") or []:
+        if not isinstance(item, str):
+            continue
+        signal = item.strip().lower()
+        if signal in OUTCOME_SIGNAL_VOCAB and signal not in seen_signals:
+            seen_signals.add(signal)
+            signals.append(signal)
+
+    friction = []
+    for item in raw.get("friction") or []:
+        if not isinstance(item, dict):
+            continue
+        label = _slug_tag(str(item.get("label") or ""))
+        if not label:
+            continue
+        entry = {"label": label}
+        at = item.get("atMs")
+        if isinstance(at, (int, float)) and not isinstance(at, bool) and at >= 0:
+            entry["atMs"] = int(at)
+        friction.append(entry)
+
+    confidence = raw.get("confidence")
+    if confidence not in CONFIDENCE_VOCAB:
+        confidence = "low" if not themes else "medium"
+
+    return {
+        "themes": themes,
+        "friction": friction,
+        "pages": pages,
+        "outcome_signals": signals,
+        "confidence": confidence,
+    }
 
 
 def cohort_path(pool: Path) -> Path:
@@ -235,12 +350,17 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
         row.pop("standout", None)
         row.pop("model", None)
         row.pop("frame_count", None)
+        row.pop("themes", None)
+        row.pop("insights", None)
+        row.pop("insights_file", None)
         session_dir = pool / row["session_id"]
         cached = read_analysis(session_dir)
         job = read_job(session_dir)
         if cached:
             row["status"] = "done"
             row["analysis"] = ANALYSIS_FILE
+            if insights_path(session_dir).is_file():
+                row["insights_file"] = ANALYSIS_INSIGHTS_FILE
             row.pop("error", None)
             done += 1
         elif job and job.get("status") == "running":
@@ -315,7 +435,8 @@ def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
     for entry in cohort.get("sessions") or []:
         row = dict(entry)
         if row.get("status") == "done":
-            cached = read_analysis(pool / row["session_id"])
+            session_dir = pool / row["session_id"]
+            cached = read_analysis(session_dir)
             if cached and isinstance(cached.get("text"), str) and cached["text"].strip():
                 row["text"] = cached["text"]
                 row["standout"] = standout_line(cached["text"])
@@ -323,6 +444,10 @@ def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
                     row["model"] = cached["model"]
                 if cached.get("frame_count") is not None:
                     row["frame_count"] = cached["frame_count"]
+            insights = read_insights(session_dir)
+            if insights:
+                row["insights"] = insights
+                row["themes"] = list(insights.get("themes") or [])
         sessions.append(row)
     return {**cohort, "sessions": sessions}
 
@@ -520,6 +645,47 @@ async def call_gemini(digest: dict, frames: list) -> str:
     return text
 
 
+def _parse_json_object(text: str) -> dict:
+    """Parse a JSON object, tolerating optional markdown fences."""
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("empty insights response")
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+    if fence:
+        raw = fence.group(1).strip()
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("insights response was not an object")
+    return data
+
+
+async def call_gemini_insights(digest: dict, markdown: str) -> dict:
+    """Cheap text-only pass: map digest + markdown onto the controlled vocab."""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    parts = [
+        types.Part.from_text(
+            text="Measured digest for this session:\n\n"
+            + json.dumps(prompt_digest(digest), indent=2)
+        ),
+        types.Part.from_text(text="\nMarkdown write-up for this session:\n\n" + markdown),
+    ]
+    response = await client.aio.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[types.Content(role="user", parts=parts)],
+        config=types.GenerateContentConfig(
+            system_instruction=INSIGHTS_PROMPT,
+            max_output_tokens=1024,
+            thinking_config=types.ThinkingConfig(thinking_budget=256),
+            temperature=0.1,
+            response_mime_type="application/json",
+        ),
+    )
+    return normalize_insights(_parse_json_object(response.text or ""))
+
+
 async def analyze_session(session_dir: Path, chunk_names: list, force: bool = False) -> dict:
     if not ANALYSIS_ENABLED:
         raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
@@ -527,17 +693,32 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
     if not force:
         cached = read_analysis(session_dir)
         if cached:
+            insights = read_insights(session_dir)
+            if insights:
+                return {**cached, "insights": insights}
             return cached
 
     analysis_path, out_dir = analysis_paths(session_dir)
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True, exist_ok=True)
+    insights_path(session_dir).unlink(missing_ok=True)
 
     digest = await run_extractor(session_dir, out_dir, chunk_names)
     if digest.get("error"):
         raise RuntimeError(digest["error"])
 
     text = await call_gemini(digest, digest.get("frames") or [])
+
+    try:
+        insights = await call_gemini_insights(digest, text)
+    except Exception as exc:
+        insights = empty_insights(str(exc))
+    insights = {
+        **insights,
+        "model": GEMINI_MODEL,
+        "created_at": int(time.time() * 1000),
+    }
+    write_insights(session_dir, insights)
 
     result = {
         "status": "done",
@@ -546,8 +727,9 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
         "created_at": int(time.time() * 1000),
         "frame_count": len(digest.get("frames") or []),
         "warnings": digest.get("warnings") or [],
+        "insights": insights,
     }
-    analysis_path.write_text(json.dumps(result))
+    analysis_path.write_text(json.dumps({k: v for k, v in result.items() if k != "insights"}))
     clear_job(session_dir)
     return result
 

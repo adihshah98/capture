@@ -1060,6 +1060,9 @@ def get_analysis(request: Request, session_id: str, project: Optional[str] = Que
     if cached:
         if "status" not in cached:
             cached = {**cached, "status": "done"}
+        insights = analyze.read_insights(session_dir)
+        if insights:
+            cached = {**cached, "insights": insights}
         return cached
     job = analyze.read_job(session_dir)
     if job and job.get("status") in ("running", "error"):

@@ -663,11 +663,15 @@ class TestAnalysisStatus(ServerCase):
         (session / "analysis.json").write_text(
             json.dumps({"text": "hello", "model": "test", "frame_count": 1, "warnings": []})
         )
+        (session / "analysis.insights.json").write_text(
+            json.dumps({"themes": ["shipping_hesitation"], "confidence": "medium"})
+        )
         status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
         self.assertEqual(status, 200)
         data = json.loads(body)
         self.assertEqual(data["text"], "hello")
         self.assertEqual(data["status"], "done")
+        self.assertEqual(data["insights"]["themes"], ["shipping_hesitation"])
 
     def test_get_returns_running_job(self):
         sid = "b" * 32
@@ -701,11 +705,23 @@ class TestCohort(ServerCase):
             headers={"Content-Type": "application/json"},
         )[0]
 
-    def seed_analysis(self, sid):
+    def seed_analysis(self, sid, themes=None):
         session = self.data_dir / "sessions" / sid
         (session / "analysis.json").write_text(
             json.dumps({"text": f"write-up for {sid[:8]}", "model": "test", "frame_count": 1, "warnings": []})
         )
+        if themes is not None:
+            (session / "analysis.insights.json").write_text(
+                json.dumps(
+                    {
+                        "themes": themes,
+                        "friction": [],
+                        "pages": ["pdp"],
+                        "outcome_signals": [],
+                        "confidence": "medium",
+                    }
+                )
+            )
 
     def test_get_without_cohort_is_404(self):
         status, body = request(f"{self.base}/api/cohort")
@@ -715,13 +731,13 @@ class TestCohort(ServerCase):
     def test_samples_purchased_and_all_and_reuses_cached_analysis(self):
         purchased = [f"buy{i}" + "x" * 28 for i in range(3)]
         plain = [f"all{i}" + "x" * 28 for i in range(4)]
-        for sid in purchased:
+        for i, sid in enumerate(purchased):
             self.assertEqual(self.ingest(sid), 200)
             self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-            self.seed_analysis(sid)
-        for sid in plain:
+            self.seed_analysis(sid, themes=["shipping_hesitation", "checkout_friction"][i % 2 :])
+        for i, sid in enumerate(plain):
             self.assertEqual(self.ingest(sid), 200)
-            self.seed_analysis(sid)
+            self.seed_analysis(sid, themes=["exit_before_checkout"] if i % 2 == 0 else [])
 
         status, body = request(
             f"{self.base}/api/cohort?purchased=2&all=2",
@@ -757,6 +773,8 @@ class TestCohort(ServerCase):
             self.assertEqual(entry["analysis"], "analysis.json")
             self.assertTrue(entry.get("text", "").startswith("write-up for"))
             self.assertIn("standout", entry)
+            self.assertIn("themes", entry)
+            self.assertEqual(entry.get("insights_file"), "analysis.insights.json")
 
         saved = json.loads((self.data_dir / "cohort.json").read_text())
         self.assertEqual(saved["id"], cohort["id"])
@@ -818,6 +836,67 @@ class TestCohortSampling(unittest.TestCase):
         self.assertEqual(analyze.standout_line(text), "Shipping fee surprise at checkout.")
         self.assertEqual(analyze.standout_line("## Hello\nPlain opener."), "Plain opener.")
 
+
+class TestInsightsNormalize(unittest.TestCase):
+    def test_maps_vocab_and_other_and_drops_junk(self):
+        import analyze
+
+        out = analyze.normalize_insights(
+            {
+                "themes": [
+                    "shipping_hesitation",
+                    "Shipping_Hesitation",
+                    "weird freeform",
+                    "other:Custom Tag",
+                    "",
+                    12,
+                ],
+                "pages": ["pdp", "PDP", "spaceship", "cart"],
+                "outcome_signals": ["reached_checkout", "teleported", "purchased"],
+                "friction": [
+                    {"atMs": 42000, "label": "Rage on Add to Cart"},
+                    {"label": ""},
+                    "nope",
+                    {"atMs": -1, "label": "bad_time"},
+                ],
+                "confidence": "high",
+            }
+        )
+        self.assertEqual(
+            out["themes"],
+            ["shipping_hesitation", "other:weird_freeform", "other:custom_tag"],
+        )
+        self.assertEqual(out["pages"], ["pdp", "cart"])
+        self.assertEqual(out["outcome_signals"], ["reached_checkout", "purchased"])
+        self.assertEqual(
+            out["friction"],
+            [
+                {"label": "rage_on_add_to_cart", "atMs": 42000},
+                {"label": "bad_time"},
+            ],
+        )
+        self.assertEqual(out["confidence"], "high")
+
+    def test_empty_and_bad_input(self):
+        import analyze
+
+        self.assertEqual(analyze.normalize_insights(None)["themes"], [])
+        self.assertEqual(analyze.normalize_insights([])["confidence"], "low")
+        self.assertEqual(analyze.normalize_insights({"confidence": "nope"})["confidence"], "low")
+
+    def test_write_and_read_insights_sidecar(self):
+        import analyze
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp)
+            payload = analyze.normalize_insights(
+                {"themes": ["checkout_friction"], "confidence": "medium"}
+            )
+            analyze.write_insights(session, payload)
+            self.assertTrue((session / "analysis.insights.json").is_file())
+            self.assertEqual(analyze.read_insights(session)["themes"], ["checkout_friction"])
+            analyze.clear_analysis(session)
+            self.assertIsNone(analyze.read_insights(session))
 
 
 if __name__ == "__main__":
