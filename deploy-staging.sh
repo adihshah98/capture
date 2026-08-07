@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HOST="${CAPTURE_STAGING_HOST:-ec2-user@ec2-54-212-242-132.us-west-2.compute.amazonaws.com}"
+HOST="${CAPTURE_STAGING_HOST:-ec2-user@ec2-34-214-222-44.us-west-2.compute.amazonaws.com}"
 KEY="${CAPTURE_KEY:-$HOME/Downloads/capture-key.pem}"
 
 if ! curl -sf -m 2 http://localhost:8080/healthz >/dev/null; then
