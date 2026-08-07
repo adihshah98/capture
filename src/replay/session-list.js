@@ -14,17 +14,27 @@ const accountEmailEl = document.getElementById('account-email');
 export let allSessions = [];
 let sessionFilter = 'all';
 let searchTerm = '';
-const FILTERS = {
-  all: () => true,
-  checkout: (s) => Boolean(s.order),
-  purchased: (s) => Boolean(s.order && s.order.purchased_at),
-  rage: (s) => Boolean(s.interactions && s.interactions.rage),
-};
 
-function matchesSearch(s) {
-  if (!searchTerm) return true;
-  return [s.url, s.visitor_id, s.session_id]
-    .some((v) => typeof v === 'string' && v.toLowerCase().includes(searchTerm));
+// Server-side paging: the filter and search terms are query params, so `allSessions`
+// holds the pages fetched so far for the *current* filter, newest first.
+const PAGE_SIZE = 50;
+let nextOffset = 0;
+let totalSessions = 0;
+let loadingPage = false;
+let loadSeq = 0;
+
+/**
+ * Session metadata by id. Falls back to the server when the session is not in the
+ * pages loaded so far — a deep link can point at a session many pages down.
+ */
+export async function findSession(sessionId) {
+  const loaded = allSessions.find((s) => s.session_id === sessionId);
+  if (loaded) return loaded;
+  try {
+    return await fetchJson(`/api/sessions/${sessionId}${projectQuery()}`);
+  } catch {
+    return undefined;
+  }
 }
 
 function showListMessage(message) {
@@ -77,14 +87,55 @@ async function loadProjects() {
   return true;
 }
 
+function sessionsUrl(offset) {
+  const params = new URLSearchParams();
+  if (currentProject) params.set('project', currentProject);
+  params.set('limit', String(PAGE_SIZE));
+  params.set('offset', String(offset));
+  if (sessionFilter !== 'all') params.set('filter', sessionFilter);
+  if (searchTerm) params.set('q', searchTerm);
+  return `/api/sessions?${params}`;
+}
+
 async function loadSessions() {
+  const seq = ++loadSeq;
+  nextOffset = 0;
+  totalSessions = 0;
+  loadingPage = true;
   try {
-    const body = await fetchJson(`/api/sessions${projectQuery()}`);
+    const body = await fetchJson(sessionsUrl(0));
+    if (seq !== loadSeq) return;
     allSessions = Array.isArray(body.sessions) ? body.sessions : [];
+    nextOffset = body.next_offset ?? null;
+    totalSessions = body.total || allSessions.length;
   } catch (err) {
+    if (seq !== loadSeq) return;
     allSessions = [];
+    nextOffset = null;
     showListMessage(`Could not load sessions. ${err.message}`);
     return;
+  } finally {
+    if (seq === loadSeq) loadingPage = false;
+  }
+  renderSessionList();
+}
+
+async function loadMoreSessions() {
+  if (loadingPage || nextOffset === null) return;
+  const seq = loadSeq;
+  loadingPage = true;
+  try {
+    const body = await fetchJson(sessionsUrl(nextOffset));
+    if (seq !== loadSeq) return;
+    allSessions = allSessions.concat(Array.isArray(body.sessions) ? body.sessions : []);
+    nextOffset = body.next_offset ?? null;
+    totalSessions = body.total || allSessions.length;
+  } catch (err) {
+    if (seq !== loadSeq) return;
+    console.error('capture: could not load more sessions', err);
+    return;
+  } finally {
+    if (seq === loadSeq) loadingPage = false;
   }
   renderSessionList();
 }
@@ -92,14 +143,14 @@ async function loadSessions() {
 function renderSessionList() {
   sessionListEl.innerHTML = '';
   if (allSessions.length === 0) {
-    showListMessage('No sessions yet. Open the demo page and click around.');
+    showListMessage(
+      sessionFilter === 'all' && !searchTerm
+        ? 'No sessions yet. Open the demo page and click around.'
+        : 'No sessions match this filter.'
+    );
     return;
   }
-  const sessions = allSessions.filter((s) => FILTERS[sessionFilter](s) && matchesSearch(s));
-  if (sessions.length === 0) {
-    showListMessage('No sessions match this filter.');
-    return;
-  }
+  const sessions = allSessions;
 
   const appendSession = (session, grouped) => {
     const li = document.createElement('li');
@@ -182,10 +233,36 @@ function renderSessionList() {
     }
   }
 
+  if (loadedSessionId) {
+    const active = sessionListEl.querySelector(`li[data-sid="${CSS.escape(loadedSessionId)}"]`);
+    if (active) active.classList.add('active');
+  }
+
+  if (nextOffset !== null) {
+    const li = document.createElement('li');
+    li.className = 'load-more';
+    const button = document.createElement('button');
+    button.textContent = loadingPage
+      ? 'Loading…'
+      : `Load more (${allSessions.length} of ${totalSessions})`;
+    button.disabled = loadingPage;
+    button.addEventListener('click', loadMoreSessions);
+    li.appendChild(button);
+    sessionListEl.appendChild(li);
+  }
+
   if (!loadedSessionId) {
-    const target =
-      (boot.s && sessionListEl.querySelector(`li[data-sid="${CSS.escape(boot.s)}"]`)) ||
-      sessionListEl.querySelector('li:not(.visitor-header)');
+    const deepLinked = boot.s && sessionListEl.querySelector(`li[data-sid="${CSS.escape(boot.s)}"]`);
+    if (boot.s && !deepLinked) {
+      // The linked session sits beyond the pages loaded so far; play it anyway
+      // rather than silently falling back to the newest one.
+      const sessionId = boot.s;
+      if (boot.t) setPendingSeek(boot.t * 1000);
+      boot.s = '';
+      loadSession(sessionId);
+      return;
+    }
+    const target = deepLinked || sessionListEl.querySelector('li:not(.visitor-header):not(.load-more)');
     if (target) {
       if (boot.s && target.dataset.sid === boot.s && boot.t) setPendingSeek(boot.t * 1000);
       boot.s = '';
@@ -234,9 +311,16 @@ projectSelectEl.addEventListener('change', () => {
 });
 
 const searchEl = document.getElementById('session-search');
+let searchTimer = null;
 searchEl.addEventListener('input', () => {
-  searchTerm = searchEl.value.trim().toLowerCase();
-  renderSessionList();
+  // Each keystroke is a new server query now, so wait for a pause in typing.
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    const term = searchEl.value.trim().toLowerCase();
+    if (term === searchTerm) return;
+    searchTerm = term;
+    loadSessions();
+  }, 250);
 });
 
 const filterButtons = document.querySelectorAll('#session-filter button');
@@ -244,6 +328,14 @@ for (const btn of filterButtons) {
   btn.addEventListener('click', () => {
     sessionFilter = btn.dataset.filter;
     filterButtons.forEach((b) => b.classList.toggle('active', b === btn));
-    renderSessionList();
+    loadSessions();
   });
 }
+
+// Infinite scroll: the sidebar is the scrolling element, not the <ul> inside it.
+const sidebarEl = sessionListEl.closest('aside');
+sidebarEl.addEventListener('scroll', () => {
+  if (loadingPage || nextOffset === null) return;
+  const { scrollTop, clientHeight, scrollHeight } = sidebarEl;
+  if (scrollHeight - (scrollTop + clientHeight) < 200) loadMoreSessions();
+});

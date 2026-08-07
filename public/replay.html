@@ -48,6 +48,11 @@
     #session-list li.visitor-header { display: block; cursor: default; padding: 10px 8px 2px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }
     #session-list li.visitor-header:hover { background: none; }
     #session-list li.grouped { margin-left: 8px; border-left: 2px solid #e3e5e8; border-radius: 0 6px 6px 0; }
+    #session-list li.load-more { display: block; padding: 8px; cursor: default; }
+    #session-list li.load-more:hover { background: none; }
+    #session-list li.load-more button { width: 100%; font-size: 11px; padding: 6px 10px; border-radius: 6px; border: 1px solid #d0d3d8; background: #fff; color: #6b7280; cursor: pointer; }
+    #session-list li.load-more button:hover:not(:disabled) { border-color: #4f46e5; color: #4f46e5; }
+    #session-list li.load-more button:disabled { cursor: default; color: #9ca3af; }
     main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; grid-template-rows: auto minmax(0, 1fr); gap: 12px; min-width: 0; min-height: 0; }
     .title-row { display: flex; align-items: baseline; gap: 8px; grid-column: 1 / -1; }
     #window-tabs { display: flex; gap: 4px; }

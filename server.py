@@ -655,56 +655,137 @@ def list_projects(request: Request):
         **({"email": email} if email else {}),
     }
 
+def session_info(entry: Path) -> Optional[dict]:
+    """Metadata for one session directory, or None if it holds no chunks."""
+    chunks = chunk_files(entry)
+    if not chunks:
+        return None
+    info = {
+        "session_id": entry.name,
+        "first_seen": chunk_timestamp(chunks[0]),
+        "last_seen": chunk_timestamp(chunks[-1]),
+        "chunk_count": len(chunks),
+        "bytes": sum(c.stat().st_size for c in chunks),
+    }
+    order_path = entry / ORDER_FILE
+    if order_path.is_file():
+        try:
+            info["order"] = json.loads(order_path.read_text())
+        except Exception:
+            pass
+    meta_path = entry / VISITOR_FILE
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text())
+            info.update({k: meta[k] for k in ("visitor_id", "url") if isinstance(meta.get(k), str)})
+        except Exception:
+            pass
+    interactions_path = entry / INTERACTIONS_FILE
+    if interactions_path.is_file():
+        try:
+            interactions = json.loads(interactions_path.read_text())
+            if isinstance(interactions, dict):
+                info["interactions"] = interactions
+        except Exception:
+            pass
+    device_path = entry / DEVICE_FILE
+    if device_path.is_file():
+        try:
+            device = json.loads(device_path.read_text())
+            if isinstance(device, dict):
+                info["device"] = device
+        except Exception:
+            pass
+    return info
+
+SESSION_FILTERS = {
+    "all": lambda s: True,
+    "checkout": lambda s: bool(s.get("order")),
+    "purchased": lambda s: bool((s.get("order") or {}).get("purchased_at")),
+    "rage": lambda s: bool((s.get("interactions") or {}).get("rage")),
+}
+
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+def session_matches_search(info: dict, term: str) -> bool:
+    if not term:
+        return True
+    return any(
+        isinstance(info.get(key), str) and term in info[key].lower()
+        for key in ("url", "visitor_id", "session_id")
+    )
+
 @app.get("/api/sessions")
-def list_sessions(request: Request, project: Optional[str] = Query(None)):
+def list_sessions(
+    request: Request,
+    project: Optional[str] = Query(None),
+    limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    offset: int = Query(0, ge=0),
+    filter: str = Query("all"),
+    q: Optional[str] = Query(None),
+):
+    """One page of sessions, newest first.
+
+    `offset` counts visitor groups, not sessions, and `limit` is a soft cap: a
+    visitor's sessions are always returned together so the grouped list in the UI
+    stays correct, which means a page holding one oversized group may exceed it.
+    Page by following `next_offset` until it comes back null.
+    """
     require_read_access(request, project)
+    if filter not in SESSION_FILTERS:
+        raise ApiError(400, "unknown filter")
     pool = resolve_pool(project)
+
+    matches = SESSION_FILTERS[filter]
+    term = (q or "").strip().lower()
     sessions = []
     for entry in pool.iterdir() if pool.is_dir() else []:
         if not entry.is_dir():
             continue
-        chunks = chunk_files(entry)
-        if not chunks:
+        info = session_info(entry)
+        if info is None or not matches(info) or not session_matches_search(info, term):
             continue
-        info = {
-            "session_id": entry.name,
-            "first_seen": chunk_timestamp(chunks[0]),
-            "last_seen": chunk_timestamp(chunks[-1]),
-            "chunk_count": len(chunks),
-            "bytes": sum(c.stat().st_size for c in chunks),
-        }
-        order_path = entry / ORDER_FILE
-        if order_path.is_file():
-            try:
-                info["order"] = json.loads(order_path.read_text())
-            except Exception:
-                pass
-        meta_path = entry / VISITOR_FILE
-        if meta_path.is_file():
-            try:
-                meta = json.loads(meta_path.read_text())
-                info.update({k: meta[k] for k in ("visitor_id", "url") if isinstance(meta.get(k), str)})
-            except Exception:
-                pass
-        interactions_path = entry / INTERACTIONS_FILE
-        if interactions_path.is_file():
-            try:
-                interactions = json.loads(interactions_path.read_text())
-                if isinstance(interactions, dict):
-                    info["interactions"] = interactions
-            except Exception:
-                pass
-        device_path = entry / DEVICE_FILE
-        if device_path.is_file():
-            try:
-                device = json.loads(device_path.read_text())
-                if isinstance(device, dict):
-                    info["device"] = device
-            except Exception:
-                pass
         sessions.append(info)
     sessions.sort(key=lambda s: s["last_seen"], reverse=True)
-    return {"sessions": sessions}
+
+    # Visitors are grouped in the UI, so a visitor's sessions must never straddle a
+    # page boundary — order by the visitor's most recent session, then keep the
+    # group whole and page over groups instead of individual sessions.
+    groups: dict = {}
+    for info in sessions:
+        key = info.get("visitor_id") or f"\x00{info['session_id']}"
+        groups.setdefault(key, []).append(info)
+
+    ordered = list(groups.values())
+    page, consumed = [], 0
+    for group in ordered[offset:]:
+        # Always take at least one group, so a visitor with more sessions than
+        # `limit` still makes progress instead of stalling the cursor forever.
+        if page and len(page) + len(group) > limit:
+            break
+        page.extend(group)
+        consumed += 1
+        if len(page) >= limit:
+            break
+
+    next_offset = offset + consumed
+    return {
+        "sessions": page,
+        "total": len(sessions),
+        "total_groups": len(ordered),
+        "offset": offset,
+        "next_offset": next_offset if next_offset < len(ordered) else None,
+    }
+
+@app.get("/api/sessions/{session_id}")
+def get_session(request: Request, session_id: str, project: Optional[str] = Query(None)):
+    """Metadata for one session, for deep links that land outside the loaded pages."""
+    require_read_access(request, project)
+    info = session_info(resolve_session(session_id, project))
+    if info is None:
+        raise ApiError(404, "not found")
+    return info
 
 @app.delete("/api/sessions/{session_id}")
 def delete_session(request: Request, session_id: str, project: Optional[str] = Query(None)):

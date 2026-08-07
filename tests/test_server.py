@@ -237,6 +237,95 @@ class TestOrderEvents(ServerCase):
     def test_unrecorded_session_is_404(self):
         self.assertEqual(self.order("r" * 32, {"event": "checkout_completed"}), 404)
 
+class TestSessionPaging(ServerCase):
+    EVENTS = [{"type": 4, "data": {}}]
+
+    def page(self, query=""):
+        return json.loads(request(f"{self.base}/api/sessions{query}")[1])
+
+    def test_limit_caps_the_page_and_next_offset_walks_the_rest(self):
+        # The class shares one data dir, so page over everything and assert on the
+        # ids this test created rather than on absolute totals.
+        mine = {f"{i:032d}" for i in range(7)}
+        for session in mine:
+            self.assertEqual(self.ingest(session), 200)
+        total = self.page("?limit=1")["total"]
+
+        seen, offset, pages = [], 0, 0
+        while offset is not None:
+            body = self.page(f"?limit=3&offset={offset}")
+            # `limit` is a soft cap: a single visitor's group is never split, so one
+            # page may exceed it, but only ever by returning that one whole group.
+            self.assertTrue(len(body["sessions"]) <= 3 or len({s["visitor_id"] for s in body["sessions"]}) == 1)
+            self.assertEqual(body["total"], total)
+            seen.extend(s["session_id"] for s in body["sessions"])
+            offset = body["next_offset"]
+            pages += 1
+            self.assertLess(pages, 50, "next_offset did not terminate")
+
+        self.assertEqual(len(seen), len(set(seen)), "a session appeared on two pages")
+        self.assertEqual(len(seen), total, "paging did not cover every session")
+        self.assertTrue(mine.issubset(set(seen)))
+
+    def test_pages_are_ordered_newest_first(self):
+        body = self.page("?limit=100")
+        last_seen = [s["last_seen"] for s in body["sessions"]]
+        self.assertEqual(last_seen, sorted(last_seen, reverse=True))
+
+    def test_a_visitors_sessions_are_never_split_across_pages(self):
+        for i in range(4):
+            self.assertEqual(
+                self.ingest(f"g{i:031d}", {"events": self.EVENTS, "visitor_id": "vis-group"}), 200
+            )
+
+        offset, pages_with_visitor = 0, 0
+        while offset is not None:
+            body = self.page(f"?limit=2&offset={offset}")
+            if any(s.get("visitor_id") == "vis-group" for s in body["sessions"]):
+                pages_with_visitor += 1
+                found = [s for s in body["sessions"] if s.get("visitor_id") == "vis-group"]
+                self.assertEqual(len(found), 4, "visitor group was split across pages")
+            offset = body["next_offset"]
+        self.assertEqual(pages_with_visitor, 1)
+
+    def test_filter_and_search_are_applied_server_side(self):
+        session = "f" * 32
+        self.assertEqual(
+            self.ingest(session, {"events": self.EVENTS, "url": "https://shop.test/checkout"}), 200
+        )
+        request(
+            f"{self.base}/order?session_id={session}",
+            method="POST",
+            data=json.dumps({"event": "checkout_completed"}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+
+        purchased = self.page("?filter=purchased")
+        self.assertIn(session, [s["session_id"] for s in purchased["sessions"]])
+        self.assertTrue(all(s["order"].get("purchased_at") for s in purchased["sessions"]))
+        self.assertLess(purchased["total"], self.page("?limit=1")["total"])
+
+        hit = self.page("?q=shop.test")
+        self.assertIn(session, [s["session_id"] for s in hit["sessions"]])
+        self.assertEqual(self.page("?q=nothing-matches-this")["sessions"], [])
+
+    def test_unknown_filter_is_rejected(self):
+        self.assertEqual(request(f"{self.base}/api/sessions?filter=bogus")[0], 400)
+
+    def test_out_of_range_limit_is_rejected(self):
+        self.assertEqual(request(f"{self.base}/api/sessions?limit=0")[0], 422)
+        self.assertEqual(request(f"{self.base}/api/sessions?limit=9999")[0], 422)
+
+    def test_single_session_endpoint_serves_deep_links(self):
+        session = "d" * 32
+        self.assertEqual(self.ingest(session, {"events": self.EVENTS, "visitor_id": "vis-deep"}), 200)
+        status, body = request(f"{self.base}/api/sessions/{session}")
+        self.assertEqual(status, 200)
+        info = json.loads(body)
+        self.assertEqual(info["session_id"], session)
+        self.assertEqual(info["visitor_id"], "vis-deep")
+        self.assertEqual(request(f"{self.base}/api/sessions/{'z' * 32}")[0], 404)
+
 class TestVisitorId(ServerCase):
     EVENTS = [{"type": 4, "data": {}}]
 
