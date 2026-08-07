@@ -240,7 +240,6 @@ class TestOrderEvents(ServerCase):
 
     def test_unrecorded_session_is_404(self):
         self.assertEqual(self.order("r" * 32, {"event": "checkout_completed"}), 404)
-
 class TestVisitorId(ServerCase):
     EVENTS = [{"type": 4, "data": {}}]
 
@@ -581,6 +580,14 @@ class TestSessionPaging(ServerCase):
         self.assertEqual(sorted(seen), sorted(ids))
         last_seen = [s["last_seen"] for s in self.list()["sessions"]]
         self.assertEqual(last_seen, sorted(last_seen, reverse=True))
+
+    def test_single_session_endpoint_serves_deep_links(self):
+        sid = "deep" + "x" * 28
+        self.assertEqual(self.ingest(sid), 200)
+        status, body = request(f"{self.base}/api/sessions/{sid}")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["session_id"], sid)
+        self.assertEqual(request(f"{self.base}/api/sessions/{'gone' + 'x' * 28}")[0], 404)
 
 class TestSessionFilters(ServerCase):
     EVENTS = [{"type": 4, "data": {}}]

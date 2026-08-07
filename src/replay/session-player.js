@@ -3,7 +3,7 @@ import { currentProject, fetchJson, projectQuery } from './api.js';
 import { writeHash } from './deeplink.js';
 import { formatBytes, hostPath } from './format.js';
 import { clearSessionDetails, renderSessionDetails } from './session-details.js';
-import { allSessions } from './session-list.js';
+import { findSession } from './session-list.js';
 import {
   currentSpeed,
   renderScrubberChrome,
@@ -58,10 +58,13 @@ export async function loadSession(sessionId) {
   const seq = ++loadSeq;
   loadedSessionId = sessionId;
   writeHash({ p: currentProject, s: sessionId });
-  renderSessionDetails(allSessions.find((s) => s.session_id === sessionId));
   sessionTitleEl.textContent = `Session ${sessionId}`;
   sessionTitleEl.title = '';
   showCachedAnalysis(sessionId);
+
+  const session = await findSession(sessionId);
+  if (seq !== loadSeq) return;
+  renderSessionDetails(session);
 
   let manifest;
   try {
@@ -88,7 +91,6 @@ export async function loadSession(sessionId) {
     return;
   }
   const bytesOf = (chunks) => chunks.reduce((n, c) => n + c.bytes, 0);
-  const session = allSessions.find((s) => s.session_id === sessionId);
   const order = session && session.order;
   const checkoutAt = order && (order.checkout_started_at || order.purchased_at);
   let checkoutWindow = null;
@@ -119,13 +121,13 @@ export async function loadSession(sessionId) {
         (key === checkoutWindow ? ' · reached checkout from this tab' : '');
       btn.dataset.window = key;
       btn.addEventListener('click', () => {
-        playWindow(sessionId, byWindow.get(key), key, ++loadSeq, key === defaultWindow);
+        playWindow(sessionId, byWindow.get(key), key, ++loadSeq, session, key === defaultWindow);
       });
       windowTabsEl.appendChild(btn);
     }
   }
 
-  playWindow(sessionId, byWindow.get(defaultWindow), defaultWindow, seq, true);
+  playWindow(sessionId, byWindow.get(defaultWindow), defaultWindow, seq, session, true);
 }
 
 function dedupe(events) {
@@ -219,7 +221,7 @@ function destroyPlayer() {
   assetErrorsEl.hidden = true;
 }
 
-async function playWindow(sessionId, chunks, windowKey, seq, showOrder) {
+async function playWindow(sessionId, chunks, windowKey, seq, session, showOrder) {
   for (const btn of windowTabsEl.querySelectorAll('button')) {
     btn.classList.toggle('active', btn.dataset.window === windowKey);
   }
@@ -266,7 +268,6 @@ async function playWindow(sessionId, chunks, windowKey, seq, showOrder) {
   allEvents.sort((a, b) => a.timestamp - b.timestamp);
   const playable = dropUnrenderable(dedupe(allEvents));
 
-  const session = allSessions.find((s) => s.session_id === sessionId);
   if (allEvents.length < 2) {
     showPlayerMessage(
       results.includes(null) ? 'Could not load this session.' : 'Not enough events to replay yet.'

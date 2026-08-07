@@ -11,12 +11,13 @@ const sessionListEl = document.getElementById('session-list');
 const accountEl = document.getElementById('account');
 const accountEmailEl = document.getElementById('account-email');
 
-export let allSessions = [];
+let allSessions = [];
 let sessionFilter = 'all';
 let searchTerm = '';
 let nextCursor = null;
 let totalSessions = 0;
 let loadSeq = 0;
+let loadingMore = false;
 
 function sessionsUrl(cursor) {
   const params = new URLSearchParams();
@@ -25,6 +26,16 @@ function sessionsUrl(cursor) {
   if (searchTerm) params.set('q', searchTerm);
   if (cursor) params.set('cursor', cursor);
   return `/api/sessions?${params}`;
+}
+
+export async function findSession(sessionId) {
+  const loaded = allSessions.find((s) => s.session_id === sessionId);
+  if (loaded) return loaded;
+  try {
+    return await fetchJson(`/api/sessions/${sessionId}${projectQuery()}`);
+  } catch {
+    return undefined;
+  }
 }
 
 function showListMessage(message) {
@@ -93,9 +104,9 @@ async function loadSessions({ append = false } = {}) {
     return;
   }
   if (seq !== loadSeq) return;
-  allSessions = allSessions.concat(Array.isArray(body.sessions) ? body.sessions : []);
+  allSessions = allSessions.concat(body.sessions || []);
   nextCursor = body.cursor || null;
-  totalSessions = typeof body.total === 'number' ? body.total : allSessions.length;
+  totalSessions = body.total ?? allSessions.length;
   renderSessionList();
 }
 
@@ -104,18 +115,17 @@ const loadMoreObserver = new IntersectionObserver((entries) => {
 });
 
 function loadMore() {
-  if (!nextCursor || loadMoreObserver.pending) return;
-  loadMoreObserver.pending = true;
+  if (!nextCursor || loadingMore) return;
+  loadingMore = true;
   loadSessions({ append: true }).finally(() => {
-    loadMoreObserver.pending = false;
+    loadingMore = false;
   });
 }
 
 function renderSessionList() {
   loadMoreObserver.disconnect();
   sessionListEl.innerHTML = '';
-  const sessions = allSessions;
-  if (sessions.length === 0) {
+  if (allSessions.length === 0) {
     showListMessage(
       sessionFilter !== 'all' || searchTerm
         ? 'No sessions match this filter.'
@@ -185,13 +195,13 @@ function renderSessionList() {
   };
 
   const byVisitor = new Map();
-  for (const session of sessions) {
+  for (const session of allSessions) {
     if (!session.visitor_id) continue;
     if (!byVisitor.has(session.visitor_id)) byVisitor.set(session.visitor_id, []);
     byVisitor.get(session.visitor_id).push(session);
   }
   const rendered = new Set();
-  for (const session of sessions) {
+  for (const session of allSessions) {
     if (rendered.has(session)) continue;
     const group = session.visitor_id ? byVisitor.get(session.visitor_id) : null;
     if (group && group.length > 1) {
@@ -208,7 +218,7 @@ function renderSessionList() {
   if (nextCursor) {
     const li = document.createElement('li');
     li.className = 'load-more';
-    li.textContent = `Load more (${totalSessions - sessions.length} remaining)`;
+    li.textContent = `Load more (${totalSessions - allSessions.length} remaining)`;
     li.addEventListener('click', () => {
       li.textContent = 'Loading…';
       loadMore();
@@ -278,7 +288,7 @@ let searchDebounce;
 searchEl.addEventListener('input', () => {
   searchTerm = searchEl.value.trim().toLowerCase();
   clearTimeout(searchDebounce);
-  searchDebounce = setTimeout(loadSessions, 250);
+  searchDebounce = setTimeout(() => loadSessions(), 250);
 });
 
 const filterButtons = document.querySelectorAll('#session-filter button');
