@@ -203,7 +203,12 @@ async def call_gemini(digest: dict, frames: list) -> str:
         contents=[types.Content(role="user", parts=parts)],
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
-            max_output_tokens=1400,
+            # max_output_tokens covers thinking as well as the answer, and a
+            # long frame sequence makes the model think hard: at 1400 with no
+            # budget, thinking ate all but ~50 tokens and the analysis came
+            # back cut off mid-sentence.
+            max_output_tokens=4000,
+            thinking_config=types.ThinkingConfig(thinking_budget=1024),
             temperature=0.3,
         ),
     )
