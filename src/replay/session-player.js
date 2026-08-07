@@ -128,6 +128,25 @@ export async function loadSession(sessionId) {
   playWindow(sessionId, byWindow.get(defaultWindow), defaultWindow, seq, true);
 }
 
+function dropUnrenderable(events) {
+  const out = [];
+  let dead = true;
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    if (e.type === 2) {
+      dead = false;
+    } else if (e.type === 4) {
+      const next = events.slice(i + 1).find((x) => x.type === 4 || x.type === 2);
+      dead = !(next && next.type === 2);
+      if (dead) continue;
+    } else if (dead && e.type === 3) {
+      continue;
+    }
+    out.push(e);
+  }
+  return out;
+}
+
 function destroyPlayer() {
   if (player) player.destroy();
   player = null;
@@ -172,6 +191,7 @@ async function playWindow(sessionId, chunks, windowKey, seq, showOrder) {
     allEvents.push(...events);
   }
   allEvents.sort((a, b) => a.timestamp - b.timestamp);
+  const playable = dropUnrenderable(allEvents);
 
   const session = allSessions.find((s) => s.session_id === sessionId);
   if (allEvents.length < 2) {
@@ -186,7 +206,7 @@ async function playWindow(sessionId, chunks, windowKey, seq, showOrder) {
   renderTimeline(allEvents, navigations, session, showOrder);
   let lastHashWrite = 0;
   player = new CapturePlayer({
-    events: allEvents,
+    events: playable,
     mount: stageEl,
     speed: currentSpeed(),
     skipInactive: skipEnabled(),

@@ -168,7 +168,7 @@ export class CapturePlayer {
 
   clampRenderable(ms) {
     const first = this.snapshotOffsets[0];
-    return first !== undefined && ms < first ? first : ms;
+    return first !== undefined && ms <= first ? first + 1 : ms;
   }
 
   tick() {
