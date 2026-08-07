@@ -24,6 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 ANALYSIS_FILE = "analysis.json"
 ANALYSIS_INSIGHTS_FILE = "analysis.insights.json"
+ANALYSIS_QA_FILE = "analysis.qa.json"
 ANALYSIS_STATUS_FILE = "analysis.status.json"
 ANALYSIS_DIR = ".analysis"
 COHORT_FILE = "cohort.json"
@@ -198,11 +199,16 @@ def clear_analysis(session_dir: Path) -> None:
     """Drop a finished result so a re-analyze starts clean."""
     (session_dir / ANALYSIS_FILE).unlink(missing_ok=True)
     (session_dir / ANALYSIS_INSIGHTS_FILE).unlink(missing_ok=True)
+    (session_dir / ANALYSIS_QA_FILE).unlink(missing_ok=True)
     shutil.rmtree(session_dir / ANALYSIS_DIR, ignore_errors=True)
 
 
 def insights_path(session_dir: Path) -> Path:
     return session_dir / ANALYSIS_INSIGHTS_FILE
+
+
+def qa_path(session_dir: Path) -> Path:
+    return session_dir / ANALYSIS_QA_FILE
 
 
 def read_insights(session_dir: Path) -> Optional[dict]:
@@ -220,6 +226,79 @@ def write_insights(session_dir: Path, insights: dict) -> dict:
     path = insights_path(session_dir)
     path.write_text(json.dumps(insights, indent=2))
     return insights
+
+
+def read_qa(session_dir: Path) -> Optional[dict]:
+    path = qa_path(session_dir)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def write_qa(session_dir: Path, qa: dict) -> dict:
+    path = qa_path(session_dir)
+    path.write_text(json.dumps(qa, indent=2))
+    return qa
+
+
+def normalize_qa(raw: Optional[dict], insights: Optional[dict] = None) -> dict:
+    """Normalize a QA payload. Themes default to insights themes when omitted."""
+    base_themes = list((insights or {}).get("themes") or [])
+    data = raw if isinstance(raw, dict) else {}
+    status = data.get("status") or "pending"
+    if status not in ("pending", "accepted", "rejected"):
+        status = "pending"
+    themes = []
+    seen = set()
+    source = data["themes"] if isinstance(data.get("themes"), list) else base_themes
+    for item in source:
+        theme = normalize_theme(item)
+        if theme and theme not in seen:
+            seen.add(theme)
+            themes.append(theme)
+    out = {
+        "status": status,
+        "themes": themes,
+        "updated_at": int(data.get("updated_at") or time.time() * 1000),
+    }
+    note = data.get("note")
+    if isinstance(note, str) and note.strip():
+        out["note"] = note.strip()[:500]
+    return out
+
+
+def effective_themes(insights: Optional[dict], qa: Optional[dict]) -> list:
+    """Themes used for rollups: QA override when present, else insights."""
+    source = None
+    if qa and isinstance(qa.get("themes"), list):
+        source = qa["themes"]
+    elif insights:
+        source = insights.get("themes") or []
+    else:
+        source = []
+    themes = []
+    seen = set()
+    for item in source:
+        theme = normalize_theme(item)
+        if theme and theme not in seen:
+            seen.add(theme)
+            themes.append(theme)
+    return themes
+
+
+def qa_allows_rollup(qa: Optional[dict], qa_mode: str = "include_pending") -> bool:
+    """Whether this session's themes enter Compare rollups."""
+    status = (qa or {}).get("status") or "pending"
+    if qa_mode == "raw":
+        return True
+    if qa_mode == "accepted":
+        return status == "accepted"
+    # include_pending: accepted + pending/no-QA; exclude rejected
+    return status != "rejected"
 
 
 def empty_insights(error: Optional[str] = None) -> dict:
@@ -354,6 +433,8 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
         row.pop("insights", None)
         row.pop("insights_file", None)
         row.pop("attribution", None)
+        row.pop("qa", None)
+        row.pop("qa_status", None)
         session_dir = pool / row["session_id"]
         cached = read_analysis(session_dir)
         job = read_job(session_dir)
@@ -362,6 +443,11 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
             row["analysis"] = ANALYSIS_FILE
             if insights_path(session_dir).is_file():
                 row["insights_file"] = ANALYSIS_INSIGHTS_FILE
+            qa = read_qa(session_dir)
+            if qa:
+                row["qa_status"] = qa.get("status") or "pending"
+            else:
+                row["qa_status"] = "pending"
             row.pop("error", None)
             done += 1
         elif job and job.get("status") == "running":
@@ -446,9 +532,17 @@ def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
                 if cached.get("frame_count") is not None:
                     row["frame_count"] = cached["frame_count"]
             insights = read_insights(session_dir)
-            if insights:
-                row["insights"] = insights
-                row["themes"] = list(insights.get("themes") or [])
+            qa = read_qa(session_dir)
+            if qa:
+                row["qa"] = qa
+                row["qa_status"] = qa.get("status") or "pending"
+            else:
+                row["qa_status"] = "pending"
+            if insights or qa:
+                themes = effective_themes(insights, qa)
+                row["themes"] = themes
+                if insights:
+                    row["insights"] = {**insights, "themes": themes}
         sessions.append(row)
     return {**cohort, "sessions": sessions}
 
@@ -462,6 +556,62 @@ def count_themes(theme_lists) -> dict:
                 continue
             counts[theme] = counts.get(theme, 0) + 1
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def theme_examples(rows: list, theme: str, limit: int = 5) -> list:
+    """Short example cards for sessions that carry a theme."""
+    examples = []
+    for row in rows:
+        themes = row.get("themes") or []
+        if theme not in themes:
+            continue
+        attr = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
+        examples.append(
+            {
+                "session_id": row.get("session_id"),
+                "outcome": row.get("outcome"),
+                "standout": row.get("standout") or "",
+                "campaign": attr.get("utm_campaign"),
+                "utm_source": attr.get("utm_source"),
+                "meta": bool(attr.get("fbclid")) or is_meta_attribution(attr),
+                "themes": themes,
+            }
+        )
+        if len(examples) >= limit:
+            break
+    return examples
+
+
+def annotate_theme_stats(theme_counts_map: dict, rows: list) -> list:
+    """List of {theme, count, one_off, examples} sorted by frequency."""
+    out = []
+    for theme, count in sorted(theme_counts_map.items(), key=lambda kv: (-kv[1], kv[0])):
+        out.append(
+            {
+                "theme": theme,
+                "count": count,
+                "one_off": count == 1,
+                "examples": theme_examples(rows, theme),
+            }
+        )
+    return out
+
+
+def theme_cooccurrence(rows: list, limit: int = 10) -> list:
+    """Top theme pairs that co-occur in the same session."""
+    pair_counts: dict = {}
+    for row in rows:
+        themes = sorted({t for t in (row.get("themes") or []) if isinstance(t, str) and t})
+        for i, a in enumerate(themes):
+            for b in themes[i + 1 :]:
+                key = (a, b)
+                pair_counts[key] = pair_counts.get(key, 0) + 1
+    ranked = sorted(pair_counts.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
+    return [
+        {"themes": [a, b], "count": n}
+        for (a, b), n in ranked[:limit]
+        if n >= 2
+    ]
 
 
 def segment_label(attribution: Optional[dict], group_by: str) -> str:
@@ -749,14 +899,30 @@ def build_slice_contrast(rows: list, slice_a: Optional[dict], slice_b: Optional[
     enriched_b.sort(key=lambda x: (-(x["b_rate"] - x["a_rate"]), -x["b_count"], x["theme"]))
     shared.sort(key=lambda x: (-min(x["a_count"], x["b_count"]), x["theme"]))
 
+    for item in enriched_a:
+        item["one_off"] = item["a_count"] == 1
+        item["examples"] = theme_examples(rows_a, item["theme"])
+    for item in enriched_b:
+        item["one_off"] = item["b_count"] == 1
+        item["examples"] = theme_examples(rows_b, item["theme"])
+    for item in shared:
+        item["examples"] = theme_examples(rows_a + rows_b, item["theme"])
+
     contrast = {
         "a": {
             "label": label_a,
             "spec": spec_a,
             "n": n_a,
             "themes": dict(sorted(themes_a.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "theme_details": annotate_theme_stats(themes_a, rows_a),
             "sessions": [
-                {"session_id": r.get("session_id"), "outcome": r.get("outcome"), "themes": r.get("themes") or []}
+                {
+                    "session_id": r.get("session_id"),
+                    "outcome": r.get("outcome"),
+                    "themes": r.get("themes") or [],
+                    "standout": r.get("standout") or "",
+                    "attribution": r.get("attribution"),
+                }
                 for r in rows_a
             ],
         },
@@ -765,8 +931,15 @@ def build_slice_contrast(rows: list, slice_a: Optional[dict], slice_b: Optional[
             "spec": {"complement": True} if complement else spec_b,
             "n": n_b,
             "themes": dict(sorted(themes_b.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "theme_details": annotate_theme_stats(themes_b, rows_b),
             "sessions": [
-                {"session_id": r.get("session_id"), "outcome": r.get("outcome"), "themes": r.get("themes") or []}
+                {
+                    "session_id": r.get("session_id"),
+                    "outcome": r.get("outcome"),
+                    "themes": r.get("themes") or [],
+                    "standout": r.get("standout") or "",
+                    "attribution": r.get("attribution"),
+                }
                 for r in rows_b
             ],
         },
@@ -855,14 +1028,17 @@ def build_insights_summary(
     matrix = [[seg["themes"].get(theme, 0) for seg in segments] for theme in theme_names]
 
     contrast = build_slice_contrast(rows, slice_a, slice_b)
+    all_theme_counts = count_themes(by_outcome["purchased"] + by_outcome["all"])
 
     return {
         "group_by": group_by,
         "n": len(rows),
         "themes": [
-            {"theme": theme, "count": count}
-            for theme, count in count_themes(by_outcome["purchased"] + by_outcome["all"]).items()
+            {"theme": theme, "count": count, "one_off": count == 1}
+            for theme, count in all_theme_counts.items()
         ],
+        "theme_details": annotate_theme_stats(all_theme_counts, rows),
+        "cooccurrence": theme_cooccurrence(rows),
         "by_outcome": outcome_summary,
         "enriched": enriched,
         "by_segment": segments,

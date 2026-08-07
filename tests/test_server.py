@@ -1057,6 +1057,121 @@ class TestInsightsSummary(ServerCase):
         self.assertIn("shipping_hesitation", data["contrast"]["a"]["themes"])
         self.assertTrue(any("shipping" in line.lower() for line in data["narrative"]))
 
+    def test_qa_accept_reject_and_accepted_only_rollup(self):
+        buy = "qabuyx" + "x" * 26
+        other = "qaallx" + "x" * 26
+        self.seed(
+            buy,
+            purchased=True,
+            url="https://brand.example/?utm_source=facebook&fbclid=1",
+            themes=["shipping_hesitation", "bogus_hallucination"],
+        )
+        self.seed(
+            other,
+            url="https://brand.example/?utm_source=google",
+            themes=["exit_before_checkout"],
+        )
+        status, body = request(
+            f"{self.base}/api/cohort?purchased=1&all=1", method="POST", data=b""
+        )
+        self.assertEqual(status, 202, body)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if json.loads(request(f"{self.base}/api/cohort")[1])["status"] == "done":
+                break
+            time.sleep(0.1)
+
+        # Edit themes + accept purchased session
+        status, body = request(
+            f"{self.base}/api/sessions/{buy}/qa",
+            method="PUT",
+            data=json.dumps(
+                {"status": "accepted", "themes": ["shipping_hesitation", "checkout_friction"]}
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200, body)
+        qa = json.loads(body)
+        self.assertEqual(qa["status"], "accepted")
+        self.assertEqual(qa["themes"], ["shipping_hesitation", "checkout_friction"])
+
+        # Reject the other session
+        status, body = request(
+            f"{self.base}/api/sessions/{other}/qa",
+            method="PUT",
+            data=json.dumps({"status": "rejected"}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200, body)
+
+        status, body = request(
+            f"{self.base}/api/insights/summary?qa_mode=include_pending&contrast=purchased_vs_all"
+        )
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["n"], 1)
+        self.assertIn("checkout_friction", data["contrast"]["a"]["themes"])
+        self.assertNotIn("bogus_hallucination", data["contrast"]["a"]["themes"])
+        self.assertEqual(data["qa_counts"]["accepted"], 1)
+        self.assertEqual(data["qa_counts"]["rejected"], 1)
+
+        status, body = request(
+            f"{self.base}/api/insights/summary?qa_mode=accepted&contrast=purchased_vs_all"
+        )
+        self.assertEqual(status, 200)
+        accepted = json.loads(body)
+        self.assertEqual(accepted["n"], 1)
+
+        status, body = request(
+            f"{self.base}/api/insights/summary?qa_mode=raw&contrast=purchased_vs_all"
+        )
+        self.assertEqual(status, 200)
+        raw = json.loads(body)
+        self.assertEqual(raw["n"], 2)
+
+    def test_theme_details_mark_one_offs_and_examples(self):
+        import analyze
+
+        summary = analyze.build_insights_summary(
+            [
+                {
+                    "session_id": "s1",
+                    "outcome": "purchased",
+                    "attribution": {"utm_campaign": "spring"},
+                    "themes": ["shipping_hesitation"],
+                    "standout": "Paused on shipping table",
+                },
+                {
+                    "session_id": "s2",
+                    "outcome": "purchased",
+                    "attribution": {"utm_campaign": "spring"},
+                    "themes": ["shipping_hesitation", "checkout_friction"],
+                    "standout": "Rage on pay",
+                },
+                {
+                    "session_id": "s3",
+                    "outcome": "all",
+                    "attribution": None,
+                    "themes": ["exit_before_checkout"],
+                    "standout": "Bounced from PDP",
+                },
+            ]
+        )
+        details = {d["theme"]: d for d in summary["theme_details"]}
+        self.assertFalse(details["shipping_hesitation"]["one_off"])
+        self.assertTrue(details["checkout_friction"]["one_off"])
+        self.assertEqual(len(details["shipping_hesitation"]["examples"]), 2)
+        self.assertEqual(
+            details["shipping_hesitation"]["examples"][0]["standout"],
+            "Paused on shipping table",
+        )
+        # Co-occurrence needs the pair in ≥2 sessions; with one pair session it stays empty.
+        self.assertEqual(summary["cooccurrence"], [])
+        # Enriched contrast examples still list the singleton theme.
+        enriched = {e["theme"]: e for e in summary["contrast"]["enriched_a"]}
+        self.assertTrue(enriched["checkout_friction"]["one_off"])
+        self.assertEqual(enriched["checkout_friction"]["examples"][0]["session_id"], "s2")
+
 
 class TestCohortUnavailable(ServerCase):
     env = {"GEMINI_API_KEY": ""}

@@ -1139,13 +1139,69 @@ def get_analysis(request: Request, session_id: str, project: Optional[str] = Que
         if "status" not in cached:
             cached = {**cached, "status": "done"}
         insights = analyze.read_insights(session_dir)
+        qa = analyze.read_qa(session_dir)
         if insights:
-            cached = {**cached, "insights": insights}
+            themes = analyze.effective_themes(insights, qa)
+            cached = {**cached, "insights": {**insights, "themes": themes}}
+        if qa:
+            cached = {**cached, "qa": qa}
+        elif insights:
+            cached = {
+                **cached,
+                "qa": {
+                    "status": "pending",
+                    "themes": list(insights.get("themes") or []),
+                },
+            }
+        info = session_info(session_dir)
+        if info:
+            if info.get("order"):
+                cached = {**cached, "order": info["order"]}
+            if info.get("attribution"):
+                cached = {**cached, "attribution": info["attribution"]}
+            elif info.get("url"):
+                attr = parse_attribution(info["url"])
+                if attr:
+                    cached = {**cached, "attribution": attr}
         return cached
     job = analyze.read_job(session_dir)
     if job and job.get("status") in ("running", "error"):
         return job
     raise ApiError(404, "not analyzed yet")
+
+
+@app.get("/api/sessions/{session_id}/qa")
+def get_qa(request: Request, session_id: str, project: Optional[str] = Query(None)):
+    require_read_access(request, project)
+    session_dir = resolve_session(session_id, project)
+    insights = analyze.read_insights(session_dir)
+    qa = analyze.read_qa(session_dir)
+    if not insights and not analyze.read_analysis(session_dir):
+        raise ApiError(404, "not analyzed yet")
+    normalized = analyze.normalize_qa(qa, insights)
+    return {
+        **normalized,
+        "vocab": list(analyze.THEME_VOCAB),
+        "raw_themes": list((insights or {}).get("themes") or []),
+    }
+
+
+@app.put("/api/sessions/{session_id}/qa")
+async def put_qa(request: Request, session_id: str, project: Optional[str] = Query(None)):
+    require_read_access(request, project)
+    session_dir = resolve_session(session_id, project)
+    insights = analyze.read_insights(session_dir)
+    if not insights and not analyze.read_analysis(session_dir):
+        raise ApiError(404, "not analyzed yet")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise ApiError(400, "bad payload")
+    if not isinstance(payload, dict):
+        raise ApiError(400, "bad payload")
+    qa = analyze.normalize_qa({**payload, "updated_at": int(time.time() * 1000)}, insights)
+    analyze.write_qa(session_dir, qa)
+    return {**qa, "vocab": list(analyze.THEME_VOCAB)}
 
 @app.post("/api/sessions/{session_id}/analysis")
 async def create_analysis(
@@ -1253,28 +1309,40 @@ def cohort_response(pool: Path, cohort: dict) -> dict:
     )
 
 
-def _summary_rows_from_cohort(pool: Path, cohort: dict, outcome_filter: Optional[str]) -> list:
+def _summary_rows_from_cohort(
+    pool: Path, cohort: dict, outcome_filter: Optional[str], qa_mode: str = "include_pending"
+) -> list:
     attrs = _attribution_map(pool)
     rows = []
     for entry in cohort.get("sessions") or []:
         outcome = "purchased" if entry.get("filter") == "purchased" else "all"
         if outcome_filter == "purchased" and outcome != "purchased":
             continue
-        insights = analyze.read_insights(pool / entry["session_id"])
-        if not insights:
+        session_dir = pool / entry["session_id"]
+        insights = analyze.read_insights(session_dir)
+        qa = analyze.read_qa(session_dir)
+        if not insights and not qa:
             continue
+        if not analyze.qa_allows_rollup(qa, qa_mode):
+            continue
+        cached = analyze.read_analysis(session_dir) or {}
+        text = cached.get("text") if isinstance(cached.get("text"), str) else ""
         rows.append(
             {
                 "session_id": entry["session_id"],
                 "outcome": outcome,
                 "attribution": attrs.get(entry["session_id"]),
-                "themes": list(insights.get("themes") or []),
+                "themes": analyze.effective_themes(insights, qa),
+                "standout": analyze.standout_line(text) if text else "",
+                "qa_status": (qa or {}).get("status") or "pending",
             }
         )
     return rows
 
 
-def _summary_rows_from_pool(pool: Path, outcome_filter: Optional[str]) -> list:
+def _summary_rows_from_pool(
+    pool: Path, outcome_filter: Optional[str], qa_mode: str = "include_pending"
+) -> list:
     attrs = _attribution_map(pool)
     where = ["pool = ?"]
     params: list = [pool_key(pool)]
@@ -1289,8 +1357,12 @@ def _summary_rows_from_pool(pool: Path, outcome_filter: Optional[str]) -> list:
         ).fetchall()
     out = []
     for sid, order_raw in rows:
-        insights = analyze.read_insights(pool / sid)
-        if not insights:
+        session_dir = pool / sid
+        insights = analyze.read_insights(session_dir)
+        qa = analyze.read_qa(session_dir)
+        if not insights and not qa:
+            continue
+        if not analyze.qa_allows_rollup(qa, qa_mode):
             continue
         purchased = False
         if order_raw:
@@ -1299,12 +1371,16 @@ def _summary_rows_from_pool(pool: Path, outcome_filter: Optional[str]) -> list:
                 purchased = isinstance(order, dict) and order.get("purchased_at") is not None
             except Exception:
                 purchased = False
+        cached = analyze.read_analysis(session_dir) or {}
+        text = cached.get("text") if isinstance(cached.get("text"), str) else ""
         out.append(
             {
                 "session_id": sid,
                 "outcome": "purchased" if purchased else "all",
                 "attribution": attrs.get(sid),
-                "themes": list(insights.get("themes") or []),
+                "themes": analyze.effective_themes(insights, qa),
+                "standout": analyze.standout_line(text) if text else "",
+                "qa_status": (qa or {}).get("status") or "pending",
             }
         )
     return out
@@ -1332,6 +1408,7 @@ def insights_summary(
     b_fbclid: Optional[str] = Query(None),
     # Preset shortcuts: purchased_vs_all | meta_vs_rest | meta_purchased_vs_rest | google_vs_meta
     contrast: Optional[str] = Query(None),
+    qa_mode: str = Query("include_pending"),
 ):
     """Theme × segment rollup plus A/B intersection contrast and narrative."""
     require_read_access(request, project)
@@ -1339,18 +1416,20 @@ def insights_summary(
         raise ApiError(400, f"group_by must be one of: {', '.join(sorted(SUMMARY_GROUP_BY))}")
     if filter and filter not in SESSION_FILTERS and filter != "all":
         raise ApiError(400, "unknown filter")
+    if qa_mode not in ("include_pending", "accepted", "raw"):
+        raise ApiError(400, "qa_mode must be include_pending, accepted, or raw")
     pool = resolve_pool(project)
     outcome_filter = None if not filter or filter == "all" else filter
 
     if scope == "all":
-        rows = _summary_rows_from_pool(pool, outcome_filter)
+        rows = _summary_rows_from_pool(pool, outcome_filter, qa_mode)
         label = None
     else:
         cohort = analyze.read_cohort(pool)
         if not cohort:
             raise ApiError(404, "no cohort yet")
         live = analyze.enrich_cohort_status(pool, cohort)
-        rows = _summary_rows_from_cohort(pool, live, outcome_filter)
+        rows = _summary_rows_from_cohort(pool, live, outcome_filter, qa_mode)
         label = live.get("label")
 
     slice_a, slice_b = _parse_contrast_slices(
@@ -1361,10 +1440,28 @@ def insights_summary(
     summary = analyze.build_insights_summary(
         rows, group_by=group_by, slice_a=slice_a, slice_b=slice_b
     )
+    qa_counts = {"accepted": 0, "pending": 0, "rejected": 0}
+    # Count QA across cohort (or pool rows before filter) for the UI badge.
+    if scope != "all":
+        cohort = analyze.read_cohort(pool)
+        for entry in (cohort or {}).get("sessions") or []:
+            qa = analyze.read_qa(pool / entry["session_id"])
+            status = (qa or {}).get("status") or "pending"
+            if status in qa_counts:
+                qa_counts[status] += 1
+            else:
+                qa_counts["pending"] += 1
+    else:
+        for row in rows:
+            status = row.get("qa_status") or "pending"
+            if status in qa_counts:
+                qa_counts[status] += 1
     return {
         **summary,
         "scope": "all" if scope == "all" else "cohort",
         "filter": filter or None,
+        "qa_mode": qa_mode,
+        "qa_counts": qa_counts,
         **({"label": label} if label else {}),
     }
 
