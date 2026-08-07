@@ -353,6 +353,7 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
         row.pop("themes", None)
         row.pop("insights", None)
         row.pop("insights_file", None)
+        row.pop("attribution", None)
         session_dir = pool / row["session_id"]
         cached = read_analysis(session_dir)
         job = read_job(session_dir)

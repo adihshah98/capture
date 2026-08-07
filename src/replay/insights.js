@@ -15,12 +15,15 @@ const compareLabelEl = document.getElementById('compare-label');
 const compareProgressEl = document.getElementById('compare-progress');
 const tableWrapEl = document.getElementById('cohort-table-wrap');
 const compareBodyEl = document.getElementById('compare-body');
+const compareSummaryEl = document.getElementById('compare-summary');
+const groupByEl = document.getElementById('compare-group-by');
 const queuePanelEl = document.getElementById('insights-queue');
 const comparePanelEl = document.getElementById('insights-compare');
 
 let analysisEnabled = false;
 let pollTimer = null;
 let cohort = null;
+let summary = null;
 let activeTab = 'compare';
 let autoSwitchedForRun = false;
 
@@ -58,6 +61,14 @@ function cohortUrl({ start = false, force = false } = {}) {
   }
   const qs = params.toString();
   return `/api/cohort${qs ? `?${qs}` : ''}`;
+}
+
+function summaryUrl() {
+  const params = new URLSearchParams();
+  if (currentProject) params.set('project', currentProject);
+  const groupBy = groupByEl.value || 'none';
+  params.set('group_by', groupBy);
+  return `/api/insights/summary?${params.toString()}`;
 }
 
 function stopPolling() {
@@ -191,9 +202,16 @@ function renderQueue(body) {
 function insightCard(entry) {
   const status = entry.status || 'queued';
   const pending = status !== 'done' || !entry.text;
+  const campaign = entry.attribution && entry.attribution.utm_campaign;
+  const attrBadge = campaign
+    ? `<span class="attr-badge">${escapeHtml(campaign)}</span>`
+    : entry.attribution && entry.attribution.fbclid
+      ? `<span class="attr-badge">Meta</span>`
+      : '';
   const head = `
     <div class="insight-card-head">
       <span class="sid">${escapeHtml(entry.session_id.slice(0, 8))}…</span>
+      ${attrBadge}
       <span class="badge ${escapeAttr(status)}">${escapeHtml(status)}</span>
       <button type="button" class="open" data-sid="${escapeAttr(entry.session_id)}">Open</button>
     </div>`;
@@ -229,6 +247,88 @@ function insightCard(entry) {
       <div class="md">${renderMarkdown(entry.text)}</div>
     </details>
   </article>`;
+}
+
+function themeCountChips(themesMap) {
+  const entries = Object.entries(themesMap || {});
+  if (!entries.length) return '<p class="status-note">No themes yet.</p>';
+  return `<div class="theme-chips">${entries
+    .map(
+      ([theme, count]) =>
+        `<span class="theme-chip">${escapeHtml(theme)}<span class="n">×${count}</span></span>`
+    )
+    .join('')}</div>`;
+}
+
+function renderSummary(body) {
+  summary = body;
+  if (!body || !body.n) {
+    compareSummaryEl.hidden = true;
+    compareSummaryEl.innerHTML = '';
+    return;
+  }
+  const purchased = body.by_outcome?.purchased || { n: 0, themes: {} };
+  const all = body.by_outcome?.all || { n: 0, themes: {} };
+  const enrichedPurchased = (body.enriched?.purchased || [])
+    .map(
+      (e) =>
+        `<li><span class="delta">+${e.purchased - e.all}</span> ${escapeHtml(e.theme)} ` +
+        `<span class="meta">(${e.purchased} vs ${e.all})</span></li>`
+    )
+    .join('');
+  const enrichedAll = (body.enriched?.all || [])
+    .map(
+      (e) =>
+        `<li><span class="delta">+${e.all - e.purchased}</span> ${escapeHtml(e.theme)} ` +
+        `<span class="meta">(${e.all} vs ${e.purchased})</span></li>`
+    )
+    .join('');
+
+  let table = '';
+  const matrix = body.theme_x_segment;
+  if (matrix && matrix.cols && matrix.cols.length && matrix.rows && matrix.rows.length && body.group_by !== 'none') {
+    const head = matrix.cols.map((c) => `<th>${escapeHtml(c)}</th>`).join('');
+    const rows = matrix.rows
+      .map((theme, i) => {
+        const cells = (matrix.counts[i] || [])
+          .map((n) => `<td class="num">${n || ''}</td>`)
+          .join('');
+        return `<tr><td>${escapeHtml(theme)}</td>${cells}</tr>`;
+      })
+      .join('');
+    table = `<div class="theme-table-wrap"><table class="theme-table"><thead><tr><th>Theme</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  compareSummaryEl.hidden = false;
+  compareSummaryEl.innerHTML = `
+    <div class="summary-grid">
+      <div class="summary-col">
+        <h4>Purchased themes <span class="n">(n=${purchased.n})</span></h4>
+        ${themeCountChips(purchased.themes)}
+        ${enrichedPurchased ? `<ul class="enriched"><li><strong>Enriched here</strong></li>${enrichedPurchased}</ul>` : ''}
+      </div>
+      <div class="summary-col">
+        <h4>All / non-purchase themes <span class="n">(n=${all.n})</span></h4>
+        ${themeCountChips(all.themes)}
+        ${enrichedAll ? `<ul class="enriched"><li><strong>Enriched here</strong></li>${enrichedAll}</ul>` : ''}
+      </div>
+    </div>
+    ${table}`;
+}
+
+async function refreshSummary() {
+  try {
+    const body = await fetchJson(summaryUrl());
+    renderSummary(body);
+  } catch (err) {
+    if (/no cohort/i.test(err.message || '')) {
+      compareSummaryEl.hidden = true;
+      compareSummaryEl.innerHTML = '';
+      return;
+    }
+    compareSummaryEl.hidden = false;
+    compareSummaryEl.innerHTML = `<p class="status-note error">${escapeHtml(err.message)}</p>`;
+  }
 }
 
 function renderCompare(body) {
@@ -275,10 +375,18 @@ function renderCohort(body) {
   syncRunButtons();
   renderQueue(body);
   renderCompare(body);
+  const hasInsights = (body.sessions || []).some(
+    (s) => s.status === 'done' && ((s.themes && s.themes.length) || s.text)
+  );
+  if (hasInsights) {
+    refreshSummary().catch(() => {});
+  } else {
+    compareSummaryEl.hidden = true;
+    compareSummaryEl.innerHTML = '';
+  }
 
   // While a run is in flight, show Queue; once write-ups land, jump to Compare.
   const running = body.status === 'running' || body.status === 'queued';
-  const hasInsights = (body.sessions || []).some((s) => s.status === 'done' && s.text);
   if (running && !autoSwitchedForRun) {
     setTab('queue');
     autoSwitchedForRun = true;
@@ -301,12 +409,15 @@ function renderCohort(body) {
 
 function resetEmptyState() {
   cohort = null;
+  summary = null;
   autoSwitchedForRun = false;
   labelEl.textContent = 'Sample cohort';
   compareLabelEl.textContent = 'Purchased vs all';
   progressEl.textContent = 'No cohort yet';
   compareProgressEl.textContent = 'No cohort yet';
   syncRunButtons();
+  compareSummaryEl.hidden = true;
+  compareSummaryEl.innerHTML = '';
   renderEmpty(
     'Run a sample cohort to analyze 5 purchased and 5 other sessions. Open any row to watch it in Replay.'
   );
@@ -362,6 +473,9 @@ export function initInsights() {
   });
   runBtn.addEventListener('click', runCohort);
   runBtnCompare.addEventListener('click', runCohort);
+  groupByEl.addEventListener('change', () => {
+    if (cohort) refreshSummary().catch(() => {});
+  });
   setTab('compare');
 
   const projectSelect = document.getElementById('project-select');

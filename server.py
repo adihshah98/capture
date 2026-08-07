@@ -1173,7 +1173,7 @@ def get_cohort(request: Request, project: Optional[str] = Query(None)):
     # Persist refreshed status so a crashed runner still shows accurate counts.
     if live.get("sessions") != cohort.get("sessions") or live.get("status") != cohort.get("status"):
         analyze.write_cohort(pool, live)
-    return analyze.attach_cohort_insights(pool, live)
+    return cohort_response(pool, live)
 
 @app.post("/api/cohort")
 async def create_cohort(
@@ -1192,7 +1192,7 @@ async def create_cohort(
         cohort = analyze.read_cohort(pool)
         if cohort:
             return JSONResponse(
-                analyze.attach_cohort_insights(pool, analyze.enrich_cohort_status(pool, cohort)),
+                cohort_response(pool, analyze.enrich_cohort_status(pool, cohort)),
                 status_code=202,
             )
         return JSONResponse({"status": "running"}, status_code=202)
@@ -1208,7 +1208,7 @@ async def create_cohort(
     task = asyncio.create_task(_run_cohort_job(pool, force=force))
     _cohort_tasks[key] = task
     return JSONResponse(
-        analyze.attach_cohort_insights(pool, analyze.enrich_cohort_status(pool, cohort)),
+        cohort_response(pool, analyze.enrich_cohort_status(pool, cohort)),
         status_code=202,
     )
 
@@ -1231,6 +1231,26 @@ def _attribution_map(pool: Path) -> dict:
         if isinstance(value, dict) and value:
             out[sid] = value
     return out
+
+
+def stamp_cohort_attribution(pool: Path, cohort: dict) -> dict:
+    attrs = _attribution_map(pool)
+    sessions = []
+    for entry in cohort.get("sessions") or []:
+        row = dict(entry)
+        attr = attrs.get(row.get("session_id"))
+        if attr:
+            row["attribution"] = attr
+        else:
+            row.pop("attribution", None)
+        sessions.append(row)
+    return {**cohort, "sessions": sessions}
+
+
+def cohort_response(pool: Path, cohort: dict) -> dict:
+    return stamp_cohort_attribution(
+        pool, analyze.attach_cohort_insights(pool, cohort)
+    )
 
 
 def _summary_rows_from_cohort(pool: Path, cohort: dict, outcome_filter: Optional[str]) -> list:
