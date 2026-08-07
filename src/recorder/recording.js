@@ -1,5 +1,6 @@
 import { record } from 'rrweb';
 import { startClickCapture } from './clicks.js';
+import { startViewportCapture } from './viewport.js';
 import { config } from './config.js';
 import { getSession } from './identity.js';
 import { status, setStatus, setSessionId } from './state.js';
@@ -9,11 +10,16 @@ import { gatesSatisfied, checkUrlTriggers } from './triggers.js';
 export let stopFn = null;
 
 let stopClicks = null;
+let stopViewport = null;
 
 function stopClickListener() {
   if (stopClicks) {
     stopClicks();
     stopClicks = null;
+  }
+  if (stopViewport) {
+    stopViewport();
+    stopViewport = null;
   }
 }
 
@@ -118,6 +124,7 @@ export function startRecording() {
     (payload) => record.addCustomEvent('capture-click', payload),
     config
   );
+  stopViewport = startViewportCapture((payload) => record.addCustomEvent('capture-viewport', payload));
   scheduleFlush();
   checkUrlTriggers();
 }

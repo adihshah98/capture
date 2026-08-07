@@ -348,7 +348,8 @@ async def ingest(
     interactions = index_interactions(session_dir, events)
     device = index_device(session_dir, events)
     size = chunk_path.stat().st_size
-    index_ingest(pool, session_id, now, size, meta, interactions, device)
+    first_ts, last_ts = event_span(events) or (now, now)
+    index_ingest(pool, session_id, first_ts, last_ts, size, meta, interactions, device)
     _pool_bytes[pool] = pool_bytes(pool) + size
 
     return {"status": "ok", "stored": len(events)}
@@ -523,6 +524,14 @@ def chunk_timestamp(path: Path) -> int:
     except ValueError:
         return 0
 
+def event_span(events: list) -> Optional[tuple]:
+    ts = [
+        e["timestamp"]
+        for e in events
+        if isinstance(e, dict) and isinstance(e.get("timestamp"), (int, float))
+    ]
+    return (int(min(ts)), int(max(ts))) if ts else None
+
 def chunk_files(session_dir: Path) -> list:
 
     return sorted(
@@ -610,7 +619,7 @@ def index_conn() -> sqlite3.Connection:
 def pool_key(pool: Path) -> str:
     return "" if pool == DATA_DIR else pool.parent.name
 
-def index_ingest(pool, session_id, ts, size, meta, interactions, device) -> None:
+def index_ingest(pool, session_id, first_ts, last_ts, size, meta, interactions, device) -> None:
     attribution = parse_attribution(meta.get("url"))
     with _index_lock:
         conn = index_conn()
@@ -632,7 +641,7 @@ def index_ingest(pool, session_id, ts, size, meta, interactions, device) -> None
                 attribution = coalesce(attribution, excluded.attribution)
             """,
             (
-                pool_key(pool), session_id, ts, ts, size,
+                pool_key(pool), session_id, first_ts, last_ts, size,
                 meta.get("visitor_id"), meta.get("url"),
                 json.dumps(interactions) if interactions else None,
                 json.dumps(device) if device else None,
@@ -666,10 +675,19 @@ def session_info(entry: Path) -> Optional[dict]:
     chunks = chunk_files(entry)
     if not chunks:
         return None
+    first = last = None
+    for chunk in chunks:
+        try:
+            span = event_span(json.loads(chunk.read_text()).get("events") or [])
+        except Exception:
+            span = None
+        if span:
+            first = span[0] if first is None else min(first, span[0])
+            last = span[1] if last is None else max(last, span[1])
     info = {
         "session_id": entry.name,
-        "first_seen": chunk_timestamp(chunks[0]),
-        "last_seen": chunk_timestamp(chunks[-1]),
+        "first_seen": first if first is not None else chunk_timestamp(chunks[0]),
+        "last_seen": last if last is not None else chunk_timestamp(chunks[-1]),
         "chunk_count": len(chunks),
         "bytes": sum(c.stat().st_size for c in chunks),
     }

@@ -83,11 +83,18 @@ export class CapturePlayer {
       .filter((e) => e.type === EventType.FullSnapshot)
       .map((e) => e.timestamp - this.startTs);
 
+    this.hasViewportData = events.some(
+      (e) => e.type === EventType.Custom && e.data && e.data.tag === 'capture-viewport'
+    );
     this.maxHeightByWidth = {};
+    let zoomed = false;
     for (const e of events) {
+      if (e.type === EventType.Custom && e.data && e.data.tag === 'capture-viewport') {
+        zoomed = !!(e.data.payload && e.data.payload.scale > 1.01);
+      }
       const d =
         e.type === EventType.Meta ||
-        (e.type === EventType.IncrementalSnapshot && e.data.source === IncrementalSource.ViewportResize)
+        (e.type === EventType.IncrementalSnapshot && e.data.source === IncrementalSource.ViewportResize && !zoomed)
           ? e.data
           : null;
       if (d && d.width) {
@@ -101,6 +108,7 @@ export class CapturePlayer {
     this.failedAssets = new Set();
     this.scrollTimers = [];
     this.recDims = null;
+    this.zoomView = null;
 
     this.replayer = new Replayer(events, {
       root: mount,
@@ -124,14 +132,26 @@ export class CapturePlayer {
     };
 
     this.replayer.on('resize', (dims) => {
+      if (this.hasViewportData && this.zoomView) {
+        this.syncZoom(this.zoomView);
+        return;
+      }
+      if (this.hasViewportData && this.recDims && dims.width < this.recDims.width) {
+        this.applyRecordedScroll();
+        return;
+      }
       const height = this.maxHeightByWidth[dims.width] || dims.height;
       if (this.recDims && this.recDims.width === dims.width && this.recDims.height === height) return;
       this.recDims = { width: dims.width, height };
       this.rescale();
     });
-    this.replayer.on('fullsnapshot-rebuilded', () => this.hookFrame());
+    this.replayer.on('fullsnapshot-rebuilded', () => {
+      this.zoomView = null;
+      this.hookFrame();
+    });
     this.replayer.on('custom-event', (e) => {
       if (e.data && e.data.tag === 'capture-click') this.clickPulse(e.data.payload);
+      if (e.data && e.data.tag === 'capture-viewport') this.syncZoom(e.data.payload);
     });
     this.replayer.on('finish', () => {
       if (this.playing) this.finish();
@@ -163,6 +183,21 @@ export class CapturePlayer {
     if (live.length >= 4) live[0].remove();
     wrapper.appendChild(pulse);
     setTimeout(() => pulse.remove(), 1800);
+  }
+
+  syncZoom(payload) {
+    this.zoomView = payload && payload.scale > 1.01 ? payload : null;
+    if (this.recDims) {
+      const frame = this.replayer.iframe;
+      if (
+        Number(frame.getAttribute('width')) !== this.recDims.width ||
+        Number(frame.getAttribute('height')) !== this.recDims.height
+      ) {
+        frame.setAttribute('width', this.recDims.width);
+        frame.setAttribute('height', this.recDims.height);
+      }
+    }
+    this.rescale();
   }
 
   hookFrame() {
@@ -306,17 +341,33 @@ export class CapturePlayer {
     const docId = mirror.getId(doc);
     const t = this.startTs + this.replayer.getCurrentTime();
     const byTarget = new Map();
+    let zoom = null;
+    let dims = null;
     for (const e of this.events) {
       if (e.timestamp > t) break;
       if (e.type === EventType.FullSnapshot && e.data.initialOffset) {
         byTarget.clear();
+        zoom = null;
         byTarget.set(docId, { x: e.data.initialOffset.left, y: e.data.initialOffset.top });
+      } else if (e.type === EventType.Meta) {
+        dims = { width: e.data.width, height: e.data.height };
       } else if (
         e.type === EventType.IncrementalSnapshot &&
         e.data.source === IncrementalSource.Scroll
       ) {
         byTarget.set(e.data.id, { x: e.data.x, y: e.data.y });
+      } else if (
+        e.type === EventType.IncrementalSnapshot &&
+        e.data.source === IncrementalSource.ViewportResize &&
+        !(zoom && zoom.scale > 1.01)
+      ) {
+        dims = { width: e.data.width, height: e.data.height };
+      } else if (e.type === EventType.Custom && e.data.tag === 'capture-viewport') {
+        zoom = e.data.payload;
       }
+    }
+    if (this.hasViewportData && dims) {
+      this.recDims = { width: dims.width, height: this.maxHeightByWidth[dims.width] || dims.height };
     }
     if (!byTarget.has(docId)) byTarget.set(docId, { x: 0, y: 0 });
     for (const [id, pos] of byTarget) {
@@ -327,6 +378,7 @@ export class CapturePlayer {
       const el = mirror.getNode(id);
       if (el && el.scrollTo) el.scrollTo({ left: pos.x, top: pos.y, behavior: 'auto' });
     }
+    if (this.hasViewportData) this.syncZoom(zoom);
   }
 
   scheduleScrollFix() {
@@ -352,10 +404,23 @@ export class CapturePlayer {
     if (!this.recDims) return;
     const w = this.mount.clientWidth;
     const h = this.mount.clientHeight;
-    let scale = Math.min(w / this.recDims.width, h / this.recDims.height);
+    let view = { x: 0, y: 0, w: this.recDims.width, h: this.recDims.height };
+    if (this.zoomView) {
+      const win = this.replayer.iframe.contentWindow;
+      const zv = this.zoomView;
+      view = {
+        x: Math.min(Math.max(zv.x - (win ? win.scrollX : 0), 0), Math.max(this.recDims.width - zv.w, 0)),
+        y: Math.min(Math.max(zv.y - (win ? win.scrollY : 0), 0), Math.max(this.recDims.height - zv.h, 0)),
+        w: zv.w,
+        h: zv.h,
+      };
+    }
+    let scale = Math.min(w / view.w, h / view.h);
     if (!isFinite(scale) || scale <= 0) return;
     if (Math.abs(scale - 1) < 0.001) scale = 0.999;
-    this.replayer.wrapper.style.transform = `scale(${scale}) translate(-50%, -50%)`;
+    this.replayer.wrapper.style.transform = this.zoomView
+      ? `scale(${scale}) translate(${-(view.x + view.w / 2)}px, ${-(view.y + view.h / 2)}px)`
+      : `scale(${scale}) translate(-50%, -50%)`;
     this.replayer.wrapper.style.setProperty('--rescale', scale);
   }
 
