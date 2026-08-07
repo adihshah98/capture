@@ -89,9 +89,23 @@ class TestWorkOSScoping(ServerCase):
         for token in ("cap_alpha", "cap_beta"):
             session = cls.data_dir / "projects" / token / "sessions" / ("s" * 32)
             session.mkdir(parents=True)
-            (session / "1700000000000-abc123.json").write_text(
+            (session / f"{int(time.time() * 1000)}-abc123.json").write_text(
                 json.dumps({"events": [{"type": 4, "data": {}}]})
             )
+        cls.proc.terminate()
+        cls.proc.wait(timeout=10)
+        cls.start_server()
+        cookie = session_cookie("op@example.com", "user_op")
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            body = request(f"{cls.base}/api/sessions?project=cap_alpha", headers={"Cookie": cookie})[1]
+            try:
+                if json.loads(body)["sessions"]:
+                    return
+            except Exception:
+                pass
+            time.sleep(0.1)
+        raise RuntimeError("seeded sessions never appeared in the index")
 
     def api(self, path, cookie):
         return request(f"{self.base}{path}", headers={"Cookie": cookie})

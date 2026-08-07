@@ -8,7 +8,9 @@ import random
 import re
 import secrets
 import shutil
+import sqlite3
 import string
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -54,6 +56,7 @@ async def lifespan(_app):
         )
 
     async def loop():
+        await asyncio.to_thread(reconcile_index)
         while True:
             removed = await asyncio.to_thread(sweep_expired_sessions)
             if removed:
@@ -317,34 +320,36 @@ async def ingest(
     session_dir = pool / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
+    meta = {}
+    visitor, url = payload.get("visitor_id"), payload.get("url")
+    if isinstance(visitor, str) and SAFE_ID.match(visitor):
+        meta["visitor_id"] = visitor
+    if isinstance(url, str) and url:
+        meta["url"] = url[:2048]
     meta_path = session_dir / VISITOR_FILE
-    if not meta_path.is_file():
-        meta = {}
-        visitor, url = payload.get("visitor_id"), payload.get("url")
-        if isinstance(visitor, str) and SAFE_ID.match(visitor):
-            meta["visitor_id"] = visitor
-        if isinstance(url, str) and url:
-            meta["url"] = url[:2048]
-        if meta:
-            meta_path.write_text(json.dumps(meta))
+    if meta and not meta_path.is_file():
+        meta_path.write_text(json.dumps(meta))
 
+    now = int(time.time() * 1000)
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     window_prefix = re.sub(r"[^a-f0-9]", "", str(payload.get("window_id") or ""))[:8]
-    parts = [str(int(time.time() * 1000)), window_prefix, suffix]
+    parts = [str(now), window_prefix, suffix]
     chunk_path = session_dir / ("-".join(p for p in parts if p) + ".json")
     chunk_path.write_text(
         json.dumps(
             {
                 "window_id": payload.get("window_id"),
                 "url": payload.get("url"),
-                "received_at": int(time.time() * 1000),
+                "received_at": now,
                 "events": events,
             }
         )
     )
-    index_interactions(session_dir, events)
-    index_device(session_dir, events)
-    _pool_bytes[pool] = pool_bytes(pool) + chunk_path.stat().st_size
+    interactions = index_interactions(session_dir, events)
+    device = index_device(session_dir, events)
+    size = chunk_path.stat().st_size
+    index_ingest(pool, session_id, now, size, meta, interactions, device)
+    _pool_bytes[pool] = pool_bytes(pool) + size
 
     return {"status": "ok", "stored": len(events)}
 
@@ -357,10 +362,10 @@ INTERACTIONS_FILE = "interactions.json"
 
 DEVICE_FILE = "device.json"
 
-def index_device(session_dir: Path, events: list) -> None:
+def index_device(session_dir: Path, events: list) -> Optional[dict]:
     path = session_dir / DEVICE_FILE
     if path.exists():
-        return
+        return None
     for event in events:
         if not isinstance(event, dict) or event.get("type") != 4:
             continue
@@ -369,10 +374,12 @@ def index_device(session_dir: Path, events: list) -> None:
             continue
         width, height = data.get("width"), data.get("height")
         if isinstance(width, int) and isinstance(height, int) and width > 0:
-            path.write_text(json.dumps({"width": width, "height": height}))
-            return
+            device = {"width": width, "height": height}
+            path.write_text(json.dumps(device))
+            return device
+    return None
 
-def index_interactions(session_dir: Path, events: list) -> None:
+def index_interactions(session_dir: Path, events: list) -> Optional[dict]:
     clicks = rage = 0
     for event in events:
         if not isinstance(event, dict) or event.get("type") != 5:
@@ -385,7 +392,7 @@ def index_interactions(session_dir: Path, events: list) -> None:
         if isinstance(payload, dict) and payload.get("rage"):
             rage += 1
     if not clicks:
-        return
+        return None
     path = session_dir / INTERACTIONS_FILE
     try:
         counts = json.loads(path.read_text())
@@ -396,6 +403,7 @@ def index_interactions(session_dir: Path, events: list) -> None:
     counts["clicks"] = int(counts.get("clicks") or 0) + clicks
     counts["rage"] = int(counts.get("rage") or 0) + rage
     path.write_text(json.dumps(counts))
+    return counts
 
 @app.post("/order")
 async def order_event(
@@ -449,6 +457,7 @@ async def order_event(
         if isinstance(payload.get("currency"), str):
             order["currency"] = payload["currency"][:8]
     path.write_text(json.dumps(order))
+    index_order(pool, session_id, order)
     return {"status": "ok"}
 
 @app.get("/healthz")
@@ -527,6 +536,162 @@ def read_pool(project: Optional[str]) -> Optional[Path]:
     if SAFE_ID.match(project) and project in load_projects():
         return project_sessions_dir(project)
     return None
+
+INDEX_PATH = DATA_ROOT / "index.db"
+_index_lock = threading.Lock()
+_index_conn: Optional[sqlite3.Connection] = None
+
+def index_conn() -> sqlite3.Connection:
+    global _index_conn
+    if _index_conn is None:
+        conn = sqlite3.connect(INDEX_PATH, check_same_thread=False)
+        conn.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            CREATE TABLE IF NOT EXISTS sessions (
+                pool TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                first_seen INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                bytes INTEGER NOT NULL,
+                visitor_id TEXT,
+                url TEXT,
+                "order" TEXT,
+                interactions TEXT,
+                device TEXT,
+                PRIMARY KEY (pool, session_id)
+            );
+            CREATE INDEX IF NOT EXISTS sessions_recency
+                ON sessions (pool, last_seen DESC, session_id DESC);
+            """
+        )
+        _index_conn = conn
+    return _index_conn
+
+def pool_key(pool: Path) -> str:
+    return "" if pool == DATA_DIR else pool.parent.name
+
+def index_ingest(pool, session_id, ts, size, meta, interactions, device) -> None:
+    with _index_lock:
+        conn = index_conn()
+        conn.execute(
+            """
+            INSERT INTO sessions
+                (pool, session_id, first_seen, last_seen, chunk_count, bytes,
+                 visitor_id, url, interactions, device)
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+            ON CONFLICT (pool, session_id) DO UPDATE SET
+                first_seen = min(first_seen, excluded.first_seen),
+                last_seen = max(last_seen, excluded.last_seen),
+                chunk_count = chunk_count + 1,
+                bytes = bytes + excluded.bytes,
+                visitor_id = coalesce(visitor_id, excluded.visitor_id),
+                url = coalesce(url, excluded.url),
+                interactions = coalesce(excluded.interactions, interactions),
+                device = coalesce(device, excluded.device)
+            """,
+            (
+                pool_key(pool), session_id, ts, ts, size,
+                meta.get("visitor_id"), meta.get("url"),
+                json.dumps(interactions) if interactions else None,
+                json.dumps(device) if device else None,
+            ),
+        )
+        conn.commit()
+
+def index_order(pool: Path, session_id: str, order: dict) -> None:
+    with _index_lock:
+        conn = index_conn()
+        conn.execute(
+            'UPDATE sessions SET "order" = ? WHERE pool = ? AND session_id = ?',
+            (json.dumps(order), pool_key(pool), session_id),
+        )
+        conn.commit()
+
+def index_forget(pool: Path, session_id: Optional[str] = None) -> None:
+    with _index_lock:
+        conn = index_conn()
+        if session_id is None:
+            conn.execute("DELETE FROM sessions WHERE pool = ?", (pool_key(pool),))
+        else:
+            conn.execute(
+                "DELETE FROM sessions WHERE pool = ? AND session_id = ?",
+                (pool_key(pool), session_id),
+            )
+        conn.commit()
+
+def session_info(entry: Path) -> Optional[dict]:
+    chunks = chunk_files(entry)
+    if not chunks:
+        return None
+    info = {
+        "session_id": entry.name,
+        "first_seen": chunk_timestamp(chunks[0]),
+        "last_seen": chunk_timestamp(chunks[-1]),
+        "chunk_count": len(chunks),
+        "bytes": sum(c.stat().st_size for c in chunks),
+    }
+    for key, name in (
+        ("order", ORDER_FILE),
+        ("interactions", INTERACTIONS_FILE),
+        ("device", DEVICE_FILE),
+    ):
+        path = entry / name
+        if path.is_file():
+            try:
+                value = json.loads(path.read_text())
+                if isinstance(value, dict):
+                    info[key] = value
+            except Exception:
+                pass
+    meta_path = entry / VISITOR_FILE
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text())
+            info.update({k: meta[k] for k in ("visitor_id", "url") if isinstance(meta.get(k), str)})
+        except Exception:
+            pass
+    return info
+
+def rebuild_index(pool: Path) -> int:
+    infos = []
+    for entry in pool.iterdir() if pool.is_dir() else []:
+        if not entry.is_dir():
+            continue
+        info = session_info(entry)
+        if info:
+            infos.append(info)
+    key = pool_key(pool)
+    with _index_lock:
+        conn = index_conn()
+        conn.execute("DELETE FROM sessions WHERE pool = ?", (key,))
+        conn.executemany(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    key, i["session_id"], i["first_seen"], i["last_seen"],
+                    i["chunk_count"], i["bytes"], i.get("visitor_id"), i.get("url"),
+                    json.dumps(i["order"]) if "order" in i else None,
+                    json.dumps(i["interactions"]) if "interactions" in i else None,
+                    json.dumps(i["device"]) if "device" in i else None,
+                )
+                for i in infos
+            ],
+        )
+        conn.commit()
+    return len(infos)
+
+def reconcile_index() -> None:
+    for pool in session_pools():
+        key = pool_key(pool)
+        with _index_lock:
+            (count,) = index_conn().execute(
+                "SELECT count(*) FROM sessions WHERE pool = ?", (key,)
+            ).fetchone()
+        if count == 0 and any(entry.is_dir() for entry in pool.iterdir()):
+            print(f"index: rebuilt '{key or '(no project)'}' — {rebuild_index(pool)} session(s)")
 
 def workos_call(path: str, payload: Optional[dict] = None, bearer: bool = False) -> dict:
     req = urllib.request.Request(
@@ -655,56 +820,71 @@ def list_projects(request: Request):
         **({"email": email} if email else {}),
     }
 
+SESSION_FILTERS = {
+    "checkout": '"order" IS NOT NULL',
+    "purchased": "json_extract(\"order\", '$.purchased_at') IS NOT NULL",
+    "rage": "json_extract(interactions, '$.rage') > 0",
+}
+
 @app.get("/api/sessions")
-def list_sessions(request: Request, project: Optional[str] = Query(None)):
+def list_sessions(
+    request: Request,
+    project: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    cursor: Optional[str] = Query(None),
+    filter: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+):
     require_read_access(request, project)
     pool = resolve_pool(project)
+    where, params = ["pool = ?"], [pool_key(pool)]
+    if filter in SESSION_FILTERS:
+        where.append(SESSION_FILTERS[filter])
+    if q:
+        like = f"%{q}%"
+        where.append("(session_id LIKE ? OR visitor_id LIKE ? OR url LIKE ?)")
+        params += [like, like, like]
+    with _index_lock:
+        conn = index_conn()
+        (total,) = conn.execute(
+            f"SELECT count(*) FROM sessions WHERE {' AND '.join(where)}", params
+        ).fetchone()
+        if cursor:
+            try:
+                seen, _, sid = cursor.partition(":")
+                where.append("(last_seen < ? OR (last_seen = ? AND session_id < ?))")
+                params += [int(seen), int(seen), sid]
+            except ValueError:
+                raise ApiError(400, "bad cursor")
+        rows = conn.execute(
+            f"""
+            SELECT session_id, first_seen, last_seen, chunk_count, bytes,
+                   visitor_id, url, "order", interactions, device
+            FROM sessions WHERE {' AND '.join(where)}
+            ORDER BY last_seen DESC, session_id DESC LIMIT ?
+            """,
+            params + [limit + 1],
+        ).fetchall()
+    more = len(rows) > limit
     sessions = []
-    for entry in pool.iterdir() if pool.is_dir() else []:
-        if not entry.is_dir():
-            continue
-        chunks = chunk_files(entry)
-        if not chunks:
-            continue
+    for sid, first, last, count, size, visitor, url, order, interactions, device in rows[:limit]:
         info = {
-            "session_id": entry.name,
-            "first_seen": chunk_timestamp(chunks[0]),
-            "last_seen": chunk_timestamp(chunks[-1]),
-            "chunk_count": len(chunks),
-            "bytes": sum(c.stat().st_size for c in chunks),
+            "session_id": sid,
+            "first_seen": first,
+            "last_seen": last,
+            "chunk_count": count,
+            "bytes": size,
         }
-        order_path = entry / ORDER_FILE
-        if order_path.is_file():
-            try:
-                info["order"] = json.loads(order_path.read_text())
-            except Exception:
-                pass
-        meta_path = entry / VISITOR_FILE
-        if meta_path.is_file():
-            try:
-                meta = json.loads(meta_path.read_text())
-                info.update({k: meta[k] for k in ("visitor_id", "url") if isinstance(meta.get(k), str)})
-            except Exception:
-                pass
-        interactions_path = entry / INTERACTIONS_FILE
-        if interactions_path.is_file():
-            try:
-                interactions = json.loads(interactions_path.read_text())
-                if isinstance(interactions, dict):
-                    info["interactions"] = interactions
-            except Exception:
-                pass
-        device_path = entry / DEVICE_FILE
-        if device_path.is_file():
-            try:
-                device = json.loads(device_path.read_text())
-                if isinstance(device, dict):
-                    info["device"] = device
-            except Exception:
-                pass
+        if visitor:
+            info["visitor_id"] = visitor
+        if url:
+            info["url"] = url
+        for key, value in (("order", order), ("interactions", interactions), ("device", device)):
+            if value:
+                info[key] = json.loads(value)
         sessions.append(info)
-    sessions.sort(key=lambda s: s["last_seen"], reverse=True)
-    return {"sessions": sessions}
+    next_cursor = f"{sessions[-1]['last_seen']}:{sessions[-1]['session_id']}" if more else None
+    return {"sessions": sessions, "total": total, "cursor": next_cursor}
 
 @app.delete("/api/sessions/{session_id}")
 def delete_session(request: Request, session_id: str, project: Optional[str] = Query(None)):
@@ -713,6 +893,7 @@ def delete_session(request: Request, session_id: str, project: Optional[str] = Q
     session_dir = resolve_session(session_id, project)
     freed = dir_bytes(session_dir)
     shutil.rmtree(session_dir, ignore_errors=True)
+    index_forget(session_dir.parent, session_id)
     _pool_bytes.pop(session_dir.parent, None)
     print(f"deleted session {session_id} ({freed} bytes)")
     return {"status": "deleted", "session_id": session_id, "bytes_freed": freed}
@@ -806,6 +987,7 @@ def sweep_expired_sessions() -> int:
     cutoff_ms = (time.time() - RETENTION_DAYS * 86400) * 1000
     removed = 0
     for pool in session_pools():
+        alive = 0
         for entry in pool.iterdir():
             if not entry.is_dir():
                 continue
@@ -813,7 +995,20 @@ def sweep_expired_sessions() -> int:
             newest = chunk_timestamp(chunks[-1]) if chunks else 0
             if newest < cutoff_ms:
                 shutil.rmtree(entry, ignore_errors=True)
+                index_forget(pool, entry.name)
                 removed += 1
+            elif chunks:
+                alive += 1
+        key = pool_key(pool)
+        with _index_lock:
+            (indexed,) = index_conn().execute(
+                "SELECT count(*) FROM sessions WHERE pool = ?", (key,)
+            ).fetchone()
+        if indexed != alive:
+            print(
+                f"index: drift in '{key or '(no project)'}' "
+                f"({indexed} indexed, {alive} on disk) — rebuilt {rebuild_index(pool)}"
+            )
     if removed:
         _pool_bytes.clear()
     return removed
@@ -932,6 +1127,7 @@ def remove_project(token: str, purge: bool) -> None:
     count, used = pool_usage(pool)
     if purge:
         shutil.rmtree(pool.parent, ignore_errors=True)
+        index_forget(pool)
         print(f"deleted {count} stored session(s), {used / 1024**2:.1f} MB")
     elif count:
         print(f"kept {count} session(s), {used / 1024**2:.1f} MB — re-run with --purge to erase")
@@ -952,6 +1148,9 @@ if __name__ == "__main__":
         set_project_domains(argv[1], argv[2:])
     elif len(argv) >= 3 and argv[0] == "invite":
         invite_user(argv[1], argv[2])
+    elif argv[:1] == ["reindex"]:
+        for pool in session_pools():
+            print(f"{pool_key(pool) or '(no project)'}: {rebuild_index(pool)} session(s)")
     else:
         print("usage: python server.py add-project <name>")
         print("       python server.py list-projects")
@@ -959,4 +1158,5 @@ if __name__ == "__main__":
         print("       python server.py set-org <token> <workos_org_id>")
         print("       python server.py set-domains <token> [domain ...]")
         print("       python server.py invite <email> <project_token_or_org_id>")
+        print("       python server.py reindex")
         print("run the server with: .venv/bin/uvicorn server:app --port 3000")

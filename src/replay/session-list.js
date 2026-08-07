@@ -14,17 +14,17 @@ const accountEmailEl = document.getElementById('account-email');
 export let allSessions = [];
 let sessionFilter = 'all';
 let searchTerm = '';
-const FILTERS = {
-  all: () => true,
-  checkout: (s) => Boolean(s.order),
-  purchased: (s) => Boolean(s.order && s.order.purchased_at),
-  rage: (s) => Boolean(s.interactions && s.interactions.rage),
-};
+let nextCursor = null;
+let totalSessions = 0;
+let loadSeq = 0;
 
-function matchesSearch(s) {
-  if (!searchTerm) return true;
-  return [s.url, s.visitor_id, s.session_id]
-    .some((v) => typeof v === 'string' && v.toLowerCase().includes(searchTerm));
+function sessionsUrl(cursor) {
+  const params = new URLSearchParams();
+  if (currentProject) params.set('project', currentProject);
+  if (sessionFilter !== 'all') params.set('filter', sessionFilter);
+  if (searchTerm) params.set('q', searchTerm);
+  if (cursor) params.set('cursor', cursor);
+  return `/api/sessions?${params}`;
 }
 
 function showListMessage(message) {
@@ -77,27 +77,50 @@ async function loadProjects() {
   return true;
 }
 
-async function loadSessions() {
+async function loadSessions({ append = false } = {}) {
+  const seq = ++loadSeq;
+  if (!append) {
+    allSessions = [];
+    nextCursor = null;
+  }
+  let body;
   try {
-    const body = await fetchJson(`/api/sessions${projectQuery()}`);
-    allSessions = Array.isArray(body.sessions) ? body.sessions : [];
+    body = await fetchJson(sessionsUrl(append ? nextCursor : null));
   } catch (err) {
+    if (seq !== loadSeq) return;
     allSessions = [];
     showListMessage(`Could not load sessions. ${err.message}`);
     return;
   }
+  if (seq !== loadSeq) return;
+  allSessions = allSessions.concat(Array.isArray(body.sessions) ? body.sessions : []);
+  nextCursor = body.cursor || null;
+  totalSessions = typeof body.total === 'number' ? body.total : allSessions.length;
   renderSessionList();
 }
 
+const loadMoreObserver = new IntersectionObserver((entries) => {
+  if (entries.some((e) => e.isIntersecting)) loadMore();
+});
+
+function loadMore() {
+  if (!nextCursor || loadMoreObserver.pending) return;
+  loadMoreObserver.pending = true;
+  loadSessions({ append: true }).finally(() => {
+    loadMoreObserver.pending = false;
+  });
+}
+
 function renderSessionList() {
+  loadMoreObserver.disconnect();
   sessionListEl.innerHTML = '';
-  if (allSessions.length === 0) {
-    showListMessage('No sessions yet. Open the demo page and click around.');
-    return;
-  }
-  const sessions = allSessions.filter((s) => FILTERS[sessionFilter](s) && matchesSearch(s));
+  const sessions = allSessions;
   if (sessions.length === 0) {
-    showListMessage('No sessions match this filter.');
+    showListMessage(
+      sessionFilter !== 'all' || searchTerm
+        ? 'No sessions match this filter.'
+        : 'No sessions yet. Open the demo page and click around.'
+    );
     return;
   }
 
@@ -182,15 +205,30 @@ function renderSessionList() {
     }
   }
 
+  if (nextCursor) {
+    const li = document.createElement('li');
+    li.className = 'load-more';
+    li.textContent = `Load more (${totalSessions - sessions.length} remaining)`;
+    li.addEventListener('click', () => {
+      li.textContent = 'Loading…';
+      loadMore();
+    });
+    sessionListEl.appendChild(li);
+    loadMoreObserver.observe(li);
+  }
+
   if (!loadedSessionId) {
-    const target =
-      (boot.s && sessionListEl.querySelector(`li[data-sid="${CSS.escape(boot.s)}"]`)) ||
-      sessionListEl.querySelector('li:not(.visitor-header)');
-    if (target) {
-      if (boot.s && target.dataset.sid === boot.s && boot.t) setPendingSeek(boot.t * 1000);
+    if (boot.s) {
+      const li = sessionListEl.querySelector(`li[data-sid="${CSS.escape(boot.s)}"]`);
+      if (boot.t) setPendingSeek(boot.t * 1000);
+      const sid = boot.s;
       boot.s = '';
-      target.click();
+      if (li) li.click();
+      else loadSession(sid);
+      return;
     }
+    const target = sessionListEl.querySelector('li:not(.visitor-header):not(.load-more)');
+    if (target) target.click();
   }
 }
 
@@ -214,7 +252,9 @@ async function deleteSession(sessionId, button) {
     const res = await fetch(`/api/sessions/${sessionId}${projectQuery()}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(`server returned ${res.status}`);
     if (sessionId === loadedSessionId) clearPlayer();
-    await loadSessions();
+    allSessions = allSessions.filter((s) => s.session_id !== sessionId);
+    totalSessions = Math.max(0, totalSessions - 1);
+    renderSessionList();
   } catch (err) {
     button.disabled = false;
     button.textContent = 'Failed';
@@ -234,9 +274,11 @@ projectSelectEl.addEventListener('change', () => {
 });
 
 const searchEl = document.getElementById('session-search');
+let searchDebounce;
 searchEl.addEventListener('input', () => {
   searchTerm = searchEl.value.trim().toLowerCase();
-  renderSessionList();
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(loadSessions, 250);
 });
 
 const filterButtons = document.querySelectorAll('#session-filter button');
@@ -244,6 +286,6 @@ for (const btn of filterButtons) {
   btn.addEventListener('click', () => {
     sessionFilter = btn.dataset.filter;
     filterButtons.forEach((b) => b.classList.toggle('active', b === btn));
-    renderSessionList();
+    loadSessions();
   });
 }

@@ -38,16 +38,20 @@ class ServerCase(unittest.TestCase):
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-test-"))
         cls.port = free_port()
         cls.base = f"http://127.0.0.1:{cls.port}"
-        env = {
+        cls.run_env = {
             **os.environ,
             "CAPTURE_DATA_DIR": str(cls.data_dir),
             "REPLAY_AUTH_DISABLED": "1",
             **cls.env,
         }
+        cls.start_server()
+
+    @classmethod
+    def start_server(cls):
         cls.proc = subprocess.Popen(
             [str(UVICORN), "server:app", "--port", str(cls.port), "--log-level", "error"],
             cwd=REPO,
-            env=env,
+            env=cls.run_env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -550,6 +554,95 @@ class TestProjectCli(unittest.TestCase):
 
         self.run_cli("remove-project", token, "--purge")
         self.assertFalse((self.data_dir / "projects" / token).exists())
+
+class TestSessionPaging(ServerCase):
+    def list(self, query=""):
+        status, body = request(f"{self.base}/api/sessions{query}")
+        self.assertEqual(status, 200)
+        return json.loads(body)
+
+    def test_pages_walk_every_session_exactly_once(self):
+        ids = [f"pg{i}" + "x" * 28 for i in range(5)]
+        for sid in ids:
+            self.assertEqual(self.ingest(sid), 200)
+
+        body = self.list()
+        self.assertEqual(body["total"], 5)
+        self.assertIsNone(body["cursor"])
+        self.assertEqual(len(body["sessions"]), 5)
+
+        body = self.list("?limit=2")
+        self.assertEqual(body["total"], 5)
+        seen = [s["session_id"] for s in body["sessions"]]
+        self.assertEqual(len(seen), 2)
+        while body["cursor"]:
+            body = self.list(f"?limit=2&cursor={body['cursor']}")
+            seen += [s["session_id"] for s in body["sessions"]]
+        self.assertEqual(sorted(seen), sorted(ids))
+        last_seen = [s["last_seen"] for s in self.list()["sessions"]]
+        self.assertEqual(last_seen, sorted(last_seen, reverse=True))
+
+class TestSessionFilters(ServerCase):
+    EVENTS = [{"type": 4, "data": {}}]
+
+    def order(self, session_id, payload):
+        return request(
+            f"{self.base}/order?session_id={session_id}",
+            method="POST",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )[0]
+
+    def listed_ids(self, query):
+        status, body = request(f"{self.base}/api/sessions{query}")
+        self.assertEqual(status, 200)
+        return {s["session_id"] for s in json.loads(body)["sessions"]}
+
+    def test_filters_and_search_run_serverside(self):
+        plain = "plain" + "x" * 27
+        started = "start" + "x" * 27
+        bought = "buy" + "x" * 29
+        ragey = "rage" + "x" * 28
+        self.ingest(plain, {"events": self.EVENTS, "url": "https://brand.example/landing-a?utm=news"})
+        self.ingest(started)
+        self.assertEqual(self.order(started, {"event": "checkout_started"}), 200)
+        self.ingest(bought)
+        self.assertEqual(self.order(bought, {"event": "checkout_completed"}), 200)
+        self.ingest(ragey, {"events": self.EVENTS + [
+            {"type": 5, "data": {"tag": "capture-click", "payload": {"rage": True}}}
+        ]})
+
+        self.assertEqual(self.listed_ids("?filter=checkout"), {started, bought})
+        self.assertEqual(self.listed_ids("?filter=purchased"), {bought})
+        self.assertEqual(self.listed_ids("?filter=rage"), {ragey})
+        self.assertEqual(self.listed_ids("?q=landing-a"), {plain})
+        self.assertEqual(self.listed_ids("?q=utm%3Dnews"), {plain})
+        self.assertEqual(self.listed_ids("?q=" + started[:12]), {started})
+        self.assertEqual(self.listed_ids("?q=nothing-matches"), set())
+
+class TestIndexRebuild(ServerCase):
+    def test_index_rebuilds_from_disk_on_startup(self):
+        ids = [f"reb{i}" + "x" * 28 for i in range(3)]
+        for sid in ids:
+            self.assertEqual(self.ingest(sid), 200)
+
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        for name in ("index.db", "index.db-wal", "index.db-shm"):
+            (self.data_dir / name).unlink(missing_ok=True)
+        type(self).start_server()
+
+        deadline = time.time() + 10
+        listed = set()
+        while time.time() < deadline:
+            listed = {
+                s["session_id"]
+                for s in json.loads(request(f"{self.base}/api/sessions")[1])["sessions"]
+            }
+            if listed == set(ids):
+                break
+            time.sleep(0.2)
+        self.assertEqual(listed, set(ids))
 
 if __name__ == "__main__":
     if not UVICORN.exists():
