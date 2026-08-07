@@ -1,5 +1,5 @@
 import { fetchJson, currentProject } from './api.js';
-import { loadedSessionId, player, setPendingSeek } from './session-player.js';
+import { loadedSessionId } from './session-player.js';
 
 const panelEl = document.getElementById('analysis-panel');
 const buttonEl = document.getElementById('analyze-btn');
@@ -23,8 +23,6 @@ const escapeHtml = (s) =>
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-
-const escapeAttr = (s) => escapeHtml(s).replace(/'/g, '&#39;');
 
 /** Minimal renderer for the headings, bullets and bold the prompt asks for. */
 export function renderMarkdown(md) {
@@ -76,20 +74,6 @@ function analysisUrl(sessionId, { force = false } = {}) {
   return `/api/sessions/${sessionId}/analysis${qs ? `?${qs}` : ''}`;
 }
 
-function qaUrl(sessionId) {
-  const params = new URLSearchParams();
-  if (currentProject) params.set('project', currentProject);
-  const qs = params.toString();
-  return `/api/sessions/${sessionId}/qa${qs ? `?${qs}` : ''}`;
-}
-
-function clock(ms) {
-  const total = Math.max(0, Math.floor((ms || 0) / 1000));
-  const m = String(Math.floor(total / 60)).padStart(2, '0');
-  const s = String(total % 60).padStart(2, '0');
-  return `${m}:${s}`;
-}
-
 function renderSegmentBadges(result) {
   const badges = [];
   const order = result.order || {};
@@ -103,66 +87,17 @@ function renderSegmentBadges(result) {
     badges.push(`<span class="attr-badge">campaign=${escapeHtml(attr.utm_campaign)}</span>`);
   }
   if (attr.fbclid) badges.push('<span class="attr-badge">Meta</span>');
-  const qa = result.qa;
-  if (qa && qa.status) {
-    badges.push(`<span class="badge qa-${escapeAttr(qa.status)}">${escapeHtml(qa.status)}</span>`);
-  }
   if (!badges.length) return '';
   return `<div class="seg-badges">${badges.join('')}</div>`;
 }
 
-function renderThemeChips(themes) {
-  if (!themes || !themes.length) return '';
-  return (
-    '<div class="theme-chips">' +
-    themes
-      .map((t) => `<span class="theme-chip">${escapeHtml(String(t))}</span>`)
-      .join('') +
-    '</div>'
-  );
-}
-
-function renderFriction(insights) {
-  const friction = (insights && insights.friction) || [];
-  if (!friction.length) return '';
-  const items = friction
-    .map((f) => {
-      const label = escapeHtml(f.label || 'friction');
-      if (typeof f.atMs === 'number') {
-        return `<li><button type="button" class="friction-link" data-ms="${f.atMs}">[${clock(
-          f.atMs
-        )}] ${label}</button></li>`;
-      }
-      return `<li>${label}</li>`;
-    })
-    .join('');
-  return `<h4>Friction</h4><ul>${items}</ul>`;
-}
-
-function renderQaControls(result) {
-  const qa = result.qa || { status: 'pending', themes: (result.insights && result.insights.themes) || [] };
-  return `<div class="qa-actions" id="analysis-qa-actions">
-    <button type="button" class="primary" data-qa="accepted">Accept</button>
-    <button type="button" class="danger" data-qa="rejected">Reject</button>
-    <span class="note" style="border:0;padding:0;margin:0">QA: ${escapeHtml(qa.status || 'pending')}</span>
-  </div>`;
-}
-
 function renderResult(result) {
   currentResult = result;
-  const insights = result.insights || {};
-  const themes = insights.themes || result.themes || [];
-  const parts = [
-    renderSegmentBadges(result),
-    renderThemeChips(themes),
-    renderFriction(insights),
-    renderMarkdown(result.text || ''),
-  ];
+  const parts = [renderSegmentBadges(result), renderMarkdown(result.text || '')];
 
   for (const warning of result.warnings || []) {
     parts.push(`<p class="warn">${escapeHtml(warning)}</p>`);
   }
-  parts.push(renderQaControls(result));
   parts.push(
     '<p class="note">' +
       (result.frame_count
@@ -173,41 +108,6 @@ function renderResult(result) {
       `Written by ${escapeHtml(result.model || 'the model')}.</p>`
   );
   bodyEl.innerHTML = parts.join('');
-
-  bodyEl.querySelectorAll('.friction-link').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const ms = Number(btn.dataset.ms);
-      if (!Number.isFinite(ms)) return;
-      if (player) player.seekTo(ms);
-      else setPendingSeek(ms);
-    });
-  });
-  bodyEl.querySelectorAll('#analysis-qa-actions [data-qa]').forEach((btn) => {
-    btn.addEventListener('click', () => submitQa(btn.dataset.qa));
-  });
-}
-
-async function submitQa(status) {
-  const sessionId = loadedSessionId;
-  if (!sessionId || !currentResult) return;
-  const themes =
-    (currentResult.qa && currentResult.qa.themes) ||
-    (currentResult.insights && currentResult.insights.themes) ||
-    [];
-  try {
-    const qa = await fetchJson(qaUrl(sessionId), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status, themes }),
-    });
-    currentResult = { ...currentResult, qa };
-    if (currentResult.insights) {
-      currentResult.insights = { ...currentResult.insights, themes: qa.themes || themes };
-    }
-    renderResult(currentResult);
-  } catch (err) {
-    renderError(err.message);
-  }
 }
 
 function renderProgress() {

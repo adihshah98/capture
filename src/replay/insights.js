@@ -1,98 +1,119 @@
 import { currentProject, fetchJson, setProject } from './api.js';
 import { writeHash } from './deeplink.js';
 import { loadSession } from './session-player.js';
-import { renderMarkdown } from './analysis.js';
 
 const POLL_MS = 2000;
 
 const modeButtons = document.querySelectorAll('#mode-switch button');
 const tabButtons = document.querySelectorAll('.insights-tabs button[data-insights-tab]');
 const runBtn = document.getElementById('cohort-run');
-const runBtnCompare = document.getElementById('cohort-run-compare');
+const cohortSelectEl = document.getElementById('cohort-select');
+const renameBtn = document.getElementById('cohort-rename');
 const labelEl = document.getElementById('cohort-label');
 const progressEl = document.getElementById('cohort-progress');
-const compareLabelEl = document.getElementById('compare-label');
-const compareProgressEl = document.getElementById('compare-progress');
+const cutLabelEl = document.getElementById('cut-label');
+const cutProgressEl = document.getElementById('cut-progress');
+const cutRunBtn = document.getElementById('cut-run');
+const cutBodyEl = document.getElementById('cut-body');
 const tableWrapEl = document.getElementById('cohort-table-wrap');
-const compareBodyEl = document.getElementById('compare-body');
-const compareSummaryEl = document.getElementById('compare-summary');
-const compareExamplesEl = document.getElementById('compare-examples');
 const splitEl = document.getElementById('compare-split');
 const queuePanelEl = document.getElementById('insights-queue');
-const comparePanelEl = document.getElementById('insights-compare');
-const reviewPanelEl = document.getElementById('insights-review');
-const reviewBodyEl = document.getElementById('review-body');
-const reviewProgressEl = document.getElementById('review-progress');
+const cutPanelEl = document.getElementById('insights-cut');
 
 let analysisEnabled = false;
 let pollTimer = null;
+let cutPollTimer = null;
 let cohort = null;
-let summary = null;
-let activeTab = 'compare';
+let cohortId = null;
+let activeTab = 'cut';
 let autoSwitchedForRun = false;
-let selectedTheme = null;
-let reviewIndex = 0;
-let reviewQueue = [];
-let reviewVocab = [];
-let reviewDraftThemes = [];
 
 export function setInsightsAnalysisEnabled(on) {
   analysisEnabled = !!on;
   syncRunButtons();
 }
 
+function cohortIsRunning() {
+  return cohort && (cohort.status === 'running' || cohort.status === 'queued');
+}
+
 function syncRunButtons() {
-  const running = cohort && (cohort.status === 'running' || cohort.status === 'queued');
-  for (const btn of [runBtn, runBtnCompare]) {
-    btn.disabled = !analysisEnabled || running;
-    if (!analysisEnabled) {
-      btn.title = 'Analysis is not configured on this server';
-    } else {
-      btn.title = '';
-    }
-    if (running) {
-      btn.textContent = 'Analyzing…';
-    } else if (cohort && cohort.sessions && cohort.sessions.length) {
-      btn.textContent = 'Analyze 10 again';
-    } else {
-      btn.textContent = 'Analyze 10 sessions';
-    }
+  const running = cohortIsRunning();
+  runBtn.disabled = !analysisEnabled || running;
+  runBtn.title = analysisEnabled ? '' : 'Analysis is not configured on this server';
+  runBtn.textContent = running ? 'Analyzing…' : 'Analyze 10 sessions';
+  renameBtn.disabled = !cohortId;
+  syncCutRunButton();
+}
+
+function analyzedCount() {
+  if (!cohort) return 0;
+  return (cohort.sessions || []).filter((s) => s.status === 'done' && s.text).length;
+}
+
+function syncCutRunButton() {
+  if (!cutRunBtn) return;
+  const ready = analysisEnabled && analyzedCount() > 0 && !cutPollTimer;
+  cutRunBtn.disabled = !ready;
+  if (!analysisEnabled) {
+    cutRunBtn.title = 'Analysis is not configured on this server';
+  } else if (!analyzedCount()) {
+    cutRunBtn.title = 'Analyze a cohort first';
+  } else {
+    cutRunBtn.title = '';
   }
 }
 
-function cohortUrl({ start = false, force = false } = {}) {
-  const params = new URLSearchParams();
+function withProject(params) {
   if (currentProject) params.set('project', currentProject);
-  if (start) {
-    params.set('purchased', '5');
-    params.set('all', '5');
-    if (force) params.set('force', '1');
-  }
-  const qs = params.toString();
-  return `/api/cohort${qs ? `?${qs}` : ''}`;
+  return params;
 }
 
-function summaryUrl() {
-  const params = new URLSearchParams();
-  if (currentProject) params.set('project', currentProject);
-  params.set('group_by', 'none');
+function cohortsUrl() {
+  const qs = withProject(new URLSearchParams()).toString();
+  return `/api/cohorts${qs ? `?${qs}` : ''}`;
+}
+
+function cohortUrl(id) {
+  const qs = withProject(new URLSearchParams()).toString();
+  return `/api/cohorts/${encodeURIComponent(id)}${qs ? `?${qs}` : ''}`;
+}
+
+function createCohortUrl() {
+  const params = withProject(new URLSearchParams());
+  params.set('purchased', '5');
+  params.set('all', '5');
+  return `/api/cohorts?${params.toString()}`;
+}
+
+function retryUrl(id, sessionId) {
+  const qs = withProject(new URLSearchParams()).toString();
+  return `/api/cohorts/${encodeURIComponent(id)}/sessions/${encodeURIComponent(
+    sessionId
+  )}/retry${qs ? `?${qs}` : ''}`;
+}
+
+function cutUrl(id, { run = false } = {}) {
+  const params = withProject(new URLSearchParams());
   params.set('contrast', (splitEl && splitEl.value) || 'purchased_vs_all');
-  params.set('qa_mode', 'include_pending');
-  return `/api/insights/summary?${params.toString()}`;
+  if (run) params.set('run', '1');
+  return `/api/cohorts/${encodeURIComponent(id)}/cut?${params.toString()}`;
 }
 
-function qaUrl(sessionId) {
-  const params = new URLSearchParams();
-  if (currentProject) params.set('project', currentProject);
-  const qs = params.toString();
-  return `/api/sessions/${sessionId}/qa${qs ? `?${qs}` : ''}`;
-}
-
-function retryUrl(sessionId) {
-  const params = new URLSearchParams();
-  if (currentProject) params.set('project', currentProject);
-  const qs = params.toString();
-  return `/api/cohort/sessions/${sessionId}/retry${qs ? `?${qs}` : ''}`;
+/** A cut miss is a 404 carrying {status:"absent"} — a normal state, not an error. */
+async function fetchCut(id, opts) {
+  const res = await fetch(cutUrl(id, opts));
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    /* fall through to the status check */
+  }
+  if (res.status === 404 && body && body.status === 'absent') return body;
+  if (!res.ok) {
+    throw new Error((body && body.error) || `Server returned ${res.status}.`);
+  }
+  return body || {};
 }
 
 function stopPolling() {
@@ -102,14 +123,20 @@ function stopPolling() {
   }
 }
 
+function stopCutPolling() {
+  if (cutPollTimer) {
+    clearTimeout(cutPollTimer);
+    cutPollTimer = null;
+  }
+}
+
 function schedulePoll() {
   stopPolling();
   if (!document.body.classList.contains('mode-insights')) return;
-  if (!cohort || (cohort.status !== 'running' && cohort.status !== 'queued')) return;
+  if (!cohortIsRunning()) return;
   pollTimer = setTimeout(() => {
     refreshCohort().catch((err) => {
       progressEl.textContent = err.message;
-      compareProgressEl.textContent = err.message;
     });
   }, POLL_MS);
 }
@@ -119,26 +146,23 @@ function setMode(mode) {
   document.body.classList.toggle('mode-insights', next === 'insights');
   modeButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.mode === next));
   if (next === 'insights') {
-    refreshCohort().catch((err) => {
+    refreshCohorts().catch((err) => {
       progressEl.textContent = err.message;
-      compareProgressEl.textContent = err.message;
     });
   } else {
     stopPolling();
+    stopCutPolling();
   }
 }
 
 function setTab(tab) {
-  const allowed = new Set(['compare', 'queue', 'review']);
-  activeTab = allowed.has(tab) ? tab : 'compare';
+  activeTab = tab === 'queue' ? 'queue' : 'cut';
   tabButtons.forEach((btn) => {
     if (btn.disabled) return;
     btn.classList.toggle('active', btn.dataset.insightsTab === activeTab);
   });
-  comparePanelEl.hidden = activeTab !== 'compare';
+  cutPanelEl.hidden = activeTab !== 'cut';
   queuePanelEl.hidden = activeTab !== 'queue';
-  reviewPanelEl.hidden = activeTab !== 'review';
-  if (activeTab === 'review') renderReview();
 }
 
 function openSession(sessionId) {
@@ -170,11 +194,6 @@ function progressText(body) {
 
 function renderEmpty(message) {
   tableWrapEl.innerHTML = `<div id="cohort-empty">${message}</div>`;
-}
-
-function qaBadge(status) {
-  const s = status || 'pending';
-  return `<span class="badge qa-${escapeAttr(s)}">${escapeHtml(s)}</span>`;
 }
 
 function renderQueue(body) {
@@ -212,14 +231,7 @@ function renderQueue(body) {
             ${retry}
             ${err}
           </td>
-          <td>${qaBadge(entry.qa_status)}</td>
-          <td>${
-            (entry.themes || []).length
-              ? `<div class="theme-chips">${entry.themes
-                  .map((t) => `<span class="theme-chip">${escapeHtml(String(t))}</span>`)
-                  .join('')}</div>`
-              : '—'
-          }</td>
+          <td class="standout">${entry.standout ? escapeHtml(entry.standout) : '—'}</td>
         </tr>`;
     })
     .join('');
@@ -232,8 +244,7 @@ function renderQueue(body) {
           <th>Sample</th>
           <th>Campaign</th>
           <th>Analysis</th>
-          <th>QA</th>
-          <th>Themes</th>
+          <th>What stands out</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -251,11 +262,11 @@ function renderQueue(body) {
 }
 
 async function retrySession(sessionId, btn) {
-  if (!analysisEnabled || !sessionId) return;
+  if (!analysisEnabled || !sessionId || !cohortId) return;
   btn.disabled = true;
   btn.textContent = 'Retrying…';
   try {
-    const body = await fetchJson(retryUrl(sessionId), { method: 'POST' });
+    const body = await fetchJson(retryUrl(cohortId, sessionId), { method: 'POST' });
     renderCohort(body);
   } catch (err) {
     progressEl.textContent = err.message;
@@ -264,382 +275,198 @@ async function retrySession(sessionId, btn) {
   }
 }
 
-function themeCountChips(detailsOrMap, side) {
-  const details = Array.isArray(detailsOrMap)
-    ? detailsOrMap
-    : Object.entries(detailsOrMap || {}).map(([theme, count]) => ({
-        theme,
-        count,
-        one_off: count === 1,
-      }));
-  if (!details.length) return '<p class="status-note">No themes yet.</p>';
-  return `<div class="theme-chips">${details
-    .map((d) => {
-      const active = selectedTheme === d.theme ? ' active' : '';
-      const oneOff = d.one_off ? ' one-off' : '';
-      return `<button type="button" class="theme-chip${active}${oneOff}" data-theme="${escapeAttr(
-        d.theme
-      )}" data-side="${escapeAttr(side || '')}">${escapeHtml(d.theme)}<span class="n">×${
-        d.count
-      }</span></button>`;
-    })
-    .join('')}</div>`;
+function cutList(title, items, extraClass = '') {
+  if (!items || !items.length) return '';
+  return `<div class="cut-block ${extraClass}">
+    <h4>${escapeHtml(title)}</h4>
+    <ul>${items.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>
+  </div>`;
 }
 
-function findThemeExamples(theme) {
-  if (!summary) return [];
-  const fromDetails = (summary.theme_details || []).find((d) => d.theme === theme);
-  if (fromDetails && fromDetails.examples && fromDetails.examples.length) {
-    return fromDetails.examples;
-  }
-  const contrast = summary.contrast || {};
-  for (const list of [contrast.enriched_a, contrast.enriched_b, contrast.shared]) {
-    const hit = (list || []).find((e) => e.theme === theme);
-    if (hit && hit.examples && hit.examples.length) return hit.examples;
-  }
-  for (const side of [contrast.a, contrast.b]) {
-    const hit = ((side && side.theme_details) || []).find((d) => d.theme === theme);
-    if (hit && hit.examples && hit.examples.length) return hit.examples;
-  }
-  return [];
+function renderCutPlaceholder(message) {
+  cutBodyEl.innerHTML = `<div class="insights-placeholder">${escapeHtml(message)}</div>`;
 }
 
-function renderThemeExamples(theme) {
-  if (!theme || !compareExamplesEl) {
-    if (compareExamplesEl) {
-      compareExamplesEl.hidden = true;
-      compareExamplesEl.innerHTML = '';
-    }
-    return;
-  }
-  const examples = findThemeExamples(theme);
-  if (!examples.length) {
-    compareExamplesEl.hidden = false;
-    compareExamplesEl.innerHTML = `<h4>Examples · ${escapeHtml(theme)}</h4><p class="status-note">No example sessions for this theme in the current rollup.</p>`;
-    return;
-  }
-  compareExamplesEl.hidden = false;
-  compareExamplesEl.innerHTML = `
-    <h4>Examples · ${escapeHtml(theme)}${
-      examples.length === 1 ? ' <span class="meta">(one-off)</span>' : ''
-    }</h4>
-    <div class="example-cards">
-      ${examples
-        .map((ex) => {
-          const badge = ex.campaign
-            ? `<span class="attr-badge">${escapeHtml(ex.campaign)}</span>`
-            : ex.meta
-              ? `<span class="attr-badge">Meta</span>`
-              : '';
-          return `<button type="button" class="example-card" data-sid="${escapeAttr(ex.session_id)}">
-            <span class="sid">${escapeHtml((ex.session_id || '').slice(0, 8))}…</span>
-            ${badge}
-            <span class="badge ${ex.outcome === 'purchased' ? 'purchased' : 'all'}">${
-              ex.outcome === 'purchased' ? 'Purchased' : 'All'
-            }</span>
-            ${ex.standout ? `<p class="standout">${escapeHtml(ex.standout)}</p>` : ''}
-          </button>`;
-        })
-        .join('')}
-    </div>`;
-  compareExamplesEl.querySelectorAll('.example-card').forEach((btn) => {
-    btn.addEventListener('click', () => openSession(btn.dataset.sid));
-  });
-}
+function renderCut(body) {
+  const analysis = body.analysis || {};
+  const nA = body.n_a || 0;
+  const nB = body.n_b || 0;
+  cutLabelEl.textContent = `${body.label_a || 'A'} vs ${body.label_b || 'B'}`;
 
-function bindThemeChipClicks(root) {
-  root.querySelectorAll('button.theme-chip[data-theme]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const theme = btn.dataset.theme;
-      selectedTheme = selectedTheme === theme ? null : theme;
-      renderSummary(summary);
-    });
-  });
-}
+  // Small sides are the norm here; say so rather than letting counts imply rigour.
+  const thin = (n) =>
+    n > 0 && n < 3 ? '<span class="cut-thin">thin evidence</span>' : '';
 
-function renderSummary(body) {
-  summary = body;
-  if (!body || !body.n) {
-    compareSummaryEl.innerHTML =
-      '<div class="insights-placeholder">Analyze 10 sessions, then pick a split to see what differs between the two groups.</div>';
-    renderThemeExamples(null);
-    return;
-  }
-
-  const contrast = body.contrast || {};
-  const sideA = contrast.a || { n: 0, themes: {}, label: 'A' };
-  const sideB = contrast.b || { n: 0, themes: {}, label: 'B' };
-  const narrative = body.narrative || contrast.narrative || [];
-  compareLabelEl.textContent = `${sideA.label} vs ${sideB.label}`;
-
-  const narrativeHtml = narrative.length
-    ? `<div class="summary-narrative"><h4>What differs</h4><ul>${narrative
-        .map((line) => `<li>${escapeHtml(line)}</li>`)
-        .join('')}</ul></div>`
+  const headline = analysis.headline
+    ? `<div class="cut-headline">${escapeHtml(analysis.headline)}</div>`
     : '';
 
-  const enrichedA = (contrast.enriched_a || [])
-    .slice(0, 5)
-    .map((e) => {
-      const delta = e.ratio ? `${e.ratio}×` : 'more';
-      return (
-        `<li><button type="button" class="theme-chip${selectedTheme === e.theme ? ' active' : ''}${
-          e.one_off ? ' one-off' : ''
-        }" data-theme="${escapeAttr(e.theme)}">${escapeHtml(e.theme)}</button> ` +
-        `<span class="delta">${escapeHtml(String(delta))}</span> ` +
-        `<span class="meta">(${e.a_count}/${sideA.n} vs ${e.b_count}/${sideB.n})</span></li>`
-      );
-    })
-    .join('');
-  const enrichedB = (contrast.enriched_b || [])
-    .slice(0, 5)
-    .map((e) => {
-      const delta = e.ratio ? `${e.ratio}×` : 'more';
-      return (
-        `<li><button type="button" class="theme-chip${selectedTheme === e.theme ? ' active' : ''}${
-          e.one_off ? ' one-off' : ''
-        }" data-theme="${escapeAttr(e.theme)}">${escapeHtml(e.theme)}</button> ` +
-        `<span class="delta">${escapeHtml(String(delta))}</span> ` +
-        `<span class="meta">(${e.b_count}/${sideB.n} vs ${e.a_count}/${sideA.n})</span></li>`
-      );
-    })
-    .join('');
-
-  compareSummaryEl.innerHTML = `
-    ${narrativeHtml}
-    <div class="summary-grid">
-      <div class="summary-col">
-        <h4>${escapeHtml(sideA.label)} <span class="n">(n=${sideA.n})</span></h4>
-        ${themeCountChips(sideA.theme_details || sideA.themes, 'a')}
-        ${enrichedA ? `<ul class="enriched"><li><strong>More common here</strong></li>${enrichedA}</ul>` : ''}
-      </div>
-      <div class="summary-col">
-        <h4>${escapeHtml(sideB.label)} <span class="n">(n=${sideB.n})</span></h4>
-        ${themeCountChips(sideB.theme_details || sideB.themes, 'b')}
-        ${enrichedB ? `<ul class="enriched"><li><strong>More common here</strong></li>${enrichedB}</ul>` : ''}
+  const sides = `<div class="cut-sides">
+    <div>
+      <div class="cut-block">
+        <h4>Only in ${escapeHtml(body.label_a || 'A')}<span class="n">(n=${nA})</span>${thin(nA)}</h4>
+        ${
+          (analysis.a_distinctive || []).length
+            ? `<ul>${analysis.a_distinctive.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
+            : '<p class="cut-empty">Nothing stood out as specific to this side.</p>'
+        }
       </div>
     </div>
-    <p class="status-note">Click a theme for example sessions. Individual write-ups are under Sessions.</p>`;
-  bindThemeChipClicks(compareSummaryEl);
-  renderThemeExamples(selectedTheme);
+    <div>
+      <div class="cut-block">
+        <h4>Only in ${escapeHtml(body.label_b || 'B')}<span class="n">(n=${nB})</span>${thin(nB)}</h4>
+        ${
+          (analysis.b_distinctive || []).length
+            ? `<ul>${analysis.b_distinctive.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
+            : '<p class="cut-empty">Nothing stood out as specific to this side.</p>'
+        }
+      </div>
+    </div>
+  </div>`;
+
+  const meta = `<p class="cut-meta">
+    Read from ${nA + nB} analyzed session write-up(s) in this cohort.
+    Written by ${escapeHtml(body.model || 'the model')}.
+    Cohort membership is fixed, so this cut is cached and will not be recomputed.
+  </p>`;
+
+  cutBodyEl.innerHTML =
+    headline +
+    sides +
+    cutList('Common to both', analysis.shared) +
+    cutList('Worth checking', analysis.caveats, 'caveats') +
+    meta;
 }
 
-async function refreshSummary() {
+async function pollCut() {
+  if (!cohortId) return;
   try {
-    const body = await fetchJson(summaryUrl());
-    renderSummary(body);
-  } catch (err) {
-    if (/no cohort/i.test(err.message || '')) {
-      compareSummaryEl.innerHTML =
-        '<div class="insights-placeholder">Analyze 10 sessions, then pick a split to see what differs between the two groups.</div>';
-      renderThemeExamples(null);
+    const body = await fetchCut(cohortId);
+    if (body.status === 'running') {
+      cutPollTimer = setTimeout(pollCut, POLL_MS);
       return;
     }
-    compareSummaryEl.innerHTML = `<p class="status-note error">${escapeHtml(err.message)}</p>`;
+    stopCutPolling();
+    if (body.status === 'error') {
+      cutProgressEl.textContent = body.error || 'Cut analysis failed.';
+      renderCutPlaceholder(body.error || 'Cut analysis failed.');
+    } else if (body.status === 'absent') {
+      showCutOffer();
+    } else {
+      cutProgressEl.textContent = 'Cached';
+      renderCut(body);
+    }
+  } catch (err) {
+    stopCutPolling();
+    cutProgressEl.textContent = err.message;
+  } finally {
+    syncCutRunButton();
   }
 }
 
-function renderCompare(_body) {
-  // Per-session write-ups live under Sessions; Split stays aggregate-only.
-  compareBodyEl.hidden = true;
-  compareBodyEl.innerHTML = '';
-}
-
-function buildReviewQueue(body) {
-  return (body.sessions || []).filter(
-    (s) => s.status === 'done' && ((s.themes && s.themes.length) || s.text || s.insights)
+function showCutOffer() {
+  const n = analyzedCount();
+  cutProgressEl.textContent = n ? 'Not analyzed yet' : 'No analyzed sessions';
+  renderCutPlaceholder(
+    n
+      ? 'This cut has not been analyzed yet. Click "Analyze this cut" to have the model read the write-ups on both sides.'
+      : 'Analyze a cohort first, then pick a cut.'
   );
 }
 
-function renderReview() {
-  reviewQueue = cohort ? buildReviewQueue(cohort) : [];
-  if (!reviewQueue.length) {
-    reviewProgressEl.textContent = 'No sessions to review';
-    reviewBodyEl.innerHTML =
-      '<div class="insights-placeholder">Analyze a cohort first, then accept or reject themes here.</div>';
+/** Show a cached cut when one exists; never spends a model call on its own. */
+async function loadCut() {
+  stopCutPolling();
+  if (!cohortId) {
+    renderCutPlaceholder('Analyze a cohort, then pick a cut.');
     return;
   }
-  if (reviewIndex >= reviewQueue.length) reviewIndex = 0;
-  const entry = reviewQueue[reviewIndex];
-  reviewProgressEl.textContent = `${reviewIndex + 1} / ${reviewQueue.length} · ${
-    entry.qa_status || 'pending'
-  }`;
-  reviewDraftThemes = [...(entry.themes || [])];
-  const campaign = entry.attribution && entry.attribution.utm_campaign;
-  const source = entry.attribution && entry.attribution.utm_source;
-  const filterLabel = entry.filter === 'purchased' ? 'Purchased' : 'All';
-
-  const themeEdit = `
-    <div class="theme-edit" id="review-themes">
-      ${reviewDraftThemes
-        .map(
-          (t) =>
-            `<span class="theme-chip">${escapeHtml(t)}<button type="button" class="remove" data-theme="${escapeAttr(
-              t
-            )}" title="Remove">×</button></span>`
-        )
-        .join('')}
-      <select class="add-theme" id="review-add-theme">
-        <option value="">+ add theme</option>
-        ${(reviewVocab.length ? reviewVocab : reviewDraftThemes)
-          .filter((t) => !reviewDraftThemes.includes(t))
-          .map((t) => `<option value="${escapeAttr(t)}">${escapeHtml(t)}</option>`)
-          .join('')}
-      </select>
-    </div>`;
-
-  reviewBodyEl.innerHTML = `
-    <article class="review-card" data-sid="${escapeAttr(entry.session_id)}">
-      <div class="seg">
-        <span class="sid">${escapeHtml(entry.session_id.slice(0, 8))}…</span>
-        <span class="badge ${entry.filter === 'purchased' ? 'purchased' : 'all'}">${filterLabel}</span>
-        ${campaign ? `<span class="attr-badge">${escapeHtml(campaign)}</span>` : ''}
-        ${source ? `<span class="attr-badge">${escapeHtml(source)}</span>` : ''}
-        ${entry.attribution && entry.attribution.fbclid ? `<span class="attr-badge">Meta</span>` : ''}
-        ${qaBadge(entry.qa_status)}
-        <button type="button" class="open" data-sid="${escapeAttr(entry.session_id)}">Open in Replay</button>
-      </div>
-      <div><strong>Themes</strong></div>
-      ${themeEdit}
-      ${
-        entry.standout
-          ? `<p class="insight-standout">${escapeHtml(entry.standout)}</p>`
-          : ''
-      }
-      <details>
-        <summary>Full write-up</summary>
-        <div class="md">${renderMarkdown(entry.text || '')}</div>
-      </details>
-      <div class="qa-actions">
-        <button type="button" class="primary" data-qa="accepted">Accept into rollups (A)</button>
-        <button type="button" class="danger" data-qa="rejected">Reject (R)</button>
-        <button type="button" data-qa="skip">Skip (S / N)</button>
-      </div>
-    </article>`;
-
-  ensureReviewVocab(entry.session_id);
-
-  reviewBodyEl.querySelector('.open')?.addEventListener('click', () => openSession(entry.session_id));
-  reviewBodyEl.querySelectorAll('button.remove').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      reviewDraftThemes = reviewDraftThemes.filter((t) => t !== btn.dataset.theme);
-      entry.themes = [...reviewDraftThemes];
-      renderReview();
-    });
-  });
-  const addEl = reviewBodyEl.querySelector('#review-add-theme');
-  addEl?.addEventListener('change', () => {
-    if (!addEl.value) return;
-    if (!reviewDraftThemes.includes(addEl.value)) reviewDraftThemes.push(addEl.value);
-    entry.themes = [...reviewDraftThemes];
-    renderReview();
-  });
-  reviewBodyEl.querySelectorAll('[data-qa]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const action = btn.dataset.qa;
-      if (action === 'skip') {
-        reviewIndex = (reviewIndex + 1) % reviewQueue.length;
-        renderReview();
-        return;
-      }
-      submitReview(entry.session_id, action, reviewDraftThemes);
-    });
-  });
-}
-
-async function ensureReviewVocab(sessionId) {
-  if (reviewVocab.length) return;
+  cutProgressEl.textContent = 'Checking…';
   try {
-    const body = await fetchJson(qaUrl(sessionId));
-    reviewVocab = body.vocab || [];
-    if (reviewVocab.length) renderReview();
-  } catch {
-    /* leave draft themes only */
-  }
-}
-
-async function submitReview(sessionId, status, themes) {
-  try {
-    await fetchJson(qaUrl(sessionId), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status, themes }),
-    });
-    const entry = (cohort.sessions || []).find((s) => s.session_id === sessionId);
-    if (entry) {
-      entry.qa_status = status;
-      entry.themes = [...themes];
-      entry.qa = { status, themes };
+    const body = await fetchCut(cohortId);
+    if (body.status === 'running') {
+      cutProgressEl.textContent = 'Analyzing…';
+      renderCutPlaceholder('Reading both sides of this cut. This takes a few seconds.');
+      cutPollTimer = setTimeout(pollCut, POLL_MS);
+      return;
     }
-    reviewIndex = (reviewIndex + 1) % Math.max(reviewQueue.length, 1);
-    renderQueue(cohort);
-    renderCompare(cohort);
-    renderReview();
-    refreshSummary().catch(() => {});
+    if (body.status === 'absent') {
+      showCutOffer();
+      return;
+    }
+    if (body.status === 'error') {
+      cutProgressEl.textContent = body.error || 'Cut analysis failed.';
+      renderCutPlaceholder(body.error || 'Cut analysis failed.');
+      return;
+    }
+    cutProgressEl.textContent = body.cached ? 'Cached' : 'Ready';
+    renderCut(body);
   } catch (err) {
-    reviewProgressEl.textContent = err.message;
+    cutProgressEl.textContent = err.message;
+    renderCutPlaceholder(err.message);
+  } finally {
+    syncCutRunButton();
   }
 }
 
-function onReviewKeydown(e) {
-  if (activeTab !== 'review' || !document.body.classList.contains('mode-insights')) return;
-  if (e.target.closest('input, select, textarea')) return;
-  const key = e.key.toLowerCase();
-  if (!reviewQueue.length) return;
-  const entry = reviewQueue[reviewIndex];
-  if (!entry) return;
-  if (key === 'a') {
-    e.preventDefault();
-    submitReview(entry.session_id, 'accepted', reviewDraftThemes);
-  } else if (key === 'r') {
-    e.preventDefault();
-    submitReview(entry.session_id, 'rejected', reviewDraftThemes);
-  } else if (key === 'n' || key === 's') {
-    e.preventDefault();
-    reviewIndex = (reviewIndex + 1) % reviewQueue.length;
-    renderReview();
+async function runCut() {
+  if (!cohortId || !analysisEnabled) return;
+  stopCutPolling();
+  cutRunBtn.disabled = true;
+  cutProgressEl.textContent = 'Analyzing…';
+  renderCutPlaceholder('Reading both sides of this cut. This takes a few seconds.');
+  try {
+    const body = await fetchCut(cohortId, { run: true });
+    if (body.status === 'running') {
+      cutPollTimer = setTimeout(pollCut, POLL_MS);
+      return;
+    }
+    cutProgressEl.textContent = 'Ready';
+    renderCut(body);
+  } catch (err) {
+    cutProgressEl.textContent = err.message;
+    renderCutPlaceholder(err.message);
+  } finally {
+    syncCutRunButton();
   }
+}
+
+function renderCohortOptions(cohorts) {
+  if (!cohorts.length) {
+    cohortSelectEl.innerHTML = '<option value="">No cohorts yet</option>';
+    return;
+  }
+  cohortSelectEl.innerHTML = cohorts
+    .map((c) => {
+      const prog = c.progress || {};
+      const suffix =
+        c.status === 'running' || c.status === 'queued'
+          ? ` — analyzing ${prog.done || 0}/${prog.total || 0}`
+          : '';
+      return `<option value="${escapeAttr(c.id)}">${escapeHtml(
+        c.label || c.id
+      )}${escapeHtml(suffix)}</option>`;
+    })
+    .join('');
+  if (cohortId) cohortSelectEl.value = cohortId;
 }
 
 function renderCohort(body) {
-  const prevStatus = cohort && cohort.status;
   cohort = body;
+  cohortId = body.id || cohortId;
   const text = progressText(body);
-  labelEl.textContent = body.label || 'Sample cohort';
+  labelEl.textContent = body.label || 'Sessions';
   progressEl.textContent = text;
-  compareProgressEl.textContent = text;
   syncRunButtons();
   renderQueue(body);
-  renderCompare(body);
-  if (activeTab === 'review') renderReview();
-  const hasInsights = (body.sessions || []).some(
-    (s) => s.status === 'done' && ((s.themes && s.themes.length) || s.text)
-  );
-  if (hasInsights) {
-    refreshSummary().catch(() => {});
-  } else {
-    compareSummaryEl.innerHTML =
-      body.status === 'running' || body.status === 'queued'
-        ? '<div class="insights-placeholder">Analyzing sessions… Split results will appear here when themes are ready.</div>'
-        : '<div class="insights-placeholder">Analyze 10 sessions, then pick a split to see what differs between the two groups.</div>';
-    renderThemeExamples(null);
-  }
 
-  const running = body.status === 'running' || body.status === 'queued';
+  const running = cohortIsRunning();
   if (running && !autoSwitchedForRun) {
     setTab('queue');
     autoSwitchedForRun = true;
-  } else if (
-    hasInsights &&
-    autoSwitchedForRun &&
-    prevStatus &&
-    (prevStatus === 'running' || prevStatus === 'queued') &&
-    !running
-  ) {
-    setTab('compare');
+  } else if (!running && autoSwitchedForRun) {
+    setTab('cut');
     autoSwitchedForRun = false;
-  } else if (hasInsights && !running && activeTab === 'queue' && !autoSwitchedForRun) {
-    setTab('compare');
   }
 
   schedulePoll();
@@ -647,39 +474,53 @@ function renderCohort(body) {
 
 function resetEmptyState() {
   cohort = null;
-  summary = null;
-  selectedTheme = null;
+  cohortId = null;
   autoSwitchedForRun = false;
   labelEl.textContent = 'Sessions';
-  compareLabelEl.textContent = 'Sample of 10';
+  cutLabelEl.textContent = 'Compare';
   progressEl.textContent = 'No cohort yet';
-  compareProgressEl.textContent = 'No cohort yet';
-  reviewProgressEl.textContent = 'No sessions to review';
+  cutProgressEl.textContent = 'No cohort yet';
   syncRunButtons();
-  compareSummaryEl.innerHTML =
-    '<div class="insights-placeholder">Analyze 10 sessions, then pick a split to see what differs between the two groups.</div>';
-  renderThemeExamples(null);
+  renderCutPlaceholder(
+    'Analyze a cohort, then pick a cut to see what the sessions have in common and where the two groups differ.'
+  );
   renderEmpty(
     'Run analysis on 5 purchased and 5 other sessions. Open any row to watch it in Replay.'
   );
-  compareBodyEl.hidden = true;
-  compareBodyEl.innerHTML = '';
-  reviewBodyEl.innerHTML =
-    '<div class="insights-placeholder">Optional: fix bad theme tags before you trust a split.</div>';
+}
+
+/** Reload the cohort list, then the selected cohort and its cut. */
+export async function refreshCohorts() {
+  const body = await fetchJson(cohortsUrl());
+  const cohorts = body.cohorts || [];
+  if (!cohorts.length) {
+    renderCohortOptions([]);
+    resetEmptyState();
+    return;
+  }
+  if (!cohortId || !cohorts.some((c) => c.id === cohortId)) {
+    cohortId = cohorts[0].id;
+  }
+  renderCohortOptions(cohorts);
+  await refreshCohort();
+  await loadCut();
 }
 
 export async function refreshCohort() {
+  if (!cohortId) {
+    resetEmptyState();
+    return;
+  }
   try {
-    const body = await fetchJson(cohortUrl());
+    const body = await fetchJson(cohortUrl(cohortId));
     renderCohort(body);
   } catch (err) {
     stopPolling();
-    if (/no cohort yet/i.test(err.message || '')) {
+    if (/no cohort|no such cohort/i.test(err.message || '')) {
       resetEmptyState();
       return;
     }
     progressEl.textContent = err.message;
-    compareProgressEl.textContent = err.message;
     throw err;
   }
 }
@@ -687,19 +528,36 @@ export async function refreshCohort() {
 async function runCohort() {
   if (!analysisEnabled || runBtn.disabled) return;
   autoSwitchedForRun = false;
-  for (const btn of [runBtn, runBtnCompare]) {
-    btn.disabled = true;
-    btn.textContent = 'Starting…';
-  }
+  runBtn.disabled = true;
+  runBtn.textContent = 'Starting…';
   progressEl.textContent = 'Sampling sessions…';
-  compareProgressEl.textContent = 'Sampling sessions…';
   try {
-    const body = await fetchJson(cohortUrl({ start: true }), { method: 'POST' });
+    const body = await fetchJson(createCohortUrl(), { method: 'POST' });
+    cohortId = body.id;
     renderCohort(body);
+    await refreshCohorts();
   } catch (err) {
     progressEl.textContent = err.message;
-    compareProgressEl.textContent = err.message;
     syncRunButtons();
+  }
+}
+
+async function renameCohort() {
+  if (!cohortId || !cohort) return;
+  const next = window.prompt('Name this cohort', cohort.label || '');
+  if (next === null) return;
+  const label = next.trim();
+  if (!label) return;
+  try {
+    const body = await fetchJson(cohortUrl(cohortId), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    });
+    renderCohort(body);
+    await refreshCohorts();
+  } catch (err) {
+    progressEl.textContent = err.message;
   }
 }
 
@@ -715,21 +573,29 @@ export function initInsights() {
     });
   });
   runBtn.addEventListener('click', runCohort);
-  runBtnCompare.addEventListener('click', runCohort);
+  renameBtn.addEventListener('click', renameCohort);
+  if (cutRunBtn) cutRunBtn.addEventListener('click', runCut);
+  cohortSelectEl.addEventListener('change', () => {
+    cohortId = cohortSelectEl.value || null;
+    stopCutPolling();
+    refreshCohort()
+      .then(loadCut)
+      .catch(() => {});
+  });
   if (splitEl) {
     splitEl.addEventListener('change', () => {
-      selectedTheme = null;
-      if (cohort) refreshSummary().catch(() => {});
+      stopCutPolling();
+      loadCut().catch(() => {});
     });
   }
-  document.addEventListener('keydown', onReviewKeydown);
-  setTab('compare');
+  setTab('cut');
 
   const projectSelect = document.getElementById('project-select');
   projectSelect.addEventListener('change', () => {
     setProject(projectSelect.value);
+    cohortId = null;
     if (document.body.classList.contains('mode-insights')) {
-      refreshCohort().catch(() => {});
+      refreshCohorts().catch(() => {});
     }
   });
 }
