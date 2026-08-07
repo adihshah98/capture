@@ -23,13 +23,17 @@ from typing import Optional
 BASE_DIR = Path(__file__).resolve().parent
 
 ANALYSIS_FILE = "analysis.json"
-ANALYSIS_INSIGHTS_FILE = "analysis.insights.json"
-ANALYSIS_QA_FILE = "analysis.qa.json"
 ANALYSIS_STATUS_FILE = "analysis.status.json"
 ANALYSIS_DIR = ".analysis"
+# Pre-multi-cohort layout: one cohort.json per pool, migrated on first read.
 COHORT_FILE = "cohort.json"
+COHORTS_DIR = "cohorts"
+CUTS_SUFFIX = ".cuts.json"
 # Same shape as server.SAFE_CHUNK — keep local so the CLI does not import server.
 SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
+# Cohort ids are ours to mint ("cohort-<ms>"), but they land in filenames, so
+# validate rather than trust anything arriving from a URL.
+SAFE_COHORT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
@@ -71,36 +75,6 @@ def _gates() -> tuple:
         _gate_loop = loop
     return _extract_gate, _model_gate
 
-# Controlled vocabularies — the model maps free text onto these tags (+ other:…).
-# Grow slowly; free-form themes make cohort clustering noise.
-THEME_VOCAB = (
-    "size_chart_confusion",
-    "shipping_hesitation",
-    "price_hesitation",
-    "trust_or_reviews",
-    "navigation_confusion",
-    "form_friction",
-    "checkout_friction",
-    "add_to_cart_friction",
-    "product_info_gap",
-    "promo_or_discount_seeking",
-    "comparison_shopping",
-    "rage_or_repeated_clicks",
-    "slow_or_idle_on_page",
-    "exit_before_checkout",
-    "technical_or_asset_issues",
-)
-PAGE_VOCAB = ("home", "plp", "pdp", "cart", "checkout", "collection", "account", "other")
-OUTCOME_SIGNAL_VOCAB = (
-    "bounced_early",
-    "browsed_products",
-    "added_to_cart",
-    "reached_checkout",
-    "purchased",
-    "abandoned_cart",
-)
-CONFIDENCE_VOCAB = ("low", "medium", "high")
-
 SYSTEM_PROMPT = """You analyse one recorded web session for a product team.
 
 You receive a measured digest and a chronological sequence of frames from the
@@ -136,36 +110,6 @@ Two or three observations a product team could act on. If the evidence is thin,
 say so instead of padding.
 
 Keep it under 300 words. No preamble."""
-
-INSIGHTS_PROMPT = """You turn one session analysis into structured tags for cohort comparison.
-
-Use ONLY the measured digest and the markdown write-up. Do not invent pages,
-clicks, or outcomes that are not evidenced there.
-
-Return a single JSON object with this exact shape:
-{
-  "themes": ["…"],
-  "friction": [{"atMs": 42000, "label": "short_snake_case"}],
-  "pages": ["pdp", "cart"],
-  "outcome_signals": ["reached_checkout"],
-  "confidence": "low" | "medium" | "high"
-}
-
-themes — pick zero or more from this controlled vocabulary (prefer these):
-""" + ", ".join(THEME_VOCAB) + """
-If something important is missing, use other:<short_snake_case> (one theme).
-Do not invent free-form theme strings outside the vocab or other:.
-
-pages — only from: """ + ", ".join(PAGE_VOCAB) + """
-
-outcome_signals — only from: """ + ", ".join(OUTCOME_SIGNAL_VOCAB) + """
-
-friction.atMs is milliseconds from session start when known; omit entries you
-cannot place. label is a short snake_case phrase grounded in the write-up.
-
-confidence reflects how much evidence the digest and write-up give, not how
-interesting the session felt. Prefer fewer accurate tags over many guesses."""
-
 
 def runtime_present() -> bool:
     """Whether the headless reconstruction can run: node, the extractor, the bundle."""
@@ -224,21 +168,31 @@ def clear_job(session_dir: Path) -> None:
 def clear_analysis(session_dir: Path) -> None:
     """Drop a finished result so a re-analyze starts clean."""
     (session_dir / ANALYSIS_FILE).unlink(missing_ok=True)
-    (session_dir / ANALYSIS_INSIGHTS_FILE).unlink(missing_ok=True)
-    (session_dir / ANALYSIS_QA_FILE).unlink(missing_ok=True)
+    # Sidecars from the retired theme/QA pass — inert now, but a re-analyze is
+    # the natural moment to stop carrying them.
+    for legacy in ("analysis.insights.json", "analysis.qa.json"):
+        (session_dir / legacy).unlink(missing_ok=True)
     shutil.rmtree(session_dir / ANALYSIS_DIR, ignore_errors=True)
 
 
-def insights_path(session_dir: Path) -> Path:
-    return session_dir / ANALYSIS_INSIGHTS_FILE
+def cohorts_dir(pool: Path) -> Path:
+    """Cohorts live beside the sessions directory (project root / data root)."""
+    return pool.parent / COHORTS_DIR
 
 
-def qa_path(session_dir: Path) -> Path:
-    return session_dir / ANALYSIS_QA_FILE
+def cohort_path(pool: Path, cohort_id: str) -> Path:
+    return cohorts_dir(pool) / f"{safe_cohort_id(cohort_id)}.json"
 
 
-def read_insights(session_dir: Path) -> Optional[dict]:
-    path = insights_path(session_dir)
+def safe_cohort_id(cohort_id: str) -> str:
+    """Cohort ids reach the filesystem, so keep them to a known-safe alphabet."""
+    raw = str(cohort_id or "").strip()
+    if not raw or not SAFE_COHORT_ID.match(raw):
+        raise ValueError("bad cohort id")
+    return raw
+
+
+def _read_cohort_file(path: Path) -> Optional[dict]:
     if not path.is_file():
         return None
     try:
@@ -248,200 +202,59 @@ def read_insights(session_dir: Path) -> Optional[dict]:
         return None
 
 
-def write_insights(session_dir: Path, insights: dict) -> dict:
-    path = insights_path(session_dir)
-    path.write_text(json.dumps(insights, indent=2))
-    return insights
+def migrate_legacy_cohort(pool: Path) -> None:
+    """Move a pre-multi-cohort cohort.json into the cohorts directory, once."""
+    legacy = pool.parent / COHORT_FILE
+    if not legacy.is_file():
+        return
+    data = _read_cohort_file(legacy)
+    if data and isinstance(data.get("id"), str):
+        try:
+            target = cohort_path(pool, data["id"])
+        except ValueError:
+            legacy.unlink(missing_ok=True)
+            return
+        if not target.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(data, indent=2))
+    legacy.unlink(missing_ok=True)
 
 
-def read_qa(session_dir: Path) -> Optional[dict]:
-    path = qa_path(session_dir)
-    if not path.is_file():
-        return None
+def read_cohort(pool: Path, cohort_id: str) -> Optional[dict]:
     try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
-
-
-def write_qa(session_dir: Path, qa: dict) -> dict:
-    path = qa_path(session_dir)
-    path.write_text(json.dumps(qa, indent=2))
-    return qa
-
-
-def normalize_qa(raw: Optional[dict], insights: Optional[dict] = None) -> dict:
-    """Normalize a QA payload. Themes default to insights themes when omitted."""
-    base_themes = list((insights or {}).get("themes") or [])
-    data = raw if isinstance(raw, dict) else {}
-    status = data.get("status") or "pending"
-    if status not in ("pending", "accepted", "rejected"):
-        status = "pending"
-    themes = []
-    seen = set()
-    source = data["themes"] if isinstance(data.get("themes"), list) else base_themes
-    for item in source:
-        theme = normalize_theme(item)
-        if theme and theme not in seen:
-            seen.add(theme)
-            themes.append(theme)
-    out = {
-        "status": status,
-        "themes": themes,
-        "updated_at": int(data.get("updated_at") or time.time() * 1000),
-    }
-    note = data.get("note")
-    if isinstance(note, str) and note.strip():
-        out["note"] = note.strip()[:500]
-    return out
-
-
-def effective_themes(insights: Optional[dict], qa: Optional[dict]) -> list:
-    """Themes used for rollups: QA override when present, else insights."""
-    source = None
-    if qa and isinstance(qa.get("themes"), list):
-        source = qa["themes"]
-    elif insights:
-        source = insights.get("themes") or []
-    else:
-        source = []
-    themes = []
-    seen = set()
-    for item in source:
-        theme = normalize_theme(item)
-        if theme and theme not in seen:
-            seen.add(theme)
-            themes.append(theme)
-    return themes
-
-
-def qa_allows_rollup(qa: Optional[dict], qa_mode: str = "include_pending") -> bool:
-    """Whether this session's themes enter Compare rollups."""
-    status = (qa or {}).get("status") or "pending"
-    if qa_mode == "raw":
-        return True
-    if qa_mode == "accepted":
-        return status == "accepted"
-    # include_pending: accepted + pending/no-QA; exclude rejected
-    return status != "rejected"
-
-
-def empty_insights(error: Optional[str] = None) -> dict:
-    out = {
-        "themes": [],
-        "friction": [],
-        "pages": [],
-        "outcome_signals": [],
-        "confidence": "low",
-    }
-    if error:
-        out["error"] = error
-    return out
-
-
-def _slug_tag(raw: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower()).strip("_")
-    return slug[:64]
-
-
-def normalize_theme(raw) -> Optional[str]:
-    if not isinstance(raw, str):
-        return None
-    tag = raw.strip().lower()
-    if not tag:
-        return None
-    if tag in THEME_VOCAB:
-        return tag
-    if tag.startswith("other:"):
-        slug = _slug_tag(tag[6:])
-        return f"other:{slug}" if slug else None
-    # Free-form → other:<slug> so cohorts stay countable.
-    slug = _slug_tag(tag)
-    return f"other:{slug}" if slug else None
-
-
-def normalize_insights(raw) -> dict:
-    """Map model output onto the controlled vocabularies."""
-    if not isinstance(raw, dict):
-        return empty_insights("insights were not an object")
-
-    themes = []
-    seen = set()
-    for item in raw.get("themes") or []:
-        theme = normalize_theme(item)
-        if theme and theme not in seen:
-            seen.add(theme)
-            themes.append(theme)
-
-    pages = []
-    seen_pages = set()
-    for item in raw.get("pages") or []:
-        if not isinstance(item, str):
-            continue
-        page = item.strip().lower()
-        if page in PAGE_VOCAB and page not in seen_pages:
-            seen_pages.add(page)
-            pages.append(page)
-
-    signals = []
-    seen_signals = set()
-    for item in raw.get("outcome_signals") or []:
-        if not isinstance(item, str):
-            continue
-        signal = item.strip().lower()
-        if signal in OUTCOME_SIGNAL_VOCAB and signal not in seen_signals:
-            seen_signals.add(signal)
-            signals.append(signal)
-
-    friction = []
-    for item in raw.get("friction") or []:
-        if not isinstance(item, dict):
-            continue
-        label = _slug_tag(str(item.get("label") or ""))
-        if not label:
-            continue
-        entry = {"label": label}
-        at = item.get("atMs")
-        if isinstance(at, (int, float)) and not isinstance(at, bool) and at >= 0:
-            entry["atMs"] = int(at)
-        friction.append(entry)
-
-    confidence = raw.get("confidence")
-    if confidence not in CONFIDENCE_VOCAB:
-        confidence = "low" if not themes else "medium"
-
-    return {
-        "themes": themes,
-        "friction": friction,
-        "pages": pages,
-        "outcome_signals": signals,
-        "confidence": confidence,
-    }
-
-
-def cohort_path(pool: Path) -> Path:
-    """cohort.json lives next to the sessions directory (project root / data root)."""
-    return pool.parent / COHORT_FILE
-
-
-def read_cohort(pool: Path) -> Optional[dict]:
-    path = cohort_path(pool)
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else None
-    except Exception:
+        return _read_cohort_file(cohort_path(pool, cohort_id))
+    except ValueError:
         return None
 
 
 def write_cohort(pool: Path, cohort: dict) -> dict:
     cohort = {**cohort, "updated_at": int(time.time() * 1000)}
-    path = cohort_path(pool)
+    path = cohort_path(pool, cohort["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cohort, indent=2))
     return cohort
+
+
+def list_cohorts(pool: Path) -> list:
+    """Every cohort in this pool, newest first. Membership only — no write-ups."""
+    migrate_legacy_cohort(pool)
+    out = []
+    directory = cohorts_dir(pool)
+    if not directory.is_dir():
+        return out
+    for path in directory.glob("*.json"):
+        if path.name.endswith(CUTS_SUFFIX):
+            continue
+        data = _read_cohort_file(path)
+        if data and isinstance(data.get("id"), str):
+            out.append(data)
+    out.sort(key=lambda c: c.get("created_at") or 0, reverse=True)
+    return out
+
+
+def latest_cohort(pool: Path) -> Optional[dict]:
+    cohorts = list_cohorts(pool)
+    return cohorts[0] if cohorts else None
 
 
 def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
@@ -455,25 +268,13 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
         row.pop("standout", None)
         row.pop("model", None)
         row.pop("frame_count", None)
-        row.pop("themes", None)
-        row.pop("insights", None)
-        row.pop("insights_file", None)
         row.pop("attribution", None)
-        row.pop("qa", None)
-        row.pop("qa_status", None)
         session_dir = pool / row["session_id"]
         cached = read_analysis(session_dir)
         job = read_job(session_dir)
         if cached:
             row["status"] = "done"
             row["analysis"] = ANALYSIS_FILE
-            if insights_path(session_dir).is_file():
-                row["insights_file"] = ANALYSIS_INSIGHTS_FILE
-            qa = read_qa(session_dir)
-            if qa:
-                row["qa_status"] = qa.get("status") or "pending"
-            else:
-                row["qa_status"] = "pending"
             row.pop("error", None)
             done += 1
         elif job and job.get("status") == "running":
@@ -543,7 +344,7 @@ def standout_line(text: str) -> str:
 
 
 def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
-    """Attach analysis write-ups for Compare — response-only, not written to cohort.json."""
+    """Attach analysis write-ups — response-only, never written to the cohort file."""
     sessions = []
     for entry in cohort.get("sessions") or []:
         row = dict(entry)
@@ -557,87 +358,8 @@ def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
                     row["model"] = cached["model"]
                 if cached.get("frame_count") is not None:
                     row["frame_count"] = cached["frame_count"]
-            insights = read_insights(session_dir)
-            qa = read_qa(session_dir)
-            if qa:
-                row["qa"] = qa
-                row["qa_status"] = qa.get("status") or "pending"
-            else:
-                row["qa_status"] = "pending"
-            if insights or qa:
-                themes = effective_themes(insights, qa)
-                row["themes"] = themes
-                if insights:
-                    row["insights"] = {**insights, "themes": themes}
         sessions.append(row)
     return {**cohort, "sessions": sessions}
-
-
-def count_themes(theme_lists) -> dict:
-    """theme → count, sorted by frequency then name."""
-    counts: dict = {}
-    for themes in theme_lists:
-        for theme in themes or []:
-            if not isinstance(theme, str) or not theme:
-                continue
-            counts[theme] = counts.get(theme, 0) + 1
-    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
-
-
-def theme_examples(rows: list, theme: str, limit: int = 5) -> list:
-    """Short example cards for sessions that carry a theme."""
-    examples = []
-    for row in rows:
-        themes = row.get("themes") or []
-        if theme not in themes:
-            continue
-        attr = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
-        examples.append(
-            {
-                "session_id": row.get("session_id"),
-                "outcome": row.get("outcome"),
-                "standout": row.get("standout") or "",
-                "campaign": attr.get("utm_campaign"),
-                "utm_source": attr.get("utm_source"),
-                "meta": bool(attr.get("fbclid")) or is_meta_attribution(attr),
-                "themes": themes,
-            }
-        )
-        if len(examples) >= limit:
-            break
-    return examples
-
-
-def annotate_theme_stats(theme_counts_map: dict, rows: list) -> list:
-    """List of {theme, count, one_off, examples} sorted by frequency."""
-    out = []
-    for theme, count in sorted(theme_counts_map.items(), key=lambda kv: (-kv[1], kv[0])):
-        out.append(
-            {
-                "theme": theme,
-                "count": count,
-                "one_off": count == 1,
-                "examples": theme_examples(rows, theme),
-            }
-        )
-    return out
-
-
-def theme_cooccurrence(rows: list, limit: int = 10) -> list:
-    """Top theme pairs that co-occur in the same session."""
-    pair_counts: dict = {}
-    for row in rows:
-        themes = sorted({t for t in (row.get("themes") or []) if isinstance(t, str) and t})
-        for i, a in enumerate(themes):
-            for b in themes[i + 1 :]:
-                key = (a, b)
-                pair_counts[key] = pair_counts.get(key, 0) + 1
-    ranked = sorted(pair_counts.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
-    return [
-        {"themes": [a, b], "count": n}
-        for (a, b), n in ranked[:limit]
-        if n >= 2
-    ]
 
 
 def segment_label(attribution: Optional[dict], group_by: str) -> str:
@@ -763,319 +485,193 @@ def slice_label(spec: dict) -> str:
     return " + ".join(parts)
 
 
-def _theme_rates(rows: list) -> tuple:
-    """Return (n_sessions, theme→session_count)."""
-    n = len(rows)
-    counts: dict = {}
-    for row in rows:
-        seen = set()
-        for theme in row.get("themes") or []:
-            if isinstance(theme, str) and theme and theme not in seen:
-                seen.add(theme)
-                counts[theme] = counts.get(theme, 0) + 1
-    return n, counts
+CUT_PRESETS = {
+    "purchased_vs_all": ({"outcome": "purchased"}, {"outcome": "all"}),
+    "meta_vs_rest": ({"utm_source": "meta"}, None),
+    "meta_purchased_vs_rest": ({"outcome": "purchased", "utm_source": "meta"}, None),
+    "google_vs_meta": ({"utm_source": "google"}, {"utm_source": "meta"}),
+    "google_purchased_vs_rest": ({"outcome": "purchased", "utm_source": "google"}, None),
+}
 
 
-def _fmt_ratio(ratio: float) -> str:
-    if ratio >= 10:
-        return f"{ratio:.0f}×"
-    text = f"{ratio:.1f}"
-    if text.endswith(".0"):
-        text = text[:-2]
-    return f"{text}×"
+def cut_key(slice_a: Optional[dict], slice_b: Optional[dict]) -> str:
+    """Stable cache key for a cut. Same two slices always hash the same way."""
+    spec = {
+        "a": normalize_slice(slice_a),
+        "b": normalize_slice(slice_b),
+    }
+    return json.dumps(spec, sort_keys=True, separators=(",", ":"))
 
 
-def theme_display_name(theme: str) -> str:
-    raw = theme[6:] if theme.startswith("other:") else theme
-    return raw.replace("_", " ")
-
-
-def contrast_narrative(contrast: dict) -> list:
-    """Deterministic sentences from A/B theme rates — no model call."""
-    a = contrast.get("a") or {}
-    b = contrast.get("b") or {}
-    a_label = a.get("label") or "slice A"
-    b_label = b.get("label") or "slice B"
-    n_a, n_b = a.get("n") or 0, b.get("n") or 0
-    lines = []
-    if n_a == 0 and n_b == 0:
-        return ["No analyzed sessions match this contrast yet."]
-    if n_a == 0:
-        return [f"No sessions in {a_label} to compare against {b_label}."]
-    if n_b == 0:
-        return [f"Every analyzed session is in {a_label} — nothing left in {b_label}."]
-
-    for item in (contrast.get("enriched_a") or [])[:3]:
-        theme = theme_display_name(item["theme"])
-        a_c, b_c = item["a_count"], item["b_count"]
-        ratio = item.get("ratio")
-        if ratio and ratio >= 1.5 and b_c > 0:
-            lines.append(
-                f"{theme} shows up {_fmt_ratio(ratio)} more often in {a_label} "
-                f"({a_c}/{n_a}) than in {b_label} ({b_c}/{n_b})."
-            )
-        elif b_c == 0 and a_c > 0:
-            lines.append(
-                f"{theme} appears in {a_c}/{n_a} {a_label} sessions and nowhere in {b_label}."
-            )
-        else:
-            lines.append(
-                f"{theme} is more common in {a_label} ({a_c}/{n_a}) than {b_label} ({b_c}/{n_b})."
-            )
-
-    for item in (contrast.get("enriched_b") or [])[:2]:
-        theme = theme_display_name(item["theme"])
-        a_c, b_c = item["a_count"], item["b_count"]
-        ratio = item.get("ratio")
-        if ratio and ratio >= 1.5 and a_c > 0:
-            lines.append(
-                f"{theme} shows up {_fmt_ratio(ratio)} more often in {b_label} "
-                f"({b_c}/{n_b}) than in {a_label} ({a_c}/{n_a})."
-            )
-        elif a_c == 0 and b_c > 0:
-            lines.append(
-                f"{theme} appears in {b_c}/{n_b} {b_label} sessions and nowhere in {a_label}."
-            )
-
-    shared = contrast.get("shared") or []
-    if shared and not lines:
-        names = ", ".join(theme_display_name(s["theme"]) for s in shared[:3])
-        lines.append(f"Both slices share {names}.")
-    elif shared and len(lines) < 2:
-        top = shared[0]
-        lines.append(
-            f"Both sides see {theme_display_name(top['theme'])} "
-            f"({top['a_count']}/{n_a} vs {top['b_count']}/{n_b})."
-        )
-
-    if not lines:
-        lines.append(
-            f"No strong theme differences between {a_label} (n={n_a}) and {b_label} (n={n_b})."
-        )
-    return lines
-
-
-def build_slice_contrast(rows: list, slice_a: Optional[dict], slice_b: Optional[dict] = None) -> dict:
-    """A/B theme contrast. If slice_b is empty, B is the complement of A."""
+def split_rows_by_cut(rows: list, slice_a: Optional[dict], slice_b: Optional[dict]) -> tuple:
+    """(rows_a, rows_b, spec_a, spec_b). An empty B means 'everyone not in A'."""
     spec_a = normalize_slice(slice_a)
     spec_b = normalize_slice(slice_b)
     if slice_is_empty(spec_a) and slice_is_empty(spec_b):
-        # Default: purchased vs non-purchase
-        spec_a = {"outcome": "purchased"}
-        spec_b = {"outcome": "all"}
+        spec_a, spec_b = {"outcome": "purchased"}, {"outcome": "all"}
         complement = False
-    elif slice_is_empty(spec_b):
-        complement = True
     else:
-        complement = False
+        complement = slice_is_empty(spec_b)
 
     rows_a, rows_b = [], []
     for row in rows:
         in_a = row_matches_slice(row, spec_a)
-        if complement:
-            in_b = not in_a
-        else:
-            in_b = row_matches_slice(row, spec_b)
-        # A session matching both custom slices counts in A only (exclusive A).
-        if in_a and in_b and not complement:
-            rows_a.append(row)
-        elif in_a:
+        in_b = (not in_a) if complement else row_matches_slice(row, spec_b)
+        # A session matching both named slices counts in A only.
+        if in_a:
             rows_a.append(row)
         elif in_b:
             rows_b.append(row)
+    return rows_a, rows_b, spec_a, spec_b
 
-    label_a = slice_label(spec_a)
-    label_b = "everyone else" if complement else slice_label(spec_b)
-    n_a, themes_a = _theme_rates(rows_a)
-    n_b, themes_b = _theme_rates(rows_b)
-    all_themes = sorted(set(themes_a) | set(themes_b))
 
-    def rate(count, n):
-        return (count / n) if n else 0.0
+CUT_PROMPT = """You compare two groups of recorded web sessions for a product team.
 
-    enriched_a, enriched_b, shared = [], [], []
-    for theme in all_themes:
-        a_c = themes_a.get(theme, 0)
-        b_c = themes_b.get(theme, 0)
-        a_r, b_r = rate(a_c, n_a), rate(b_c, n_b)
-        item = {
-            "theme": theme,
-            "a_count": a_c,
-            "b_count": b_c,
-            "a_rate": round(a_r, 4),
-            "b_rate": round(b_r, 4),
-            "ratio": round(a_r / b_r, 2) if b_r > 0 else (None if a_c == 0 else None),
-        }
-        # Prefer rate delta for "enriched".
-        if a_r > b_r + 1e-12:
-            if b_r > 0:
-                item["ratio"] = round(a_r / b_r, 2)
-            enriched_a.append(item)
-        elif b_r > a_r + 1e-12:
-            inv = dict(item)
-            if a_r > 0:
-                inv["ratio"] = round(b_r / a_r, 2)
-            else:
-                inv["ratio"] = None
-            enriched_b.append(inv)
-        elif a_c > 0 and b_c > 0:
-            shared.append(item)
+You receive per-session write-ups, each already grounded in that session's
+replay. Group A and Group B are labelled. Work only from what the write-ups
+say — never invent a page, a click, or an outcome that is not written there.
 
-    enriched_a.sort(key=lambda x: (-(x["a_rate"] - x["b_rate"]), -x["a_count"], x["theme"]))
-    enriched_b.sort(key=lambda x: (-(x["b_rate"] - x["a_rate"]), -x["b_count"], x["theme"]))
-    shared.sort(key=lambda x: (-min(x["a_count"], x["b_count"]), x["theme"]))
+Your job is to find patterns ACROSS sessions, not to re-summarise each one.
 
-    for item in enriched_a:
-        item["one_off"] = item["a_count"] == 1
-        item["examples"] = theme_examples(rows_a, item["theme"])
-    for item in enriched_b:
-        item["one_off"] = item["b_count"] == 1
-        item["examples"] = theme_examples(rows_b, item["theme"])
-    for item in shared:
-        item["examples"] = theme_examples(rows_a + rows_b, item["theme"])
+Return a single JSON object with this exact shape:
+{
+  "headline": "one sentence on the sharpest difference between the groups",
+  "shared": ["behaviour both groups show, with session counts"],
+  "a_distinctive": ["what shows up in A and not (or far less) in B"],
+  "b_distinctive": ["what shows up in B and not (or far less) in A"],
+  "caveats": ["what these sessions cannot tell you"]
+}
 
-    contrast = {
-        "a": {
-            "label": label_a,
-            "spec": spec_a,
-            "n": n_a,
-            "themes": dict(sorted(themes_a.items(), key=lambda kv: (-kv[1], kv[0]))),
-            "theme_details": annotate_theme_stats(themes_a, rows_a),
-            "sessions": [
-                {
-                    "session_id": r.get("session_id"),
-                    "outcome": r.get("outcome"),
-                    "themes": r.get("themes") or [],
-                    "standout": r.get("standout") or "",
-                    "attribution": r.get("attribution"),
-                }
-                for r in rows_a
-            ],
-        },
-        "b": {
-            "label": label_b,
-            "spec": {"complement": True} if complement else spec_b,
-            "n": n_b,
-            "themes": dict(sorted(themes_b.items(), key=lambda kv: (-kv[1], kv[0]))),
-            "theme_details": annotate_theme_stats(themes_b, rows_b),
-            "sessions": [
-                {
-                    "session_id": r.get("session_id"),
-                    "outcome": r.get("outcome"),
-                    "themes": r.get("themes") or [],
-                    "standout": r.get("standout") or "",
-                    "attribution": r.get("attribution"),
-                }
-                for r in rows_b
-            ],
-        },
-        "complement": complement,
-        "enriched_a": enriched_a,
-        "enriched_b": enriched_b,
-        "shared": shared,
+Rules that matter:
+- Cite how many sessions back each observation, e.g. "3 of 5 A sessions".
+  Count only sessions whose write-up actually supports the point.
+- With fewer than 3 sessions on a side, say the evidence is thin rather than
+  asserting a pattern. Small samples are the normal case here.
+- A difference you can see in 1 session is an anecdote — put it in caveats,
+  not in a_distinctive or b_distinctive.
+- The write-ups describe what was on screen, not where anyone looked. Keep
+  that distinction: say "reached" or "was shown", never "read" or "noticed".
+- Prefer 2-4 items per list. Empty lists are fine when there is nothing solid.
+- No preamble, no markdown — JSON only."""
+
+
+def _cut_side_text(rows: list, label: str) -> str:
+    """One side's write-ups, labelled per session so the model can cite counts."""
+    if not rows:
+        return f"### {label}\n(no sessions in this group)\n"
+    parts = [f"### {label} — {len(rows)} session(s)\n"]
+    for i, row in enumerate(rows, 1):
+        outcome = "purchased" if row.get("outcome") == "purchased" else "did not purchase"
+        attrs = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
+        bits = [f"outcome: {outcome}"]
+        for key in ("utm_source", "utm_campaign"):
+            if attrs.get(key):
+                bits.append(f"{key}: {attrs[key]}")
+        if attrs.get("fbclid"):
+            bits.append("meta click id present")
+        text = (row.get("text") or "").strip() or "(no write-up)"
+        parts.append(f"--- {label} session {i} ({'; '.join(bits)}) ---\n{text}\n")
+    return "\n".join(parts)
+
+
+def empty_cut_analysis(error: Optional[str] = None) -> dict:
+    out = {
+        "headline": "",
+        "shared": [],
+        "a_distinctive": [],
+        "b_distinctive": [],
+        "caveats": [],
     }
-    contrast["narrative"] = contrast_narrative(contrast)
-    return contrast
+    if error:
+        out["error"] = error
+    return out
 
 
-def build_insights_summary(
-    rows: list,
-    group_by: str = "none",
-    slice_a: Optional[dict] = None,
-    slice_b: Optional[dict] = None,
-) -> dict:
-    """Roll theme counts by outcome and optional attribution segment.
+def normalize_cut_analysis(raw) -> dict:
+    """Coerce the model's JSON into the documented shape, dropping anything else."""
+    data = raw if isinstance(raw, dict) else {}
+    out = empty_cut_analysis()
+    headline = data.get("headline")
+    if isinstance(headline, str):
+        out["headline"] = headline.strip()[:400]
+    for key in ("shared", "a_distinctive", "b_distinctive", "caveats"):
+        items = data.get(key)
+        if not isinstance(items, list):
+            continue
+        clean = []
+        for item in items:
+            if isinstance(item, str) and item.strip():
+                clean.append(item.strip()[:500])
+            if len(clean) >= 8:
+                break
+        out[key] = clean
+    return out
 
-    Each row: {session_id, outcome ("purchased"|"all"), attribution, themes}.
-    Always includes an A/B contrast (default purchased vs non-purchase).
-    """
-    group_by = group_by if group_by in (
-        "utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid", "none"
-    ) else "none"
 
-    by_outcome = {"purchased": [], "all": []}
-    by_segment: dict = {}
-    for row in rows:
-        outcome = "purchased" if row.get("outcome") == "purchased" else "all"
-        themes = list(row.get("themes") or [])
-        by_outcome[outcome].append(themes)
-        label = segment_label(row.get("attribution"), group_by)
-        bucket = by_segment.setdefault(label, {"n": 0, "theme_lists": [], "sessions": []})
-        bucket["n"] += 1
-        bucket["theme_lists"].append(themes)
-        bucket["sessions"].append(
-            {
-                "session_id": row.get("session_id"),
-                "outcome": outcome,
-                "themes": themes,
-            }
-        )
+async def call_gemini_cut(rows_a: list, rows_b: list, label_a: str, label_b: str) -> dict:
+    """One text-only pass over both sides' write-ups."""
+    from google import genai
+    from google.genai import types
 
-    outcome_summary = {}
-    for key, lists in by_outcome.items():
-        outcome_summary[key] = {
-            "n": len(lists),
-            "themes": count_themes(lists),
-        }
-
-    purchased_themes = outcome_summary["purchased"]["themes"]
-    all_themes = outcome_summary["all"]["themes"]
-    all_keys = sorted(set(purchased_themes) | set(all_themes))
-    enriched = {
-        "purchased": [
-            {"theme": t, "purchased": purchased_themes.get(t, 0), "all": all_themes.get(t, 0)}
-            for t in all_keys
-            if purchased_themes.get(t, 0) > all_themes.get(t, 0)
-        ],
-        "all": [
-            {"theme": t, "purchased": purchased_themes.get(t, 0), "all": all_themes.get(t, 0)}
-            for t in all_keys
-            if all_themes.get(t, 0) > purchased_themes.get(t, 0)
-        ],
-    }
-
-    segments = []
-    for label, bucket in sorted(by_segment.items(), key=lambda kv: (-kv[1]["n"], kv[0])):
-        themes = count_themes(bucket["theme_lists"])
-        segments.append(
-            {
-                "segment": label,
-                "n": bucket["n"],
-                "themes": themes,
-                "sessions": bucket["sessions"],
-            }
-        )
-
-    theme_names = sorted(
-        {t for seg in segments for t in seg["themes"]},
-        key=lambda t: (-sum(seg["themes"].get(t, 0) for seg in segments), t),
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    parts = [
+        types.Part.from_text(
+            text=(
+                f"Group A is: {label_a}\nGroup B is: {label_b}\n\n"
+                "The write-ups for both groups follow."
+            )
+        ),
+        types.Part.from_text(text=_cut_side_text(rows_a, "GROUP A")),
+        types.Part.from_text(text=_cut_side_text(rows_b, "GROUP B")),
+    ]
+    response = await client.aio.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[types.Content(role="user", parts=parts)],
+        config=types.GenerateContentConfig(
+            system_instruction=CUT_PROMPT,
+            max_output_tokens=2048,
+            thinking_config=types.ThinkingConfig(thinking_budget=512),
+            temperature=0.2,
+            response_mime_type="application/json",
+        ),
     )
-    col_labels = [seg["segment"] for seg in segments]
-    matrix = [[seg["themes"].get(theme, 0) for seg in segments] for theme in theme_names]
+    return normalize_cut_analysis(_parse_json_object(response.text or ""))
 
-    contrast = build_slice_contrast(rows, slice_a, slice_b)
-    all_theme_counts = count_themes(by_outcome["purchased"] + by_outcome["all"])
 
-    return {
-        "group_by": group_by,
-        "n": len(rows),
-        "themes": [
-            {"theme": theme, "count": count, "one_off": count == 1}
-            for theme, count in all_theme_counts.items()
-        ],
-        "theme_details": annotate_theme_stats(all_theme_counts, rows),
-        "cooccurrence": theme_cooccurrence(rows),
-        "by_outcome": outcome_summary,
-        "enriched": enriched,
-        "by_segment": segments,
-        "theme_x_segment": {
-            "rows": theme_names,
-            "cols": col_labels,
-            "counts": matrix,
-        },
-        "contrast": contrast,
-        "narrative": contrast.get("narrative") or [],
+async def build_cut_analysis(
+    rows: list, slice_a: Optional[dict], slice_b: Optional[dict]
+) -> dict:
+    """Split the cohort by a cut and ask the model what differs across sides."""
+    if not ANALYSIS_ENABLED:
+        raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
+
+    rows_a, rows_b, spec_a, spec_b = split_rows_by_cut(rows, slice_a, slice_b)
+    label_a = slice_label(spec_a)
+    label_b = slice_label(spec_b) if spec_b else f"everyone not in {label_a}"
+
+    base = {
+        "cut": cut_key(slice_a, slice_b),
+        "label_a": label_a,
+        "label_b": label_b,
+        "n_a": len(rows_a),
+        "n_b": len(rows_b),
+        "session_ids_a": [r.get("session_id") for r in rows_a],
+        "session_ids_b": [r.get("session_id") for r in rows_b],
+        "model": GEMINI_MODEL,
+        "created_at": int(time.time() * 1000),
     }
+
+    # Nothing to contrast — say so rather than spending a call on one side.
+    if not rows_a or not rows_b:
+        empty = empty_cut_analysis()
+        which = label_a if not rows_a else label_b
+        empty["headline"] = f"No analyzed sessions in {which} for this cohort."
+        return {**base, "analysis": empty}
+
+    _, model_gate = _gates()
+    async with model_gate:
+        analysis = await call_gemini_cut(rows_a, rows_b, label_a, label_b)
+    return {**base, "analysis": analysis}
 
 
 def sample_cohort_rows(
@@ -1133,9 +729,11 @@ def build_cohort(
 ) -> dict:
     now = int(time.time() * 1000)
     sessions = sample_cohort_rows(conn, pool_key, purchased_n, all_n)
+    stamp = time.strftime("%b %-d, %H:%M", time.localtime(now / 1000))
     return {
         "id": f"cohort-{now}",
-        "label": f"Sample {purchased_n}+{all_n}",
+        # Auto label; renameable once the user decides a cohort is worth keeping.
+        "label": f"Sample {purchased_n}+{all_n} · {stamp}",
         "created_at": now,
         "updated_at": now,
         "status": "queued",
@@ -1143,6 +741,17 @@ def build_cohort(
         "all_n": all_n,
         "sessions": sessions,
     }
+
+
+def rename_cohort(pool: Path, cohort_id: str, label: str) -> Optional[dict]:
+    """Set a cohort's display label. Membership is untouched."""
+    cohort = read_cohort(pool, cohort_id)
+    if not cohort:
+        return None
+    clean = str(label or "").strip()[:120]
+    if not clean:
+        raise ValueError("label cannot be empty")
+    return write_cohort(pool, {**cohort, "label": clean})
 
 
 async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> dict:
@@ -1275,41 +884,14 @@ def _parse_json_object(text: str) -> dict:
     """Parse a JSON object, tolerating optional markdown fences."""
     raw = (text or "").strip()
     if not raw:
-        raise ValueError("empty insights response")
+        raise ValueError("empty model response")
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
     if fence:
         raw = fence.group(1).strip()
     data = json.loads(raw)
     if not isinstance(data, dict):
-        raise ValueError("insights response was not an object")
+        raise ValueError("model response was not an object")
     return data
-
-
-async def call_gemini_insights(digest: dict, markdown: str) -> dict:
-    """Cheap text-only pass: map digest + markdown onto the controlled vocab."""
-    from google import genai
-    from google.genai import types
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    parts = [
-        types.Part.from_text(
-            text="Measured digest for this session:\n\n"
-            + json.dumps(prompt_digest(digest), indent=2)
-        ),
-        types.Part.from_text(text="\nMarkdown write-up for this session:\n\n" + markdown),
-    ]
-    response = await client.aio.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[types.Content(role="user", parts=parts)],
-        config=types.GenerateContentConfig(
-            system_instruction=INSIGHTS_PROMPT,
-            max_output_tokens=1024,
-            thinking_config=types.ThinkingConfig(thinking_budget=256),
-            temperature=0.1,
-            response_mime_type="application/json",
-        ),
-    )
-    return normalize_insights(_parse_json_object(response.text or ""))
 
 
 async def analyze_session(session_dir: Path, chunk_names: list, force: bool = False) -> dict:
@@ -1319,15 +901,11 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
     if not force:
         cached = read_analysis(session_dir)
         if cached:
-            insights = read_insights(session_dir)
-            if insights:
-                return {**cached, "insights": insights}
             return cached
 
     analysis_path, out_dir = analysis_paths(session_dir)
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True, exist_ok=True)
-    insights_path(session_dir).unlink(missing_ok=True)
 
     extract_gate, model_gate = _gates()
 
@@ -1336,21 +914,8 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
     if digest.get("error"):
         raise RuntimeError(digest["error"])
 
-    # Held across both calls: the second one only makes sense for the write-up
-    # the first produced, and re-queueing between them would just add latency.
     async with model_gate:
         text = await call_gemini(digest, digest.get("frames") or [])
-
-        try:
-            insights = await call_gemini_insights(digest, text)
-        except Exception as exc:
-            insights = empty_insights(str(exc))
-    insights = {
-        **insights,
-        "model": GEMINI_MODEL,
-        "created_at": int(time.time() * 1000),
-    }
-    write_insights(session_dir, insights)
 
     result = {
         "status": "done",
@@ -1359,9 +924,8 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
         "created_at": int(time.time() * 1000),
         "frame_count": len(digest.get("frames") or []),
         "warnings": digest.get("warnings") or [],
-        "insights": insights,
     }
-    analysis_path.write_text(json.dumps({k: v for k, v in result.items() if k != "insights"}))
+    analysis_path.write_text(json.dumps(result))
     clear_job(session_dir)
     return result
 
@@ -1401,7 +965,10 @@ async def _cli_run_cohort(pool: Path, pool_key: str, purchased_n: int, all_n: in
         return 1
 
     write_cohort(pool, {**cohort, "status": "running"})
-    print(f"{cohort['label']}: {len(cohort['sessions'])} session(s) → {cohort_path(pool)}")
+    print(
+        f"{cohort['label']}: {len(cohort['sessions'])} session(s) → "
+        f"{cohort_path(pool, cohort['id'])}"
+    )
 
     for entry in cohort["sessions"]:
         session_dir = pool / entry["session_id"]

@@ -542,7 +542,6 @@ _index_lock = threading.Lock()
 _index_conn: Optional[sqlite3.Connection] = None
 
 ATTRIBUTION_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid")
-SUMMARY_GROUP_BY = frozenset({"utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid", "none"})
 
 def parse_attribution(url: Optional[str]) -> Optional[dict]:
     """Pull utm_* / fbclid from an entry URL for indexing and segment rollups."""
@@ -1027,8 +1026,8 @@ _cohort_tasks: dict = {}
 def _analysis_key(session_dir: Path) -> str:
     return str(session_dir.resolve())
 
-def _cohort_key(pool: Path) -> str:
-    return str(pool.resolve())
+def _cohort_key(pool: Path, cohort_id: str) -> str:
+    return f"{pool.resolve()}::{cohort_id}"
 
 async def _run_analysis_job(session_dir: Path, chunk_names: list, force: bool = True) -> None:
     analyze.write_job(session_dir, "running")
@@ -1093,10 +1092,10 @@ async def _await_session_analysis(session_dir: Path, force: bool = False) -> Non
     if not analyze.read_analysis(session_dir):
         raise RuntimeError("analysis finished without a result")
 
-async def _run_cohort_job(pool: Path, force: bool = False) -> None:
-    key = _cohort_key(pool)
+async def _run_cohort_job(pool: Path, cohort_id: str, force: bool = False) -> None:
+    key = _cohort_key(pool, cohort_id)
     try:
-        cohort = analyze.read_cohort(pool)
+        cohort = analyze.read_cohort(pool, cohort_id)
         if not cohort:
             return
         cohort = {**cohort, "status": "running"}
@@ -1137,7 +1136,7 @@ async def _run_cohort_job(pool: Path, force: bool = False) -> None:
                 return_exceptions=True,
             )
 
-        final = analyze.enrich_cohort_status(pool, analyze.read_cohort(pool) or cohort)
+        final = analyze.enrich_cohort_status(pool, analyze.read_cohort(pool, cohort_id) or cohort)
         analyze.write_cohort(pool, final)
     finally:
         _cohort_tasks.pop(key, None)
@@ -1150,21 +1149,6 @@ def get_analysis(request: Request, session_id: str, project: Optional[str] = Que
     if cached:
         if "status" not in cached:
             cached = {**cached, "status": "done"}
-        insights = analyze.read_insights(session_dir)
-        qa = analyze.read_qa(session_dir)
-        if insights:
-            themes = analyze.effective_themes(insights, qa)
-            cached = {**cached, "insights": {**insights, "themes": themes}}
-        if qa:
-            cached = {**cached, "qa": qa}
-        elif insights:
-            cached = {
-                **cached,
-                "qa": {
-                    "status": "pending",
-                    "themes": list(insights.get("themes") or []),
-                },
-            }
         info = session_info(session_dir)
         if info:
             if info.get("order"):
@@ -1182,39 +1166,6 @@ def get_analysis(request: Request, session_id: str, project: Optional[str] = Que
     raise ApiError(404, "not analyzed yet")
 
 
-@app.get("/api/sessions/{session_id}/qa")
-def get_qa(request: Request, session_id: str, project: Optional[str] = Query(None)):
-    require_read_access(request, project)
-    session_dir = resolve_session(session_id, project)
-    insights = analyze.read_insights(session_dir)
-    qa = analyze.read_qa(session_dir)
-    if not insights and not analyze.read_analysis(session_dir):
-        raise ApiError(404, "not analyzed yet")
-    normalized = analyze.normalize_qa(qa, insights)
-    return {
-        **normalized,
-        "vocab": list(analyze.THEME_VOCAB),
-        "raw_themes": list((insights or {}).get("themes") or []),
-    }
-
-
-@app.put("/api/sessions/{session_id}/qa")
-async def put_qa(request: Request, session_id: str, project: Optional[str] = Query(None)):
-    require_read_access(request, project)
-    session_dir = resolve_session(session_id, project)
-    insights = analyze.read_insights(session_dir)
-    if not insights and not analyze.read_analysis(session_dir):
-        raise ApiError(404, "not analyzed yet")
-    try:
-        payload = await request.json()
-    except Exception:
-        raise ApiError(400, "bad payload")
-    if not isinstance(payload, dict):
-        raise ApiError(400, "bad payload")
-    qa = analyze.normalize_qa({**payload, "updated_at": int(time.time() * 1000)}, insights)
-    analyze.write_qa(session_dir, qa)
-    return {**qa, "vocab": list(analyze.THEME_VOCAB)}
-
 @app.post("/api/sessions/{session_id}/analysis")
 async def create_analysis(
     request: Request,
@@ -1230,9 +1181,106 @@ async def create_analysis(
         return JSONResponse({"status": "running"}, status_code=202)
     return result
 
-@app.post("/api/cohort/sessions/{session_id}/retry")
+def _resolve_cohort_or_404(pool: Path, cohort_id: Optional[str]) -> dict:
+    """A cohort by id, or the newest one when the caller did not name one."""
+    if cohort_id:
+        cohort = analyze.read_cohort(pool, cohort_id)
+        if not cohort:
+            raise ApiError(404, "no such cohort")
+        return cohort
+    analyze.migrate_legacy_cohort(pool)
+    cohort = analyze.latest_cohort(pool)
+    if not cohort:
+        raise ApiError(404, "no cohort yet")
+    return cohort
+
+
+@app.get("/api/cohorts")
+def list_cohorts(request: Request, project: Optional[str] = Query(None)):
+    """Every cohort in this pool, newest first — membership counts only."""
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    out = []
+    for cohort in analyze.list_cohorts(pool):
+        live = analyze.enrich_cohort_status(pool, cohort)
+        out.append(
+            {
+                "id": live["id"],
+                "label": live.get("label") or live["id"],
+                "created_at": live.get("created_at"),
+                "status": live.get("status"),
+                "progress": live.get("progress"),
+            }
+        )
+    return {"cohorts": out}
+
+
+@app.get("/api/cohorts/{cohort_id}")
+def get_cohort(request: Request, cohort_id: str, project: Optional[str] = Query(None)):
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    cohort = _resolve_cohort_or_404(pool, cohort_id)
+    live = analyze.enrich_cohort_status(pool, cohort)
+    # Persist refreshed status so a crashed runner still shows accurate counts.
+    if live.get("sessions") != cohort.get("sessions") or live.get("status") != cohort.get("status"):
+        analyze.write_cohort(pool, live)
+    return cohort_response(pool, live)
+
+
+@app.patch("/api/cohorts/{cohort_id}")
+async def rename_cohort(request: Request, cohort_id: str, project: Optional[str] = Query(None)):
+    """Rename a cohort. Membership is frozen — only the label is editable."""
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise ApiError(400, "bad payload")
+    if not isinstance(payload, dict) or not isinstance(payload.get("label"), str):
+        raise ApiError(400, "label is required")
+    try:
+        renamed = analyze.rename_cohort(pool, cohort_id, payload["label"])
+    except ValueError as exc:
+        raise ApiError(400, str(exc))
+    if not renamed:
+        raise ApiError(404, "no such cohort")
+    return cohort_response(pool, analyze.enrich_cohort_status(pool, renamed))
+
+
+@app.post("/api/cohorts")
+async def create_cohort(
+    request: Request,
+    project: Optional[str] = Query(None),
+    purchased: int = Query(5, ge=0, le=50),
+    all_n: int = Query(5, ge=0, le=50, alias="all"),
+    force: bool = Query(False),
+):
+    """Sample a new cohort. Each call mints its own id — cohorts accumulate."""
+    require_read_access(request, project)
+    _require_analysis_runtime()
+    pool = resolve_pool(project)
+
+    with _index_lock:
+        conn = index_conn()
+        cohort = analyze.build_cohort(conn, pool_key(pool), purchased, all_n)
+
+    if not cohort["sessions"]:
+        raise ApiError(400, "no sessions matched the purchased/all sample")
+
+    analyze.write_cohort(pool, {**cohort, "status": "running"})
+    key = _cohort_key(pool, cohort["id"])
+    task = asyncio.create_task(_run_cohort_job(pool, cohort["id"], force=force))
+    _cohort_tasks[key] = task
+    return JSONResponse(
+        cohort_response(pool, analyze.enrich_cohort_status(pool, cohort)),
+        status_code=202,
+    )
+
+
+@app.post("/api/cohorts/{cohort_id}/sessions/{session_id}/retry")
 async def retry_cohort_session(
     request: Request,
+    cohort_id: str,
     session_id: str,
     project: Optional[str] = Query(None),
 ):
@@ -1240,16 +1288,14 @@ async def retry_cohort_session(
     require_read_access(request, project)
     _require_analysis_runtime()
     pool = resolve_pool(project)
-    cohort = analyze.read_cohort(pool)
-    if not cohort:
-        raise ApiError(404, "no cohort yet")
+    cohort = _resolve_cohort_or_404(pool, cohort_id)
 
     entry = next(
         (e for e in cohort.get("sessions") or [] if e.get("session_id") == session_id),
         None,
     )
     if entry is None:
-        raise ApiError(404, "session is not in the current cohort")
+        raise ApiError(404, "session is not in this cohort")
 
     session_dir = resolve_session(session_id, project)
     # Drop the recorded failure first, so a poll landing mid-retry does not
@@ -1259,27 +1305,32 @@ async def retry_cohort_session(
     analyze.clear_job(session_dir)
     analyze.write_cohort(pool, {**cohort, "status": "running"})
 
-    key = _cohort_key(pool)
+    key = _cohort_key(pool, cohort["id"])
     existing = _cohort_tasks.get(key)
     if existing and not existing.done():
         # A cohort run owns the file; let it pick this row up on its own pass.
         await _start_session_analysis(session_dir)
     else:
-        task = asyncio.create_task(_retry_cohort_session_job(pool, entry, session_dir))
+        task = asyncio.create_task(
+            _retry_cohort_session_job(pool, cohort["id"], session_id, session_dir)
+        )
         _cohort_tasks[key] = task
 
+    live = analyze.read_cohort(pool, cohort["id"]) or cohort
     return JSONResponse(
-        cohort_response(pool, analyze.enrich_cohort_status(pool, analyze.read_cohort(pool) or cohort)),
+        cohort_response(pool, analyze.enrich_cohort_status(pool, live)),
         status_code=202,
     )
 
 
-async def _retry_cohort_session_job(pool: Path, entry: dict, session_dir: Path) -> None:
-    key = _cohort_key(pool)
+async def _retry_cohort_session_job(
+    pool: Path, cohort_id: str, session_id: str, session_dir: Path
+) -> None:
+    key = _cohort_key(pool, cohort_id)
     try:
-        cohort = analyze.read_cohort(pool) or {}
+        cohort = analyze.read_cohort(pool, cohort_id) or {}
         row = next(
-            (e for e in cohort.get("sessions") or [] if e.get("session_id") == entry.get("session_id")),
+            (e for e in cohort.get("sessions") or [] if e.get("session_id") == session_id),
             None,
         )
         if row is None:
@@ -1300,57 +1351,6 @@ async def _retry_cohort_session_job(pool: Path, entry: dict, session_dir: Path) 
         analyze.write_cohort(pool, analyze.enrich_cohort_status(pool, cohort))
     finally:
         _cohort_tasks.pop(key, None)
-
-
-@app.get("/api/cohort")
-def get_cohort(request: Request, project: Optional[str] = Query(None)):
-    require_read_access(request, project)
-    pool = resolve_pool(project)
-    cohort = analyze.read_cohort(pool)
-    if not cohort:
-        raise ApiError(404, "no cohort yet")
-    live = analyze.enrich_cohort_status(pool, cohort)
-    # Persist refreshed status so a crashed runner still shows accurate counts.
-    if live.get("sessions") != cohort.get("sessions") or live.get("status") != cohort.get("status"):
-        analyze.write_cohort(pool, live)
-    return cohort_response(pool, live)
-
-@app.post("/api/cohort")
-async def create_cohort(
-    request: Request,
-    project: Optional[str] = Query(None),
-    purchased: int = Query(5, ge=0, le=50),
-    all_n: int = Query(5, ge=0, le=50, alias="all"),
-    force: bool = Query(False),
-):
-    require_read_access(request, project)
-    _require_analysis_runtime()
-    pool = resolve_pool(project)
-    key = _cohort_key(pool)
-    existing_task = _cohort_tasks.get(key)
-    if existing_task and not existing_task.done():
-        cohort = analyze.read_cohort(pool)
-        if cohort:
-            return JSONResponse(
-                cohort_response(pool, analyze.enrich_cohort_status(pool, cohort)),
-                status_code=202,
-            )
-        return JSONResponse({"status": "running"}, status_code=202)
-
-    with _index_lock:
-        conn = index_conn()
-        cohort = analyze.build_cohort(conn, pool_key(pool), purchased, all_n)
-
-    if not cohort["sessions"]:
-        raise ApiError(400, "no sessions matched the purchased/all sample")
-
-    analyze.write_cohort(pool, {**cohort, "status": "running"})
-    task = asyncio.create_task(_run_cohort_job(pool, force=force))
-    _cohort_tasks[key] = task
-    return JSONResponse(
-        cohort_response(pool, analyze.enrich_cohort_status(pool, cohort)),
-        status_code=202,
-    )
 
 
 def _attribution_map(pool: Path) -> dict:
@@ -1391,163 +1391,6 @@ def cohort_response(pool: Path, cohort: dict) -> dict:
     return stamp_cohort_attribution(
         pool, analyze.attach_cohort_insights(pool, cohort)
     )
-
-
-def _summary_rows_from_cohort(
-    pool: Path, cohort: dict, outcome_filter: Optional[str], qa_mode: str = "include_pending"
-) -> list:
-    attrs = _attribution_map(pool)
-    rows = []
-    for entry in cohort.get("sessions") or []:
-        outcome = "purchased" if entry.get("filter") == "purchased" else "all"
-        if outcome_filter == "purchased" and outcome != "purchased":
-            continue
-        session_dir = pool / entry["session_id"]
-        insights = analyze.read_insights(session_dir)
-        qa = analyze.read_qa(session_dir)
-        if not insights and not qa:
-            continue
-        if not analyze.qa_allows_rollup(qa, qa_mode):
-            continue
-        cached = analyze.read_analysis(session_dir) or {}
-        text = cached.get("text") if isinstance(cached.get("text"), str) else ""
-        rows.append(
-            {
-                "session_id": entry["session_id"],
-                "outcome": outcome,
-                "attribution": attrs.get(entry["session_id"]),
-                "themes": analyze.effective_themes(insights, qa),
-                "standout": analyze.standout_line(text) if text else "",
-                "qa_status": (qa or {}).get("status") or "pending",
-            }
-        )
-    return rows
-
-
-def _summary_rows_from_pool(
-    pool: Path, outcome_filter: Optional[str], qa_mode: str = "include_pending"
-) -> list:
-    attrs = _attribution_map(pool)
-    where = ["pool = ?"]
-    params: list = [pool_key(pool)]
-    if outcome_filter == "purchased":
-        where.append("json_extract(\"order\", '$.purchased_at') IS NOT NULL")
-    elif outcome_filter == "checkout":
-        where.append('"order" IS NOT NULL')
-    with _index_lock:
-        rows = index_conn().execute(
-            f'SELECT session_id, "order" FROM sessions WHERE {" AND ".join(where)}',
-            params,
-        ).fetchall()
-    out = []
-    for sid, order_raw in rows:
-        session_dir = pool / sid
-        insights = analyze.read_insights(session_dir)
-        qa = analyze.read_qa(session_dir)
-        if not insights and not qa:
-            continue
-        if not analyze.qa_allows_rollup(qa, qa_mode):
-            continue
-        purchased = False
-        if order_raw:
-            try:
-                order = json.loads(order_raw)
-                purchased = isinstance(order, dict) and order.get("purchased_at") is not None
-            except Exception:
-                purchased = False
-        cached = analyze.read_analysis(session_dir) or {}
-        text = cached.get("text") if isinstance(cached.get("text"), str) else ""
-        out.append(
-            {
-                "session_id": sid,
-                "outcome": "purchased" if purchased else "all",
-                "attribution": attrs.get(sid),
-                "themes": analyze.effective_themes(insights, qa),
-                "standout": analyze.standout_line(text) if text else "",
-                "qa_status": (qa or {}).get("status") or "pending",
-            }
-        )
-    return out
-
-
-@app.get("/api/insights/summary")
-def insights_summary(
-    request: Request,
-    project: Optional[str] = Query(None),
-    group_by: str = Query("none"),
-    filter: Optional[str] = Query(None),
-    scope: str = Query("cohort"),
-    # Slice A — intersection of these constraints. Empty B ⇒ complement of A.
-    a_outcome: Optional[str] = Query(None),
-    a_utm_source: Optional[str] = Query(None),
-    a_utm_medium: Optional[str] = Query(None),
-    a_utm_campaign: Optional[str] = Query(None),
-    a_utm_content: Optional[str] = Query(None),
-    a_fbclid: Optional[str] = Query(None),
-    b_outcome: Optional[str] = Query(None),
-    b_utm_source: Optional[str] = Query(None),
-    b_utm_medium: Optional[str] = Query(None),
-    b_utm_campaign: Optional[str] = Query(None),
-    b_utm_content: Optional[str] = Query(None),
-    b_fbclid: Optional[str] = Query(None),
-    # Preset shortcuts: purchased_vs_all | meta_vs_rest | meta_purchased_vs_rest | google_vs_meta
-    contrast: Optional[str] = Query(None),
-    qa_mode: str = Query("include_pending"),
-):
-    """Theme × segment rollup plus A/B intersection contrast and narrative."""
-    require_read_access(request, project)
-    if group_by not in SUMMARY_GROUP_BY:
-        raise ApiError(400, f"group_by must be one of: {', '.join(sorted(SUMMARY_GROUP_BY))}")
-    if filter and filter not in SESSION_FILTERS and filter != "all":
-        raise ApiError(400, "unknown filter")
-    if qa_mode not in ("include_pending", "accepted", "raw"):
-        raise ApiError(400, "qa_mode must be include_pending, accepted, or raw")
-    pool = resolve_pool(project)
-    outcome_filter = None if not filter or filter == "all" else filter
-
-    if scope == "all":
-        rows = _summary_rows_from_pool(pool, outcome_filter, qa_mode)
-        label = None
-    else:
-        cohort = analyze.read_cohort(pool)
-        if not cohort:
-            raise ApiError(404, "no cohort yet")
-        live = analyze.enrich_cohort_status(pool, cohort)
-        rows = _summary_rows_from_cohort(pool, live, outcome_filter, qa_mode)
-        label = live.get("label")
-
-    slice_a, slice_b = _parse_contrast_slices(
-        contrast,
-        a_outcome, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid,
-        b_outcome, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid,
-    )
-    summary = analyze.build_insights_summary(
-        rows, group_by=group_by, slice_a=slice_a, slice_b=slice_b
-    )
-    qa_counts = {"accepted": 0, "pending": 0, "rejected": 0}
-    # Count QA across cohort (or pool rows before filter) for the UI badge.
-    if scope != "all":
-        cohort = analyze.read_cohort(pool)
-        for entry in (cohort or {}).get("sessions") or []:
-            qa = analyze.read_qa(pool / entry["session_id"])
-            status = (qa or {}).get("status") or "pending"
-            if status in qa_counts:
-                qa_counts[status] += 1
-            else:
-                qa_counts["pending"] += 1
-    else:
-        for row in rows:
-            status = row.get("qa_status") or "pending"
-            if status in qa_counts:
-                qa_counts[status] += 1
-    return {
-        **summary,
-        "scope": "all" if scope == "all" else "cohort",
-        "filter": filter or None,
-        "qa_mode": qa_mode,
-        "qa_counts": qa_counts,
-        **({"label": label} if label else {}),
-    }
 
 
 def _parse_fbclid_flag(raw: Optional[str]) -> Optional[bool]:
