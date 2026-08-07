@@ -1353,6 +1353,108 @@ async def _retry_cohort_session_job(
         _cohort_tasks.pop(key, None)
 
 
+_cut_tasks: dict = {}
+# Failures are kept in memory, not in the cut cache: caching an error would
+# make a transient API blip permanent for that cut, and the cache has no
+# invalidation path by design.
+_cut_errors: dict = {}
+
+
+def _cut_task_key(pool: Path, cohort_id: str, key: str) -> str:
+    return f"{pool.resolve()}::{cohort_id}::{key}"
+
+
+async def _run_cut_job(pool: Path, cohort_id: str, rows: list, slice_a, slice_b, key: str) -> None:
+    task_key = _cut_task_key(pool, cohort_id, key)
+    try:
+        cut = await analyze.build_cut_analysis(rows, slice_a, slice_b)
+        analyze.write_cut(pool, cohort_id, key, cut)
+        _cut_errors.pop(task_key, None)
+    except Exception as exc:
+        _cut_errors[task_key] = (
+            getattr(exc, "message", None) or str(exc) or "cut analysis failed"
+        )
+    finally:
+        _cut_tasks.pop(task_key, None)
+
+
+@app.get("/api/cohorts/{cohort_id}/cut")
+async def get_cut(
+    request: Request,
+    cohort_id: str,
+    project: Optional[str] = Query(None),
+    contrast: Optional[str] = Query(None),
+    a_outcome: Optional[str] = Query(None),
+    a_utm_source: Optional[str] = Query(None),
+    a_utm_medium: Optional[str] = Query(None),
+    a_utm_campaign: Optional[str] = Query(None),
+    a_utm_content: Optional[str] = Query(None),
+    a_fbclid: Optional[str] = Query(None),
+    b_outcome: Optional[str] = Query(None),
+    b_utm_source: Optional[str] = Query(None),
+    b_utm_medium: Optional[str] = Query(None),
+    b_utm_campaign: Optional[str] = Query(None),
+    b_utm_content: Optional[str] = Query(None),
+    b_fbclid: Optional[str] = Query(None),
+    run: bool = Query(False),
+):
+    """A cut's analysis: cached when we have it, queued when `run=1`.
+
+    Cohorts are frozen once sampled, so a cached cut is always valid — the
+    model is asked about a given cut exactly once.
+    """
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    cohort = _resolve_cohort_or_404(pool, cohort_id)
+    cohort_id = cohort["id"]
+
+    slice_a, slice_b = _parse_contrast_slices(
+        contrast,
+        a_outcome, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid,
+        b_outcome, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid,
+    )
+    key = analyze.cut_key(slice_a, slice_b)
+
+    cached = analyze.read_cut(pool, cohort_id, key)
+    if cached:
+        return {**cached, "cohort_id": cohort_id, "cached": True}
+
+    task_key = _cut_task_key(pool, cohort_id, key)
+    existing = _cut_tasks.get(task_key)
+    if existing and not existing.done():
+        return JSONResponse(
+            {"status": "running", "cut": key, "cohort_id": cohort_id}, status_code=202
+        )
+
+    failure = _cut_errors.get(task_key)
+    if failure and not run:
+        return JSONResponse(
+            {"status": "error", "error": failure, "cut": key, "cohort_id": cohort_id},
+            status_code=200,
+        )
+
+    if not run:
+        # Nothing cached and no mandate to spend a call — let the UI offer it.
+        return JSONResponse(
+            {"status": "absent", "cut": key, "cohort_id": cohort_id}, status_code=404
+        )
+
+    _require_analysis_runtime()
+    _cut_errors.pop(task_key, None)
+    live = analyze.enrich_cohort_status(pool, cohort)
+    rows = _cut_rows(pool, live)
+    if not rows:
+        raise ApiError(400, "no analyzed sessions in this cohort yet")
+
+    task = asyncio.create_task(
+        _run_cut_job(pool, cohort_id, rows, slice_a, slice_b, key)
+    )
+    _cut_tasks[task_key] = task
+    return JSONResponse(
+        {"status": "running", "cut": key, "cohort_id": cohort_id}, status_code=202
+    )
+
+
 def _attribution_map(pool: Path) -> dict:
     """session_id → attribution dict from the index."""
     with _index_lock:
@@ -1391,6 +1493,27 @@ def cohort_response(pool: Path, cohort: dict) -> dict:
     return stamp_cohort_attribution(
         pool, analyze.attach_cohort_insights(pool, cohort)
     )
+
+
+def _cut_rows(pool: Path, cohort: dict) -> list:
+    """Analyzed sessions in this cohort, with the write-up a cut reasons over."""
+    attrs = _attribution_map(pool)
+    rows = []
+    for entry in cohort.get("sessions") or []:
+        session_dir = pool / entry["session_id"]
+        cached = analyze.read_analysis(session_dir)
+        text = (cached or {}).get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        rows.append(
+            {
+                "session_id": entry["session_id"],
+                "outcome": "purchased" if entry.get("filter") == "purchased" else "all",
+                "attribution": attrs.get(entry["session_id"]),
+                "text": text,
+            }
+        )
+    return rows
 
 
 def _parse_fbclid_flag(raw: Optional[str]) -> Optional[bool]:
