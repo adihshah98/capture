@@ -17,6 +17,7 @@ const cutRunBtn = document.getElementById('cut-run');
 const cutBodyEl = document.getElementById('cut-body');
 const tableWrapEl = document.getElementById('cohort-table-wrap');
 const splitEl = document.getElementById('compare-split');
+const pickerEl = document.getElementById('cut-picker');
 const queuePanelEl = document.getElementById('insights-queue');
 const cutPanelEl = document.getElementById('insights-cut');
 
@@ -27,6 +28,9 @@ let cohort = null;
 let cohortId = null;
 let activeTab = 'cut';
 let autoSwitchedForRun = false;
+let facets = null;
+let sliceA = emptySlice();
+let sliceB = emptySlice();
 
 export function setInsightsAnalysisEnabled(on) {
   analysisEnabled = !!on;
@@ -59,6 +63,8 @@ function syncCutRunButton() {
     cutRunBtn.title = 'Analysis is not configured on this server';
   } else if (!analyzedCount()) {
     cutRunBtn.title = 'Analyze a cohort first';
+  } else if (!splitEl.value && sliceIsEmpty(sliceA) && sliceIsEmpty(sliceB)) {
+    cutRunBtn.title = 'No filters set — this compares purchased against everyone else';
   } else {
     cutRunBtn.title = '';
   }
@@ -93,9 +99,41 @@ function retryUrl(id, sessionId) {
   )}/retry${qs ? `?${qs}` : ''}`;
 }
 
+function facetsUrl(id) {
+  const qs = withProject(new URLSearchParams()).toString();
+  return `/api/cohorts/${encodeURIComponent(id)}/facets${qs ? `?${qs}` : ''}`;
+}
+
+/** Per-side slice state: {outcome:[], device:[], utm_source:'', utm_campaign:''} */
+function emptySlice() {
+  return { outcome: [], device: [], utm_source: '', utm_campaign: '' };
+}
+
+function sliceIsEmpty(slice) {
+  return (
+    !slice.outcome.length &&
+    !slice.device.length &&
+    !slice.utm_source &&
+    !slice.utm_campaign
+  );
+}
+
+function appendSlice(params, side, slice) {
+  for (const value of slice.outcome) params.append(`${side}_outcome`, value);
+  for (const value of slice.device) params.append(`${side}_device`, value);
+  if (slice.utm_source) params.set(`${side}_utm_source`, slice.utm_source);
+  if (slice.utm_campaign) params.set(`${side}_utm_campaign`, slice.utm_campaign);
+}
+
 function cutUrl(id, { run = false } = {}) {
   const params = withProject(new URLSearchParams());
-  params.set('contrast', (splitEl && splitEl.value) || 'purchased_vs_all');
+  const preset = splitEl && splitEl.value;
+  if (preset) {
+    params.set('contrast', preset);
+  } else {
+    appendSlice(params, 'a', sliceA);
+    appendSlice(params, 'b', sliceB);
+  }
   if (run) params.set('run', '1');
   return `/api/cohorts/${encodeURIComponent(id)}/cut?${params.toString()}`;
 }
@@ -283,6 +321,148 @@ function cutList(title, items, extraClass = '') {
   </div>`;
 }
 
+const PRESET_LABELS = {
+  purchased_vs_all: 'Purchased vs not',
+  purchased_vs_checkout: 'Purchased vs abandoned checkout',
+  checkout_vs_rest: 'Reached checkout vs not',
+  mobile_vs_desktop: 'Mobile vs desktop',
+  meta_vs_rest: 'Meta vs not Meta',
+  meta_purchased_vs_rest: 'Meta buyers vs everyone else',
+  google_vs_meta: 'Google vs Meta',
+  google_purchased_vs_rest: 'Google buyers vs everyone else',
+};
+
+function renderPresetOptions(names) {
+  const current = splitEl.value;
+  splitEl.innerHTML =
+    '<option value="">Custom</option>' +
+    (names || [])
+      .map(
+        (n) =>
+          `<option value="${escapeAttr(n)}">${escapeHtml(PRESET_LABELS[n] || n)}</option>`
+      )
+      .join('');
+  splitEl.value = current;
+}
+
+function chipRow(field, side, slice, items) {
+  if (!items || !items.length) return '';
+  const chosen = slice[field] || [];
+  return `<label class="facet">
+    <span>${escapeHtml(field === 'outcome' ? 'outcome' : field)}</span>
+    <span class="opts">${items
+      .map(
+        (i) =>
+          `<button type="button" class="opt${
+            chosen.includes(i.value) ? ' on' : ''
+          }" data-side="${side}" data-field="${field}" data-value="${escapeAttr(
+            i.value
+          )}">${escapeHtml(i.label || i.value)}<span class="c">${i.count}</span></button>`
+      )
+      .join('')}</span>
+  </label>`;
+}
+
+function selectRow(field, side, slice, items) {
+  if (!items || !items.length) return '';
+  return `<label class="facet">
+    <span>${escapeHtml(field.replace('utm_', ''))}</span>
+    <select data-side="${side}" data-field="${field}">
+      <option value="">any</option>
+      ${items
+        .map(
+          (i) =>
+            `<option value="${escapeAttr(i.value)}"${
+              slice[field] === i.value ? ' selected' : ''
+            }>${escapeHtml(i.value)} (${i.count})</option>`
+        )
+        .join('')}
+    </select>
+  </label>`;
+}
+
+function renderPicker() {
+  if (!pickerEl) return;
+  const usingPreset = !!(splitEl && splitEl.value);
+  pickerEl.style.display = usingPreset ? 'none' : '';
+  if (usingPreset || !facets) return;
+
+  for (const side of ['a', 'b']) {
+    const slice = side === 'a' ? sliceA : sliceB;
+    const host = pickerEl.querySelector(`.side[data-side="${side}"] .facets`);
+    if (!host) continue;
+    host.innerHTML =
+      chipRow('outcome', side, slice, facets.outcome) +
+      chipRow('device', side, slice, facets.device) +
+      selectRow('utm_source', side, slice, facets.utm_source) +
+      selectRow('utm_campaign', side, slice, facets.utm_campaign);
+  }
+
+  pickerEl.querySelectorAll('.opt').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const slice = btn.dataset.side === 'a' ? sliceA : sliceB;
+      const list = slice[btn.dataset.field];
+      const at = list.indexOf(btn.dataset.value);
+      if (at >= 0) list.splice(at, 1);
+      else list.push(btn.dataset.value);
+      onSliceChanged();
+    });
+  });
+  pickerEl.querySelectorAll('select[data-field]').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const slice = sel.dataset.side === 'a' ? sliceA : sliceB;
+      slice[sel.dataset.field] = sel.value;
+      onSliceChanged();
+    });
+  });
+  updatePickerCounts();
+}
+
+/** Live n= per side, so an empty slice is obvious before spending a call. */
+function updatePickerCounts() {
+  if (!pickerEl || !cohort) return;
+  const rows = (cohort.sessions || []).filter((s) => s.status === 'done' && s.text);
+  const inA = rows.filter((r) => rowMatches(r, sliceA));
+  const inB = sliceIsEmpty(sliceB)
+    ? rows.filter((r) => !inA.includes(r))
+    : rows.filter((r) => rowMatches(r, sliceB) && !inA.includes(r));
+  const setCount = (side, n) => {
+    const el = pickerEl.querySelector(`[data-count="${side}"]`);
+    if (el) el.textContent = `(n=${n})`;
+  };
+  setCount('a', inA.length);
+  setCount('b', inB.length);
+}
+
+/** Client-side mirror of row_matches_slice, for the live counts only. */
+function rowMatches(row, slice) {
+  if (sliceIsEmpty(slice)) return true;
+  if (slice.outcome.length && !slice.outcome.includes(row.outcome || 'rest')) return false;
+  if (slice.device.length && !slice.device.includes(row.device || '')) return false;
+  const attrs = row.attribution || {};
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  if (slice.utm_source && norm(attrs.utm_source) !== slice.utm_source) return false;
+  if (slice.utm_campaign && norm(attrs.utm_campaign) !== slice.utm_campaign) return false;
+  return true;
+}
+
+function onSliceChanged() {
+  renderPicker();
+  stopCutPolling();
+  loadCut().catch(() => {});
+}
+
+async function loadFacets() {
+  if (!cohortId) return;
+  try {
+    facets = await fetchJson(facetsUrl(cohortId));
+    renderPresetOptions(facets.presets);
+    renderPicker();
+  } catch {
+    facets = null;
+  }
+}
+
 function renderCutPlaceholder(message) {
   cutBodyEl.innerHTML = `<div class="insights-placeholder">${escapeHtml(message)}</div>`;
 }
@@ -459,6 +639,7 @@ function renderCohort(body) {
   progressEl.textContent = text;
   syncRunButtons();
   renderQueue(body);
+  updatePickerCounts();
 
   const running = cohortIsRunning();
   if (running && !autoSwitchedForRun) {
@@ -476,6 +657,10 @@ function resetEmptyState() {
   cohort = null;
   cohortId = null;
   autoSwitchedForRun = false;
+  facets = null;
+  sliceA = emptySlice();
+  sliceB = emptySlice();
+  if (pickerEl) pickerEl.style.display = 'none';
   labelEl.textContent = 'Sessions';
   cutLabelEl.textContent = 'Compare';
   progressEl.textContent = 'No cohort yet';
@@ -503,6 +688,7 @@ export async function refreshCohorts() {
   }
   renderCohortOptions(cohorts);
   await refreshCohort();
+  await loadFacets();
   await loadCut();
 }
 
@@ -578,13 +764,18 @@ export function initInsights() {
   cohortSelectEl.addEventListener('change', () => {
     cohortId = cohortSelectEl.value || null;
     stopCutPolling();
+    // A different cohort has different facet values, so reset the picker.
+    sliceA = emptySlice();
+    sliceB = emptySlice();
     refreshCohort()
+      .then(loadFacets)
       .then(loadCut)
       .catch(() => {});
   });
   if (splitEl) {
     splitEl.addEventListener('change', () => {
       stopCutPolling();
+      renderPicker();
       loadCut().catch(() => {});
     });
   }

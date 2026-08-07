@@ -168,6 +168,21 @@
     .cohort-pick select { font-size: 12px; padding: 4px 6px; border-radius: 4px; border: 1px solid #d0d3d8; max-width: 320px; }
     .link-btn { border: none; background: none; color: #4f46e5; font-size: 12px; cursor: pointer; padding: 2px 4px; }
     .link-btn:disabled { color: #9ca3af; cursor: default; }
+    #cut-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 12px 16px; border-bottom: 1px solid #e3e5e8; background: #fafbfc; }
+    @media (max-width: 900px) { #cut-picker { grid-template-columns: 1fr; } }
+    #cut-picker .side { border: 1px solid #e3e5e8; border-radius: 8px; padding: 10px 12px; background: #fff; }
+    #cut-picker h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; }
+    #cut-picker h4 .n { color: #9ca3af; font-weight: 500; text-transform: none; letter-spacing: 0; margin-left: 4px; }
+    #cut-picker .facets { display: flex; flex-wrap: wrap; gap: 10px 14px; }
+    #cut-picker .facet { display: flex; flex-direction: column; gap: 3px; }
+    #cut-picker .facet > span { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: #9ca3af; }
+    #cut-picker .facet .opts { display: flex; flex-wrap: wrap; gap: 3px; }
+    #cut-picker .opt { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid #d0d3d8; background: #fff; color: #374151; cursor: pointer; }
+    #cut-picker .opt:hover { border-color: #a5b4fc; }
+    #cut-picker .opt.on { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+    #cut-picker .opt .c { opacity: 0.6; margin-left: 3px; }
+    #cut-picker select { font-size: 12px; padding: 3px 6px; border-radius: 4px; border: 1px solid #d0d3d8; max-width: 190px; }
+    #cut-picker .hint { margin: 8px 0 0; font-size: 11px; color: #9ca3af; }
     #cut-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px 18px; }
     .cut-headline { margin: 0 0 14px; padding: 12px 14px; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; font-size: 14px; line-height: 1.5; color: #1e1b4b; }
     .cut-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
@@ -280,17 +295,24 @@
         <h2 id="cut-label">Compare</h2>
         <span class="meta" id="cut-progress">No cohort yet</span>
         <label class="meta compare-group">
-          Cut by
+          Preset
           <select id="compare-split">
-            <option value="purchased_vs_all">Purchased vs not</option>
-            <option value="meta_vs_rest">Meta vs not Meta</option>
-            <option value="meta_purchased_vs_rest">Meta buyers vs everyone else</option>
-            <option value="google_vs_meta">Google vs Meta</option>
-            <option value="google_purchased_vs_rest">Google buyers vs everyone else</option>
+            <option value="">Custom</option>
           </select>
         </label>
         <span class="spacer"></span>
         <button type="button" id="cut-run" disabled>Analyze this cut</button>
+      </div>
+      <div id="cut-picker">
+        <div class="side" data-side="a">
+          <h4>Group A <span class="n" data-count="a"></span></h4>
+          <div class="facets"></div>
+        </div>
+        <div class="side" data-side="b">
+          <h4>Group B <span class="n" data-count="b"></span></h4>
+          <div class="facets"></div>
+          <p class="hint">Leave every filter off to make B "everyone not in A".</p>
+        </div>
       </div>
       <div id="cut-body">
         <div class="insights-placeholder">Analyze a cohort, then pick a cut to see what the sessions have in common and where the two groups differ.</div>

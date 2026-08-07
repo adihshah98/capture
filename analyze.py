@@ -299,7 +299,10 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
         row.pop("standout", None)
         row.pop("model", None)
         row.pop("frame_count", None)
+        # Derived from the index on read — never frozen into the cohort file.
         row.pop("attribution", None)
+        row.pop("device", None)
+        row.pop("outcome", None)
         session_dir = pool / row["session_id"]
         cached = read_analysis(session_dir)
         job = read_job(session_dir)
@@ -393,17 +396,37 @@ def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
     return {**cohort, "sessions": sessions}
 
 
-def segment_label(attribution: Optional[dict], group_by: str) -> str:
-    if not group_by or group_by == "none":
-        return "(all)"
-    attrs = attribution if isinstance(attribution, dict) else {}
-    if group_by == "fbclid":
-        return "meta" if attrs.get("fbclid") else "(none)"
-    value = attrs.get(group_by)
-    return str(value) if value else "(none)"
-
-
 META_SOURCES = frozenset({"facebook", "meta", "fb", "instagram", "ig"})
+
+# Same threshold the session detail panel uses, so one session is never called
+# mobile in one place and desktop in another.
+MOBILE_MAX_WIDTH = 768
+DEVICE_VALUES = ("mobile", "desktop")
+
+# purchased ⊃ checkout: a purchase implies checkout was reached, so "checkout"
+# here means reached checkout and did NOT purchase — the three are disjoint.
+OUTCOME_VALUES = ("purchased", "checkout", "rest")
+
+
+def device_class(device: Optional[dict]) -> Optional[str]:
+    """mobile/desktop from the indexed viewport, or None when unknown."""
+    if not isinstance(device, dict):
+        return None
+    width = device.get("width")
+    if not isinstance(width, int) or width <= 0:
+        return None
+    return "mobile" if width < MOBILE_MAX_WIDTH else "desktop"
+
+
+def outcome_class(order: Optional[dict]) -> str:
+    """purchased | checkout (reached, did not buy) | rest."""
+    if not isinstance(order, dict):
+        return "rest"
+    if order.get("purchased_at"):
+        return "purchased"
+    if order.get("checkout_started_at"):
+        return "checkout"
+    return "rest"
 
 
 def is_meta_attribution(attribution: Optional[dict]) -> bool:
@@ -415,18 +438,43 @@ def is_meta_attribution(attribution: Optional[dict]) -> bool:
 
 
 def normalize_slice(spec: Optional[dict]) -> dict:
-    """Normalize a slice dict: outcome + optional attribution constraints.
+    """Normalize a slice: any combination of outcome, device and attribution.
 
-    Keys: outcome ("purchased"|"all"|None), utm_source, utm_medium, utm_campaign,
-    utm_content, fbclid (True|False|None). utm_source="meta" matches Meta traffic
-    (fbclid or known Meta source values).
+    Keys: outcome (list of purchased|checkout|rest), device (list of
+    mobile|desktop), utm_source, utm_medium, utm_campaign, utm_content, fbclid.
+    utm_source="meta" matches Meta traffic (fbclid or a known Meta source).
+
+    Constraints are ANDed across keys and ORed within a key, so
+    {"outcome": ["purchased", "checkout"], "device": ["mobile"]} reads as
+    "reached checkout on mobile, bought or not".
     """
     if not isinstance(spec, dict):
         return {}
     out = {}
-    outcome = spec.get("outcome")
-    if outcome in ("purchased", "all"):
-        out["outcome"] = outcome
+
+    def _multi(key, allowed):
+        raw = spec.get(key)
+        if raw is None or raw == "":
+            return
+        values = raw if isinstance(raw, (list, tuple, set)) else [raw]
+        clean = []
+        for value in values:
+            text = str(value or "").strip().lower()
+            # "all" is the legacy spelling of "everyone who did not purchase".
+            if key == "outcome" and text == "all":
+                for legacy in ("checkout", "rest"):
+                    if legacy not in clean:
+                        clean.append(legacy)
+                continue
+            if text in allowed and text not in clean:
+                clean.append(text)
+        if clean and len(clean) < len(allowed):
+            # Selecting every value is the same as no constraint at all.
+            out[key] = sorted(clean)
+
+    _multi("outcome", OUTCOME_VALUES)
+    _multi("device", DEVICE_VALUES)
+
     for key in ("utm_source", "utm_medium", "utm_campaign", "utm_content"):
         value = spec.get(key)
         if isinstance(value, str) and value.strip():
@@ -443,11 +491,14 @@ def slice_is_empty(spec: dict) -> bool:
 def row_matches_slice(row: dict, spec: dict) -> bool:
     if not spec:
         return True
-    outcome = row.get("outcome")
-    if spec.get("outcome") == "purchased" and outcome != "purchased":
+    want_outcome = spec.get("outcome")
+    if want_outcome and (row.get("outcome") or "rest") not in want_outcome:
         return False
-    if spec.get("outcome") == "all" and outcome == "purchased":
-        return False
+    want_device = spec.get("device")
+    if want_device:
+        # Unknown device can't satisfy a device constraint.
+        if (row.get("device") or "") not in want_device:
+            return False
     attrs = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
     if "fbclid" in spec:
         has = bool(attrs.get("fbclid"))
@@ -482,14 +533,33 @@ def row_matches_slice(row: dict, spec: dict) -> bool:
     return True
 
 
+OUTCOME_LABELS = {
+    "purchased": "purchased",
+    "checkout": "reached checkout",
+    "rest": "did not reach checkout",
+}
+
+
 def slice_label(spec: dict) -> str:
     if not spec:
         return "everyone else"
     parts = []
-    if spec.get("outcome") == "purchased":
-        parts.append("purchased")
-    elif spec.get("outcome") == "all":
-        parts.append("non-purchase")
+
+    outcome = spec.get("outcome") or []
+    if outcome:
+        # The common "bought or not, but got to checkout" pair reads badly as
+        # a raw join, so name the union directly.
+        if set(outcome) == {"purchased", "checkout"}:
+            parts.append("reached checkout")
+        elif set(outcome) == {"checkout", "rest"}:
+            parts.append("did not purchase")
+        else:
+            parts.append(" or ".join(OUTCOME_LABELS[o] for o in outcome))
+
+    device = spec.get("device") or []
+    if device:
+        parts.append(" or ".join(device))
+
     if spec.get("utm_source") == "meta" or spec.get("fbclid") is True:
         parts.append("Meta")
     elif spec.get("utm_source") == "non_meta":
@@ -507,21 +577,18 @@ def slice_label(spec: dict) -> str:
             parts.append(f"{label}={spec[key]}")
     if not parts:
         return "all sessions"
-    if len(parts) == 1:
-        return parts[0]
-    # "Meta + purchased" reads better than "purchased + Meta"
-    if "Meta" in parts and "purchased" in parts:
-        rest = [p for p in parts if p not in ("Meta", "purchased")]
-        return "Meta + purchased" + ("" if not rest else " · " + " · ".join(rest))
-    return " + ".join(parts)
+    return " · ".join(parts)
 
 
 CUT_PRESETS = {
-    "purchased_vs_all": ({"outcome": "purchased"}, {"outcome": "all"}),
+    "purchased_vs_all": ({"outcome": ["purchased"]}, {"outcome": ["checkout", "rest"]}),
+    "purchased_vs_checkout": ({"outcome": ["purchased"]}, {"outcome": ["checkout"]}),
+    "checkout_vs_rest": ({"outcome": ["checkout"]}, {"outcome": ["rest"]}),
+    "mobile_vs_desktop": ({"device": ["mobile"]}, {"device": ["desktop"]}),
     "meta_vs_rest": ({"utm_source": "meta"}, None),
-    "meta_purchased_vs_rest": ({"outcome": "purchased", "utm_source": "meta"}, None),
+    "meta_purchased_vs_rest": ({"outcome": ["purchased"], "utm_source": "meta"}, None),
     "google_vs_meta": ({"utm_source": "google"}, {"utm_source": "meta"}),
-    "google_purchased_vs_rest": ({"outcome": "purchased", "utm_source": "google"}, None),
+    "google_purchased_vs_rest": ({"outcome": ["purchased"], "utm_source": "google"}, None),
 }
 
 
@@ -539,7 +606,8 @@ def split_rows_by_cut(rows: list, slice_a: Optional[dict], slice_b: Optional[dic
     spec_a = normalize_slice(slice_a)
     spec_b = normalize_slice(slice_b)
     if slice_is_empty(spec_a) and slice_is_empty(spec_b):
-        spec_a, spec_b = {"outcome": "purchased"}, {"outcome": "all"}
+        spec_a = {"outcome": ["purchased"]}
+        spec_b = {"outcome": ["checkout", "rest"]}
         complement = False
     else:
         complement = slice_is_empty(spec_b)

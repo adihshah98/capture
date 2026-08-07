@@ -12,13 +12,129 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import analyze
 
 
-def row(sid, outcome="all", **attrs):
+def row(sid, outcome="rest", device=None, **attrs):
     return {
         "session_id": sid,
         "outcome": outcome,
+        "device": device,
         "attribution": attrs or None,
         "text": f"write-up for {sid}",
     }
+
+
+class TestOutcomeAndDeviceClass(unittest.TestCase):
+    def test_outcome_is_three_disjoint_buckets(self):
+        self.assertEqual(analyze.outcome_class({"purchased_at": 1}), "purchased")
+        # A purchase implies checkout, but "checkout" means reached-and-did-not-buy.
+        self.assertEqual(
+            analyze.outcome_class({"purchased_at": 1, "checkout_started_at": 1}),
+            "purchased",
+        )
+        self.assertEqual(analyze.outcome_class({"checkout_started_at": 1}), "checkout")
+        self.assertEqual(analyze.outcome_class({}), "rest")
+        self.assertEqual(analyze.outcome_class(None), "rest")
+
+    def test_device_splits_on_the_shared_threshold(self):
+        edge = analyze.MOBILE_MAX_WIDTH
+        self.assertEqual(analyze.device_class({"width": edge - 1}), "mobile")
+        self.assertEqual(analyze.device_class({"width": edge}), "desktop")
+        self.assertIsNone(analyze.device_class({"width": 0}))
+        self.assertIsNone(analyze.device_class(None))
+
+
+class TestNormalizeSlice(unittest.TestCase):
+    def test_multi_valued_outcome_and_device(self):
+        spec = analyze.normalize_slice(
+            {"outcome": ["purchased", "checkout"], "device": "mobile"}
+        )
+        self.assertEqual(spec["outcome"], ["checkout", "purchased"])
+        self.assertEqual(spec["device"], ["mobile"])
+
+    def test_legacy_all_becomes_the_two_non_purchase_buckets(self):
+        self.assertEqual(
+            analyze.normalize_slice({"outcome": "all"})["outcome"], ["checkout", "rest"]
+        )
+
+    def test_selecting_every_value_is_no_constraint(self):
+        self.assertEqual(
+            analyze.normalize_slice({"outcome": ["purchased", "checkout", "rest"]}), {}
+        )
+        self.assertEqual(analyze.normalize_slice({"device": ["mobile", "desktop"]}), {})
+
+    def test_unknown_values_are_dropped(self):
+        self.assertEqual(analyze.normalize_slice({"outcome": ["nope"]}), {})
+        self.assertEqual(analyze.normalize_slice({"device": ["tablet"]}), {})
+
+    def test_combined_constraints_are_kept_together(self):
+        spec = analyze.normalize_slice(
+            {"outcome": ["checkout"], "device": ["mobile"], "utm_campaign": "Spring"}
+        )
+        self.assertEqual(
+            spec, {"outcome": ["checkout"], "device": ["mobile"], "utm_campaign": "spring"}
+        )
+
+
+class TestMatchOutcomeAndDevice(unittest.TestCase):
+    def setUp(self):
+        self.rows = [
+            row("pm", "purchased", "mobile", utm_source="google"),
+            row("cm", "checkout", "mobile", utm_source="facebook"),
+            row("rd", "rest", "desktop", utm_campaign="spring"),
+            row("pd", "purchased", "desktop"),
+        ]
+
+    def match(self, spec):
+        norm = analyze.normalize_slice(spec)
+        return [r["session_id"] for r in self.rows if analyze.row_matches_slice(r, norm)]
+
+    def test_each_outcome_selects_its_own_bucket(self):
+        self.assertEqual(self.match({"outcome": ["purchased"]}), ["pm", "pd"])
+        self.assertEqual(self.match({"outcome": ["checkout"]}), ["cm"])
+        self.assertEqual(self.match({"outcome": ["rest"]}), ["rd"])
+
+    def test_the_three_buckets_are_disjoint_and_total(self):
+        seen = []
+        for value in analyze.OUTCOME_VALUES:
+            got = self.match({"outcome": [value]})
+            self.assertFalse(set(got) & set(seen), "buckets must not overlap")
+            seen.extend(got)
+        self.assertEqual(sorted(seen), sorted(r["session_id"] for r in self.rows))
+
+    def test_device_slices(self):
+        self.assertEqual(self.match({"device": ["mobile"]}), ["pm", "cm"])
+        self.assertEqual(self.match({"device": ["desktop"]}), ["rd", "pd"])
+
+    def test_constraints_intersect(self):
+        self.assertEqual(self.match({"outcome": ["purchased"], "device": ["mobile"]}), ["pm"])
+        self.assertEqual(
+            self.match({"device": ["mobile"], "utm_source": "google"}), ["pm"]
+        )
+        self.assertEqual(
+            self.match({"outcome": ["purchased"], "utm_campaign": "spring"}), []
+        )
+
+    def test_unknown_device_cannot_satisfy_a_device_constraint(self):
+        rows = [row("unknown", "purchased", None)]
+        spec = analyze.normalize_slice({"device": ["mobile"]})
+        self.assertFalse(analyze.row_matches_slice(rows[0], spec))
+
+
+class TestSliceLabel(unittest.TestCase):
+    def label(self, spec):
+        return analyze.slice_label(analyze.normalize_slice(spec))
+
+    def test_names_the_common_unions_directly(self):
+        self.assertEqual(self.label({"outcome": ["purchased", "checkout"]}), "reached checkout")
+        self.assertEqual(self.label({"outcome": ["checkout", "rest"]}), "did not purchase")
+
+    def test_single_buckets_and_combinations(self):
+        self.assertEqual(self.label({"outcome": ["purchased"]}), "purchased")
+        self.assertEqual(self.label({"device": ["mobile"]}), "mobile")
+        self.assertEqual(
+            self.label({"outcome": ["checkout"], "device": ["mobile"]}),
+            "reached checkout · mobile",
+        )
+        self.assertEqual(self.label({}), "everyone else")
 
 
 class TestSplitRowsByCut(unittest.TestCase):
@@ -27,8 +143,8 @@ class TestSplitRowsByCut(unittest.TestCase):
         a, b, spec_a, spec_b = analyze.split_rows_by_cut(rows, None, None)
         self.assertEqual([r["session_id"] for r in a], ["a", "c"])
         self.assertEqual([r["session_id"] for r in b], ["b"])
-        self.assertEqual(spec_a, {"outcome": "purchased"})
-        self.assertEqual(spec_b, {"outcome": "all"})
+        self.assertEqual(spec_a, {"outcome": ["purchased"]})
+        self.assertEqual(spec_b, {"outcome": ["checkout", "rest"]})
 
     def test_empty_b_means_everyone_not_in_a(self):
         rows = [
@@ -78,7 +194,7 @@ class TestCutKey(unittest.TestCase):
 
     def test_key_survives_a_json_round_trip(self):
         key = analyze.cut_key({"outcome": "purchased"}, None)
-        self.assertEqual(json.loads(key)["a"], {"outcome": "purchased"})
+        self.assertEqual(json.loads(key)["a"], {"outcome": ["purchased"]})
 
 
 class TestNormalizeCutAnalysis(unittest.TestCase):

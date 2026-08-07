@@ -1378,19 +1378,39 @@ async def _run_cut_job(pool: Path, cohort_id: str, rows: list, slice_a, slice_b,
         _cut_tasks.pop(task_key, None)
 
 
+@app.get("/api/cohorts/{cohort_id}/facets")
+def get_cohort_facets(
+    request: Request, cohort_id: str, project: Optional[str] = Query(None)
+):
+    """Slice values present in this cohort, so the picker only offers real ones."""
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    cohort = _resolve_cohort_or_404(pool, cohort_id)
+    live = analyze.enrich_cohort_status(pool, cohort)
+    return {
+        "cohort_id": cohort["id"],
+        "presets": sorted(analyze.CUT_PRESETS),
+        **cohort_facets(pool, live),
+    }
+
+
 @app.get("/api/cohorts/{cohort_id}/cut")
 async def get_cut(
     request: Request,
     cohort_id: str,
     project: Optional[str] = Query(None),
     contrast: Optional[str] = Query(None),
-    a_outcome: Optional[str] = Query(None),
+    # Each side is an intersection of these; outcome and device take repeats
+    # or a comma list, so "purchased+checkout on mobile" is expressible.
+    a_outcome: Optional[list] = Query(None),
+    a_device: Optional[list] = Query(None),
     a_utm_source: Optional[str] = Query(None),
     a_utm_medium: Optional[str] = Query(None),
     a_utm_campaign: Optional[str] = Query(None),
     a_utm_content: Optional[str] = Query(None),
     a_fbclid: Optional[str] = Query(None),
-    b_outcome: Optional[str] = Query(None),
+    b_outcome: Optional[list] = Query(None),
+    b_device: Optional[list] = Query(None),
     b_utm_source: Optional[str] = Query(None),
     b_utm_medium: Optional[str] = Query(None),
     b_utm_campaign: Optional[str] = Query(None),
@@ -1410,8 +1430,8 @@ async def get_cut(
 
     slice_a, slice_b = _parse_contrast_slices(
         contrast,
-        a_outcome, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid,
-        b_outcome, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid,
+        a_outcome, a_device, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid,
+        b_outcome, b_device, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid,
     )
     key = analyze.cut_key(slice_a, slice_b)
 
@@ -1476,15 +1496,21 @@ def _attribution_map(pool: Path) -> dict:
 
 
 def stamp_cohort_attribution(pool: Path, cohort: dict) -> dict:
-    attrs = _attribution_map(pool)
+    """Attach attribution, device and outcome so the UI can slice client-side."""
+    facts = _session_facts(pool)
     sessions = []
     for entry in cohort.get("sessions") or []:
         row = dict(entry)
-        attr = attrs.get(row.get("session_id"))
-        if attr:
-            row["attribution"] = attr
+        fact = facts.get(row.get("session_id")) or {}
+        if fact.get("attribution"):
+            row["attribution"] = fact["attribution"]
         else:
             row.pop("attribution", None)
+        if fact.get("device"):
+            row["device"] = fact["device"]
+        row["outcome"] = fact.get("outcome") or (
+            "purchased" if row.get("filter") == "purchased" else "rest"
+        )
         sessions.append(row)
     return {**cohort, "sessions": sessions}
 
@@ -1495,25 +1521,102 @@ def cohort_response(pool: Path, cohort: dict) -> dict:
     )
 
 
+def _session_facts(pool: Path) -> dict:
+    """session_id → {attribution, device, outcome} straight from the index."""
+    with _index_lock:
+        rows = index_conn().execute(
+            'SELECT session_id, attribution, device, "order" FROM sessions WHERE pool = ?',
+            (pool_key(pool),),
+        ).fetchall()
+
+    def _json(raw):
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw)
+        except Exception:
+            return None
+        return value if isinstance(value, dict) else None
+
+    out = {}
+    for sid, attribution, device, order in rows:
+        out[sid] = {
+            "attribution": _json(attribution),
+            "device": analyze.device_class(_json(device)),
+            "outcome": analyze.outcome_class(_json(order)),
+        }
+    return out
+
+
 def _cut_rows(pool: Path, cohort: dict) -> list:
     """Analyzed sessions in this cohort, with the write-up a cut reasons over."""
-    attrs = _attribution_map(pool)
+    facts = _session_facts(pool)
     rows = []
     for entry in cohort.get("sessions") or []:
-        session_dir = pool / entry["session_id"]
+        sid = entry["session_id"]
+        session_dir = pool / sid
         cached = analyze.read_analysis(session_dir)
         text = (cached or {}).get("text")
         if not isinstance(text, str) or not text.strip():
             continue
+        fact = facts.get(sid) or {}
         rows.append(
             {
-                "session_id": entry["session_id"],
-                "outcome": "purchased" if entry.get("filter") == "purchased" else "all",
-                "attribution": attrs.get(entry["session_id"]),
+                "session_id": sid,
+                # Fall back to the sample filter when the index has no order row.
+                "outcome": fact.get("outcome")
+                or ("purchased" if entry.get("filter") == "purchased" else "rest"),
+                "device": fact.get("device"),
+                "attribution": fact.get("attribution"),
                 "text": text,
             }
         )
     return rows
+
+
+def cohort_facets(pool: Path, cohort: dict) -> dict:
+    """The slice values actually present in this cohort, for the A/B picker.
+
+    Counts come from analyzed sessions only, since those are the ones a cut
+    can reason over — offering a filter that would select zero write-ups is
+    worse than not offering it.
+    """
+    rows = _cut_rows(pool, cohort)
+    counts = {"outcome": {}, "device": {}, "utm_source": {}, "utm_campaign": {}}
+    for row in rows:
+        counts["outcome"][row.get("outcome") or "rest"] = (
+            counts["outcome"].get(row.get("outcome") or "rest", 0) + 1
+        )
+        if row.get("device"):
+            counts["device"][row["device"]] = counts["device"].get(row["device"], 0) + 1
+        attrs = row.get("attribution") or {}
+        for key in ("utm_source", "utm_campaign"):
+            value = str(attrs.get(key) or "").strip().lower()
+            if value:
+                counts[key][value] = counts[key].get(value, 0) + 1
+
+    def _listed(field, order=None):
+        items = counts[field]
+        keys = order if order else sorted(items, key=lambda k: (-items[k], k))
+        return [
+            {"value": k, "count": items[k], "label": _facet_label(field, k)}
+            for k in keys
+            if items.get(k)
+        ]
+
+    return {
+        "n": len(rows),
+        "outcome": _listed("outcome", order=analyze.OUTCOME_VALUES),
+        "device": _listed("device", order=analyze.DEVICE_VALUES),
+        "utm_source": _listed("utm_source"),
+        "utm_campaign": _listed("utm_campaign"),
+    }
+
+
+def _facet_label(field: str, value: str) -> str:
+    if field == "outcome":
+        return analyze.OUTCOME_LABELS.get(value, value)
+    return value
 
 
 def _parse_fbclid_flag(raw: Optional[str]) -> Optional[bool]:
@@ -1527,12 +1630,42 @@ def _parse_fbclid_flag(raw: Optional[str]) -> Optional[bool]:
     raise ApiError(400, "fbclid must be 1 or 0")
 
 
-def _slice_from_params(outcome, utm_source, utm_medium, utm_campaign, utm_content, fbclid) -> dict:
+def _multi_param(raw, allowed, field) -> list:
+    """Repeated query params or a comma list, validated against `allowed`."""
+    if raw is None:
+        return []
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    out = []
+    for item in values:
+        for part in str(item or "").split(","):
+            value = part.strip().lower()
+            if not value:
+                continue
+            # "all" is the legacy spelling for "did not purchase".
+            if field == "outcome" and value == "all":
+                for legacy in ("checkout", "rest"):
+                    if legacy not in out:
+                        out.append(legacy)
+                continue
+            if value not in allowed:
+                raise ApiError(
+                    400, f"{field} must be one of: " + ", ".join(allowed)
+                )
+            if value not in out:
+                out.append(value)
+    return out
+
+
+def _slice_from_params(
+    outcome, device, utm_source, utm_medium, utm_campaign, utm_content, fbclid
+) -> dict:
     spec = {}
-    if outcome in ("purchased", "all"):
-        spec["outcome"] = outcome
-    elif outcome not in (None, ""):
-        raise ApiError(400, "outcome must be purchased or all")
+    outcomes = _multi_param(outcome, analyze.OUTCOME_VALUES, "outcome")
+    if outcomes:
+        spec["outcome"] = outcomes
+    devices = _multi_param(device, analyze.DEVICE_VALUES, "device")
+    if devices:
+        spec["device"] = devices
     for key, value in (
         ("utm_source", utm_source),
         ("utm_medium", utm_medium),
@@ -1549,29 +1682,23 @@ def _slice_from_params(outcome, utm_source, utm_medium, utm_campaign, utm_conten
 
 def _parse_contrast_slices(
     contrast,
-    a_outcome, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid,
-    b_outcome, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid,
+    a_outcome, a_device, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid,
+    b_outcome, b_device, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid,
 ) -> tuple:
-    presets = {
-        "purchased_vs_all": ({"outcome": "purchased"}, {"outcome": "all"}),
-        "meta_vs_rest": ({"utm_source": "meta"}, None),
-        "meta_purchased_vs_rest": ({"outcome": "purchased", "utm_source": "meta"}, None),
-        "google_vs_meta": ({"utm_source": "google"}, {"utm_source": "meta"}),
-        "google_purchased_vs_rest": ({"outcome": "purchased", "utm_source": "google"}, None),
-    }
+    """Preset name, or explicit per-side params. Presets are just a shorthand."""
     if contrast:
-        if contrast not in presets:
+        if contrast not in analyze.CUT_PRESETS:
             raise ApiError(
                 400,
-                "contrast must be one of: " + ", ".join(sorted(presets)),
+                "contrast must be one of: " + ", ".join(sorted(analyze.CUT_PRESETS)),
             )
-        return presets[contrast]
+        return analyze.CUT_PRESETS[contrast]
 
     slice_a = _slice_from_params(
-        a_outcome, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid
+        a_outcome, a_device, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid
     )
     slice_b = _slice_from_params(
-        b_outcome, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid
+        b_outcome, b_device, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid
     )
     return slice_a or None, slice_b or None
 

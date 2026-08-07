@@ -1105,6 +1105,150 @@ class TestCutEndpoint(ServerCase):
         self.assertIn("no such cohort", json.loads(body)["error"])
 
 
+class TestCutSlices(ServerCase):
+    """Facets and free-form A/B slicing over a cohort with a known shape."""
+
+    env = {"GEMINI_API_KEY": "test-key-not-used-when-cached"}
+
+    SPECS = [
+        ("p" * 32, "purchased", 360, "utm_source=google"),
+        ("c" * 32, "checkout", 390, "utm_source=facebook"),
+        ("r" * 32, "rest", 1440, "utm_campaign=spring"),
+        ("q" * 32, "purchased", 1280, ""),
+    ]
+
+    def order(self, session_id, payload):
+        return request(
+            f"{self.base}/order?session_id={session_id}",
+            method="POST",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )[0]
+
+    def setUp(self):
+        if getattr(self.__class__, "_seeded", None):
+            return
+        for sid, outcome, width, query in self.SPECS:
+            url = f"https://shop.test/p?{query}" if query else "https://shop.test/p"
+            events = [{"type": 4, "data": {"width": width, "height": 800}}]
+            self.assertEqual(
+                self.ingest(sid, {"events": events, "url": url}), 200
+            )
+            if outcome == "purchased":
+                self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
+            elif outcome == "checkout":
+                self.assertEqual(self.order(sid, {"event": "checkout_started"}), 200)
+            (self.data_dir / "sessions" / sid / "analysis.json").write_text(
+                json.dumps({"text": f"write-up {outcome}", "model": "test", "warnings": []})
+            )
+        status, body = request(
+            f"{self.base}/api/cohorts?purchased=2&all=2", method="POST", data=b""
+        )
+        self.assertEqual(status, 202, body)
+        cohort_id = json.loads(body)["id"]
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _, body = request(f"{self.base}/api/cohorts/{cohort_id}")
+            if json.loads(body)["status"] == "done":
+                break
+            time.sleep(0.1)
+        self.__class__._seeded = cohort_id
+
+    @property
+    def cohort_id(self):
+        return self.__class__._seeded
+
+    def test_cohort_rows_carry_device_and_three_way_outcome(self):
+        _, body = request(f"{self.base}/api/cohorts/{self.cohort_id}")
+        rows = {s["session_id"][0]: s for s in json.loads(body)["sessions"]}
+        self.assertEqual(rows["p"]["outcome"], "purchased")
+        self.assertEqual(rows["p"]["device"], "mobile")
+        self.assertEqual(rows["c"]["outcome"], "checkout")
+        self.assertEqual(rows["c"]["device"], "mobile")
+        self.assertEqual(rows["r"]["outcome"], "rest")
+        self.assertEqual(rows["r"]["device"], "desktop")
+
+    def test_derived_fields_are_not_frozen_into_the_cohort_file(self):
+        saved = json.loads(
+            (self.data_dir / "cohorts" / f"{self.cohort_id}.json").read_text()
+        )
+        for entry in saved["sessions"]:
+            self.assertNotIn("device", entry)
+            self.assertNotIn("outcome", entry)
+            self.assertNotIn("attribution", entry)
+
+    def test_facets_report_only_values_present_in_the_cohort(self):
+        status, body = request(f"{self.base}/api/cohorts/{self.cohort_id}/facets")
+        self.assertEqual(status, 200, body)
+        facets = json.loads(body)
+        self.assertEqual(facets["n"], 4)
+        self.assertEqual(
+            {f["value"]: f["count"] for f in facets["outcome"]},
+            {"purchased": 2, "checkout": 1, "rest": 1},
+        )
+        self.assertEqual(
+            {f["value"]: f["count"] for f in facets["device"]},
+            {"mobile": 2, "desktop": 2},
+        )
+        self.assertEqual(
+            {f["value"] for f in facets["utm_source"]}, {"google", "facebook"}
+        )
+        self.assertEqual([f["value"] for f in facets["utm_campaign"]], ["spring"])
+        self.assertIn("mobile_vs_desktop", facets["presets"])
+
+    def test_outcome_facet_is_labelled_for_humans(self):
+        _, body = request(f"{self.base}/api/cohorts/{self.cohort_id}/facets")
+        labels = {f["value"]: f["label"] for f in json.loads(body)["outcome"]}
+        self.assertEqual(labels["checkout"], "reached checkout")
+
+    def cut(self, query):
+        return request(f"{self.base}/api/cohorts/{self.cohort_id}/cut?{query}")
+
+    def test_every_slice_combination_is_accepted(self):
+        for query in (
+            "contrast=mobile_vs_desktop",
+            "contrast=purchased_vs_checkout",
+            "contrast=checkout_vs_rest",
+            "a_outcome=purchased&a_device=mobile",
+            "a_device=mobile&b_device=desktop",
+            "a_utm_source=google&b_utm_source=facebook",
+            "a_utm_campaign=spring",
+            "a_outcome=checkout&a_outcome=rest",
+            "a_outcome=checkout,rest",
+            "a_outcome=purchased&a_device=mobile&a_utm_source=google&b_device=desktop",
+        ):
+            status, body = self.cut(query)
+            # Uncached, but a 404/absent proves the slice parsed and split.
+            self.assertEqual(status, 404, f"{query} -> {body}")
+            self.assertEqual(json.loads(body)["status"], "absent")
+
+    def test_repeated_and_comma_forms_are_the_same_cut(self):
+        _, one = self.cut("a_outcome=checkout&a_outcome=rest")
+        _, two = self.cut("a_outcome=checkout,rest")
+        self.assertEqual(json.loads(one)["cut"], json.loads(two)["cut"])
+
+    def test_value_order_does_not_change_the_cut_key(self):
+        _, one = self.cut("a_outcome=checkout,rest")
+        _, two = self.cut("a_outcome=rest,checkout")
+        self.assertEqual(json.loads(one)["cut"], json.loads(two)["cut"])
+
+    def test_different_slices_are_different_cuts(self):
+        _, one = self.cut("a_device=mobile")
+        _, two = self.cut("a_device=desktop")
+        self.assertNotEqual(json.loads(one)["cut"], json.loads(two)["cut"])
+
+    def test_bad_slice_values_are_rejected(self):
+        for query, word in (
+            ("a_outcome=nonsense", "outcome must be"),
+            ("a_device=tablet", "device must be"),
+            ("b_outcome=maybe", "outcome must be"),
+            ("contrast=not_a_preset", "contrast must be"),
+        ):
+            status, body = self.cut(query)
+            self.assertEqual(status, 400, query)
+            self.assertIn(word, json.loads(body)["error"])
+
+
 class TestCohortUnavailable(ServerCase):
     env = {"GEMINI_API_KEY": ""}
 
