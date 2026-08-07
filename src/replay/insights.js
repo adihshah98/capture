@@ -88,6 +88,13 @@ function qaUrl(sessionId) {
   return `/api/sessions/${sessionId}/qa${qs ? `?${qs}` : ''}`;
 }
 
+function retryUrl(sessionId) {
+  const params = new URLSearchParams();
+  if (currentProject) params.set('project', currentProject);
+  const qs = params.toString();
+  return `/api/cohort/sessions/${sessionId}/retry${qs ? `?${qs}` : ''}`;
+}
+
 function stopPolling() {
   if (pollTimer) {
     clearTimeout(pollTimer);
@@ -189,6 +196,12 @@ function renderQueue(body) {
       const err = entry.error
         ? `<div style="color:#b91c1c;font-size:11px;margin-top:2px">${escapeHtml(entry.error)}</div>`
         : '';
+      const retry =
+        status === 'error'
+          ? `<button type="button" class="row-retry" data-retry="${escapeAttr(
+              entry.session_id
+            )}">Retry</button>`
+          : '';
       return `
         <tr class="openable" data-sid="${escapeAttr(entry.session_id)}">
           <td class="sid">${escapeHtml(entry.session_id.slice(0, 8))}…</td>
@@ -196,6 +209,7 @@ function renderQueue(body) {
           <td>${escapeHtml(String(campaign))}</td>
           <td>
             <span class="badge ${escapeAttr(status)}">${escapeHtml(status)}</span>
+            ${retry}
             ${err}
           </td>
           <td>${qaBadge(entry.qa_status)}</td>
@@ -226,8 +240,28 @@ function renderQueue(body) {
     </table>`;
 
   tableWrapEl.querySelectorAll('tr.openable').forEach((tr) => {
-    tr.addEventListener('click', () => openSession(tr.dataset.sid));
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('[data-retry]')) return;
+      openSession(tr.dataset.sid);
+    });
   });
+  tableWrapEl.querySelectorAll('[data-retry]').forEach((btn) => {
+    btn.addEventListener('click', () => retrySession(btn.dataset.retry, btn));
+  });
+}
+
+async function retrySession(sessionId, btn) {
+  if (!analysisEnabled || !sessionId) return;
+  btn.disabled = true;
+  btn.textContent = 'Retrying…';
+  try {
+    const body = await fetchJson(retryUrl(sessionId), { method: 'POST' });
+    renderCohort(body);
+  } catch (err) {
+    progressEl.textContent = err.message;
+    btn.disabled = false;
+    btn.textContent = 'Retry';
+  }
 }
 
 function themeCountChips(detailsOrMap, side) {

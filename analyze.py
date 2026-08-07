@@ -42,8 +42,34 @@ ANALYZE_MAX_FRAMES = int(os.environ.get("ANALYZE_MAX_FRAMES", "0"))
 
 ANALYSIS_ENABLED = bool(GEMINI_API_KEY)
 
+# Extraction and model calls contend for different resources, so they get
+# different gates. Reconstruction drives a headless Chromium and is memory
+# bound — one at a time, or a small box starts swapping. The Gemini calls are
+# pure network wait, so a few can overlap and the cohort loop stops spending
+# most of its wall clock idle.
+ANALYZE_EXTRACT_CONCURRENCY = max(1, int(os.environ.get("ANALYZE_EXTRACT_CONCURRENCY", "1")))
+ANALYZE_MODEL_CONCURRENCY = max(1, int(os.environ.get("ANALYZE_MODEL_CONCURRENCY", "3")))
+
+# Created lazily: a Semaphore binds to the running loop, and this module is
+# imported before the server's loop exists (and reused by the sync CLI).
+_extract_gate: Optional[asyncio.Semaphore] = None
+_model_gate: Optional[asyncio.Semaphore] = None
+_gate_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
 EXTRACTOR = BASE_DIR / "src" / "analyze" / "extract.mjs"
 REPLAYER_BUNDLE = BASE_DIR / "src" / "analyze" / "replayer.bundle.js"
+
+
+def _gates() -> tuple:
+    """(extract, model) semaphores bound to the running loop."""
+    global _extract_gate, _model_gate, _gate_loop
+    loop = asyncio.get_running_loop()
+    if _gate_loop is not loop or _extract_gate is None or _model_gate is None:
+        _extract_gate = asyncio.Semaphore(ANALYZE_EXTRACT_CONCURRENCY)
+        _model_gate = asyncio.Semaphore(ANALYZE_MODEL_CONCURRENCY)
+        _gate_loop = loop
+    return _extract_gate, _model_gate
 
 # Controlled vocabularies — the model maps free text onto these tags (+ other:…).
 # Grow slowly; free-form themes make cohort clustering noise.
@@ -1303,16 +1329,22 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
     out_dir.mkdir(parents=True, exist_ok=True)
     insights_path(session_dir).unlink(missing_ok=True)
 
-    digest = await run_extractor(session_dir, out_dir, chunk_names)
+    extract_gate, model_gate = _gates()
+
+    async with extract_gate:
+        digest = await run_extractor(session_dir, out_dir, chunk_names)
     if digest.get("error"):
         raise RuntimeError(digest["error"])
 
-    text = await call_gemini(digest, digest.get("frames") or [])
+    # Held across both calls: the second one only makes sense for the write-up
+    # the first produced, and re-queueing between them would just add latency.
+    async with model_gate:
+        text = await call_gemini(digest, digest.get("frames") or [])
 
-    try:
-        insights = await call_gemini_insights(digest, text)
-    except Exception as exc:
-        insights = empty_insights(str(exc))
+        try:
+            insights = await call_gemini_insights(digest, text)
+        except Exception as exc:
+            insights = empty_insights(str(exc))
     insights = {
         **insights,
         "model": GEMINI_MODEL,

@@ -1020,8 +1020,8 @@ def session_chunk(request: Request, session_id: str, chunk_name: str, project: O
     )
 
 _analysis_tasks: dict = {}
-# One Chromium at a time — a t3.micro cannot survive concurrent extractions.
-_analysis_worker_lock = asyncio.Lock()
+# Concurrency lives in analyze.py: one Chromium at a time for reconstruction,
+# a few overlapping Gemini calls. Both gates are shared by every caller here.
 _cohort_tasks: dict = {}
 
 def _analysis_key(session_dir: Path) -> str:
@@ -1033,8 +1033,7 @@ def _cohort_key(pool: Path) -> str:
 async def _run_analysis_job(session_dir: Path, chunk_names: list, force: bool = True) -> None:
     analyze.write_job(session_dir, "running")
     try:
-        async with _analysis_worker_lock:
-            await analyze.analyze_session(session_dir, chunk_names, force=force)
+        await analyze.analyze_session(session_dir, chunk_names, force=force)
     except Exception as exc:
         analyze.write_job(session_dir, "error", error=str(exc))
     finally:
@@ -1103,17 +1102,24 @@ async def _run_cohort_job(pool: Path, force: bool = False) -> None:
         cohort = {**cohort, "status": "running"}
         analyze.write_cohort(pool, cohort)
 
+        pending = []
         for entry in cohort.get("sessions") or []:
             session_dir = pool / entry["session_id"]
             if not force and analyze.read_analysis(session_dir):
                 entry["status"] = "done"
                 entry["analysis"] = analyze.ANALYSIS_FILE
                 entry.pop("error", None)
-                analyze.write_cohort(pool, cohort)
                 continue
-
-            entry["status"] = "running"
+            entry["status"] = "queued"
             entry.pop("error", None)
+            pending.append((entry, session_dir))
+        analyze.write_cohort(pool, cohort)
+
+        # Fan out and let analyze.py's semaphores pace the work — extraction
+        # still runs one at a time, but a session waiting on Gemini no longer
+        # blocks the next session's reconstruction.
+        async def run_one(entry: dict, session_dir: Path) -> None:
+            entry["status"] = "running"
             analyze.write_cohort(pool, cohort)
             try:
                 await _await_session_analysis(session_dir, force=force)
@@ -1124,6 +1130,12 @@ async def _run_cohort_job(pool: Path, force: bool = False) -> None:
                 entry["status"] = "error"
                 entry["error"] = getattr(exc, "message", None) or str(exc) or "analysis failed"
             analyze.write_cohort(pool, cohort)
+
+        if pending:
+            await asyncio.gather(
+                *(run_one(entry, session_dir) for entry, session_dir in pending),
+                return_exceptions=True,
+            )
 
         final = analyze.enrich_cohort_status(pool, analyze.read_cohort(pool) or cohort)
         analyze.write_cohort(pool, final)
@@ -1217,6 +1229,78 @@ async def create_analysis(
     if result.get("accepted"):
         return JSONResponse({"status": "running"}, status_code=202)
     return result
+
+@app.post("/api/cohort/sessions/{session_id}/retry")
+async def retry_cohort_session(
+    request: Request,
+    session_id: str,
+    project: Optional[str] = Query(None),
+):
+    """Re-run one cohort row after it failed, without re-sampling the cohort."""
+    require_read_access(request, project)
+    _require_analysis_runtime()
+    pool = resolve_pool(project)
+    cohort = analyze.read_cohort(pool)
+    if not cohort:
+        raise ApiError(404, "no cohort yet")
+
+    entry = next(
+        (e for e in cohort.get("sessions") or [] if e.get("session_id") == session_id),
+        None,
+    )
+    if entry is None:
+        raise ApiError(404, "session is not in the current cohort")
+
+    session_dir = resolve_session(session_id, project)
+    # Drop the recorded failure first, so a poll landing mid-retry does not
+    # re-read the old error back over the running status.
+    entry["status"] = "queued"
+    entry.pop("error", None)
+    analyze.clear_job(session_dir)
+    analyze.write_cohort(pool, {**cohort, "status": "running"})
+
+    key = _cohort_key(pool)
+    existing = _cohort_tasks.get(key)
+    if existing and not existing.done():
+        # A cohort run owns the file; let it pick this row up on its own pass.
+        await _start_session_analysis(session_dir)
+    else:
+        task = asyncio.create_task(_retry_cohort_session_job(pool, entry, session_dir))
+        _cohort_tasks[key] = task
+
+    return JSONResponse(
+        cohort_response(pool, analyze.enrich_cohort_status(pool, analyze.read_cohort(pool) or cohort)),
+        status_code=202,
+    )
+
+
+async def _retry_cohort_session_job(pool: Path, entry: dict, session_dir: Path) -> None:
+    key = _cohort_key(pool)
+    try:
+        cohort = analyze.read_cohort(pool) or {}
+        row = next(
+            (e for e in cohort.get("sessions") or [] if e.get("session_id") == entry.get("session_id")),
+            None,
+        )
+        if row is None:
+            return
+        row["status"] = "running"
+        row.pop("error", None)
+        analyze.write_cohort(pool, cohort)
+        try:
+            # Not forced: a failed row has nothing cached to bust, and if it
+            # succeeded meanwhile the retry should settle on that result.
+            await _await_session_analysis(session_dir)
+            row["status"] = "done"
+            row["analysis"] = analyze.ANALYSIS_FILE
+            row.pop("error", None)
+        except Exception as exc:
+            row["status"] = "error"
+            row["error"] = getattr(exc, "message", None) or str(exc) or "analysis failed"
+        analyze.write_cohort(pool, analyze.enrich_cohort_status(pool, cohort))
+    finally:
+        _cohort_tasks.pop(key, None)
+
 
 @app.get("/api/cohort")
 def get_cohort(request: Request, project: Optional[str] = Query(None)):

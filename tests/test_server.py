@@ -783,6 +783,83 @@ class TestCohort(ServerCase):
         for entry in saved["sessions"]:
             self.assertNotIn("text", entry)
 
+    def _cohort_of_one(self, sid):
+        """A settled one-session cohort, with cached analysis so it lands done."""
+        self.assertEqual(self.ingest(sid), 200)
+        self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
+        self.seed_analysis(sid, themes=["checkout_friction"])
+        status, _ = request(
+            f"{self.base}/api/cohort?purchased=1&all=0", method="POST", data=b""
+        )
+        self.assertEqual(status, 202)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _, body = request(f"{self.base}/api/cohort")
+            if json.loads(body)["status"] == "done":
+                break
+            time.sleep(0.1)
+
+    def test_retry_clears_the_recorded_error_for_that_row(self):
+        sid = "retry1" + "x" * 26
+        self._cohort_of_one(sid)
+
+        # Simulate a row that failed during the run: status is re-derived from
+        # disk, so the cached analysis has to go along with the error marker.
+        session = self.data_dir / "sessions" / sid
+        (session / "analysis.json").unlink()
+        (session / "analysis.status.json").write_text(
+            json.dumps({"status": "error", "error": "page reconstruction timed out"})
+        )
+        path = self.data_dir / "cohort.json"
+        saved = json.loads(path.read_text())
+        saved["sessions"][0]["status"] = "error"
+        saved["sessions"][0]["error"] = "page reconstruction timed out"
+        saved["status"] = "error"
+        path.write_text(json.dumps(saved))
+
+        _, body = request(f"{self.base}/api/cohort")
+        self.assertEqual(json.loads(body)["sessions"][0]["status"], "error")
+
+        # Restore the cache so the retry settles without a real Gemini call.
+        self.seed_analysis(sid, themes=["checkout_friction"])
+
+        status, body = request(
+            f"{self.base}/api/cohort/sessions/{sid}/retry", method="POST", data=b""
+        )
+        self.assertEqual(status, 202, body)
+
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            _, body = request(f"{self.base}/api/cohort")
+            entry = json.loads(body)["sessions"][0]
+            if entry["status"] == "done":
+                break
+            time.sleep(0.1)
+        self.assertEqual(entry["status"], "done")
+        self.assertNotIn("error", entry)
+
+    def test_retry_rejects_a_session_outside_the_cohort(self):
+        sid = "retry2" + "x" * 26
+        self._cohort_of_one(sid)
+        other = "nother" + "x" * 26
+        self.assertEqual(self.ingest(other), 200)
+
+        status, body = request(
+            f"{self.base}/api/cohort/sessions/{other}/retry", method="POST", data=b""
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("not in the current cohort", json.loads(body)["error"])
+
+    def test_retry_without_a_cohort_is_404(self):
+        sid = "retry3" + "x" * 26
+        self.assertEqual(self.ingest(sid), 200)
+        (self.data_dir / "cohort.json").unlink(missing_ok=True)
+        status, body = request(
+            f"{self.base}/api/cohort/sessions/{sid}/retry", method="POST", data=b""
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("no cohort", json.loads(body)["error"])
+
 
 class TestAttribution(ServerCase):
     EVENTS = [{"type": 4, "data": {}}]
