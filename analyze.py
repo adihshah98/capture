@@ -23,6 +23,7 @@ from typing import Optional
 BASE_DIR = Path(__file__).resolve().parent
 
 ANALYSIS_FILE = "analysis.json"
+ANALYSIS_INSIGHTS_FILE = "analysis.insights.json"
 ANALYSIS_STATUS_FILE = "analysis.status.json"
 ANALYSIS_DIR = ".analysis"
 COHORT_FILE = "cohort.json"
@@ -42,6 +43,36 @@ ANALYSIS_ENABLED = bool(GEMINI_API_KEY)
 
 EXTRACTOR = BASE_DIR / "src" / "analyze" / "extract.mjs"
 REPLAYER_BUNDLE = BASE_DIR / "src" / "analyze" / "replayer.bundle.js"
+
+# Controlled vocabularies — the model maps free text onto these tags (+ other:…).
+# Grow slowly; free-form themes make cohort clustering noise.
+THEME_VOCAB = (
+    "size_chart_confusion",
+    "shipping_hesitation",
+    "price_hesitation",
+    "trust_or_reviews",
+    "navigation_confusion",
+    "form_friction",
+    "checkout_friction",
+    "add_to_cart_friction",
+    "product_info_gap",
+    "promo_or_discount_seeking",
+    "comparison_shopping",
+    "rage_or_repeated_clicks",
+    "slow_or_idle_on_page",
+    "exit_before_checkout",
+    "technical_or_asset_issues",
+)
+PAGE_VOCAB = ("home", "plp", "pdp", "cart", "checkout", "collection", "account", "other")
+OUTCOME_SIGNAL_VOCAB = (
+    "bounced_early",
+    "browsed_products",
+    "added_to_cart",
+    "reached_checkout",
+    "purchased",
+    "abandoned_cart",
+)
+CONFIDENCE_VOCAB = ("low", "medium", "high")
 
 SYSTEM_PROMPT = """You analyse one recorded web session for a product team.
 
@@ -78,6 +109,35 @@ Two or three observations a product team could act on. If the evidence is thin,
 say so instead of padding.
 
 Keep it under 300 words. No preamble."""
+
+INSIGHTS_PROMPT = """You turn one session analysis into structured tags for cohort comparison.
+
+Use ONLY the measured digest and the markdown write-up. Do not invent pages,
+clicks, or outcomes that are not evidenced there.
+
+Return a single JSON object with this exact shape:
+{
+  "themes": ["…"],
+  "friction": [{"atMs": 42000, "label": "short_snake_case"}],
+  "pages": ["pdp", "cart"],
+  "outcome_signals": ["reached_checkout"],
+  "confidence": "low" | "medium" | "high"
+}
+
+themes — pick zero or more from this controlled vocabulary (prefer these):
+""" + ", ".join(THEME_VOCAB) + """
+If something important is missing, use other:<short_snake_case> (one theme).
+Do not invent free-form theme strings outside the vocab or other:.
+
+pages — only from: """ + ", ".join(PAGE_VOCAB) + """
+
+outcome_signals — only from: """ + ", ".join(OUTCOME_SIGNAL_VOCAB) + """
+
+friction.atMs is milliseconds from session start when known; omit entries you
+cannot place. label is a short snake_case phrase grounded in the write-up.
+
+confidence reflects how much evidence the digest and write-up give, not how
+interesting the session felt. Prefer fewer accurate tags over many guesses."""
 
 
 def runtime_present() -> bool:
