@@ -118,13 +118,13 @@ export async function loadSession(sessionId) {
         (key === checkoutWindow ? ' · reached checkout from this tab' : '');
       btn.dataset.window = key;
       btn.addEventListener('click', () => {
-        playWindow(sessionId, byWindow.get(key), key, ++loadSeq);
+        playWindow(sessionId, byWindow.get(key), key, ++loadSeq, key === defaultWindow);
       });
       windowTabsEl.appendChild(btn);
     }
   }
 
-  playWindow(sessionId, byWindow.get(defaultWindow), defaultWindow, seq);
+  playWindow(sessionId, byWindow.get(defaultWindow), defaultWindow, seq, true);
 }
 
 function destroyPlayer() {
@@ -139,7 +139,7 @@ function destroyPlayer() {
   assetErrorsEl.hidden = true;
 }
 
-async function playWindow(sessionId, chunks, windowKey, seq) {
+async function playWindow(sessionId, chunks, windowKey, seq, showOrder) {
   for (const btn of windowTabsEl.querySelectorAll('button')) {
     btn.classList.toggle('active', btn.dataset.window === windowKey);
   }
@@ -177,12 +177,12 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
     showPlayerMessage(
       results.includes(null) ? 'Could not load this session.' : 'Not enough events to replay yet.'
     );
-    renderTimeline(allEvents, navigations, session);
+    renderTimeline(allEvents, navigations, session, showOrder);
     return;
   }
 
   setSyncStart(allEvents[0].timestamp);
-  renderTimeline(allEvents, navigations, session);
+  renderTimeline(allEvents, navigations, session, showOrder);
   let lastHashWrite = 0;
   player = new CapturePlayer({
     events: allEvents,
