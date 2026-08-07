@@ -157,6 +157,56 @@ function dropUnrenderable(events) {
   return out;
 }
 
+function collectAssetUrls(events) {
+  const urls = new Set();
+  const add = (u) => {
+    if (typeof u !== 'string') return;
+    if (u.startsWith('//')) u = `https:${u}`;
+    if (u.startsWith('http')) urls.add(u);
+  };
+  const visit = (node) => {
+    if (!node) return;
+    const attrs = node.attributes;
+    if (attrs) {
+      const tag = (node.tagName || '').toLowerCase();
+      if (tag === 'img') {
+        add(attrs.src);
+        if (typeof attrs.srcset === 'string') {
+          for (const part of attrs.srcset.split(',')) add(part.trim().split(/\s+/)[0]);
+        }
+      } else if (tag === 'video') {
+        add(attrs.poster);
+      }
+    }
+    if (node.childNodes) for (const child of node.childNodes) visit(child);
+  };
+  for (const e of events) {
+    if (e.type === 2) visit(e.data && e.data.node);
+    else if (e.type === 3 && e.data && e.data.source === 0 && e.data.adds) {
+      for (const a of e.data.adds) visit(a.node);
+    }
+  }
+  return [...urls];
+}
+
+function preloadAssets(events, seq) {
+  const queue = collectAssetUrls(events).slice(0, 300);
+  let active = 0;
+  const pump = () => {
+    if (seq !== loadSeq) return;
+    while (active < 4 && queue.length) {
+      active += 1;
+      const img = new Image();
+      img.onload = img.onerror = () => {
+        active -= 1;
+        pump();
+      };
+      img.src = queue.shift();
+    }
+  };
+  pump();
+}
+
 function destroyPlayer() {
   if (player) player.destroy();
   player = null;
@@ -255,6 +305,8 @@ async function playWindow(sessionId, chunks, windowKey, seq, showOrder) {
   controlsEl.hidden = false;
   renderScrubberChrome(player);
   updateScrubber(0);
+  if ('requestIdleCallback' in window) requestIdleCallback(() => preloadAssets(playable, seq));
+  else setTimeout(() => preloadAssets(playable, seq), 1000);
   if (pendingSeekMs != null) {
     const at = Math.min(pendingSeekMs, player.duration - 1);
     pendingSeekMs = null;

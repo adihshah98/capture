@@ -292,30 +292,50 @@ export class CapturePlayer {
     const doc = this.replayer.iframe.contentDocument;
     const win = this.replayer.iframe.contentWindow;
     if (!doc || !win) return;
-    const docId = this.replayer.getMirror().getId(doc);
+    const mirror = this.replayer.getMirror();
+    const docId = mirror.getId(doc);
     const t = this.startTs + this.replayer.getCurrentTime();
-    let x = 0;
-    let y = 0;
+    const byTarget = new Map();
     for (const e of this.events) {
       if (e.timestamp > t) break;
       if (e.type === EventType.FullSnapshot && e.data.initialOffset) {
-        x = e.data.initialOffset.left;
-        y = e.data.initialOffset.top;
+        byTarget.clear();
+        byTarget.set(docId, { x: e.data.initialOffset.left, y: e.data.initialOffset.top });
       } else if (
         e.type === EventType.IncrementalSnapshot &&
-        e.data.source === IncrementalSource.Scroll &&
-        e.data.id === docId
+        e.data.source === IncrementalSource.Scroll
       ) {
-        x = e.data.x;
-        y = e.data.y;
+        byTarget.set(e.data.id, { x: e.data.x, y: e.data.y });
       }
     }
-    win.scrollTo({ left: x, top: y, behavior: 'auto' });
+    if (!byTarget.has(docId)) byTarget.set(docId, { x: 0, y: 0 });
+    for (const [id, pos] of byTarget) {
+      if (id === docId) {
+        win.scrollTo({ left: pos.x, top: pos.y, behavior: 'auto' });
+        continue;
+      }
+      const el = mirror.getNode(id);
+      if (el && el.scrollTo) el.scrollTo({ left: pos.x, top: pos.y, behavior: 'auto' });
+    }
   }
 
   scheduleScrollFix() {
     this.scrollTimers.forEach(clearTimeout);
-    this.scrollTimers = [90, 400].map((ms) => setTimeout(() => this.applyRecordedScroll(), ms));
+    this.scrollTimers = [];
+    let lastHeight = -1;
+    let stable = 0;
+    const deadline = Date.now() + 3500;
+    const step = () => {
+      this.applyRecordedScroll();
+      const doc = this.replayer.iframe.contentDocument;
+      const height = doc && doc.body ? doc.body.scrollHeight : -1;
+      stable = height === lastHeight ? stable + 1 : 0;
+      lastHeight = height;
+      if (stable < 3 && Date.now() < deadline) {
+        this.scrollTimers.push(setTimeout(step, 150));
+      }
+    };
+    this.scrollTimers.push(setTimeout(step, 90));
   }
 
   rescale() {
