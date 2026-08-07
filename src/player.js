@@ -120,6 +120,9 @@ export class CapturePlayer {
       this.rescale();
     });
     this.replayer.on('fullsnapshot-rebuilded', () => this.hookFrame());
+    this.replayer.on('custom-event', (e) => {
+      if (e.data && e.data.tag === 'capture-click') this.clickPulse(e.data.payload);
+    });
     this.replayer.on('finish', () => {
       if (this.playing) this.finish();
     });
@@ -130,6 +133,26 @@ export class CapturePlayer {
 
     this.tick = this.tick.bind(this);
     this.play(0);
+  }
+
+  clickPulse(payload) {
+    const wrapper = this.replayer.wrapper;
+    const mouse = wrapper.querySelector('.replayer-mouse');
+    const pulse = document.createElement('div');
+    pulse.className = payload && payload.rage ? 'click-pulse rage' : 'click-pulse';
+    if (mouse && (mouse.style.left || mouse.style.top)) {
+      pulse.style.left = mouse.style.left;
+      pulse.style.top = mouse.style.top;
+    } else if (payload && payload.x != null) {
+      pulse.style.left = `${payload.x}px`;
+      pulse.style.top = `${payload.y}px`;
+    } else {
+      return;
+    }
+    const live = wrapper.querySelectorAll('.click-pulse');
+    if (live.length >= 4) live[0].remove();
+    wrapper.appendChild(pulse);
+    setTimeout(() => pulse.remove(), 1800);
   }
 
   hookFrame() {
@@ -289,6 +312,7 @@ export class CapturePlayer {
     if (!isFinite(scale) || scale <= 0) return;
     if (Math.abs(scale - 1) < 0.001) scale = 0.999;
     this.replayer.wrapper.style.transform = `scale(${scale}) translate(-50%, -50%)`;
+    this.replayer.wrapper.style.setProperty('--rescale', scale);
   }
 
   destroy() {

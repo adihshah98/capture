@@ -333,6 +333,38 @@ class TestInteractions(ServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.listed(session)["interactions"], {"clicks": 1, "rage": 0})
 
+class TestDeviceIndex(ServerCase):
+    def listed(self, session_id):
+        sessions = json.loads(request(f"{self.base}/api/sessions")[1])["sessions"]
+        return next(s for s in sessions if s["session_id"] == session_id)
+
+    def test_first_meta_event_sets_device(self):
+        session = "dev1" + "x" * 28
+        self.ingest(session, {"events": [
+            {"type": 4, "data": {"href": "https://brand.example/", "width": 390, "height": 844}},
+            {"type": 4, "data": {"href": "https://brand.example/b", "width": 390, "height": 677}},
+        ]})
+        self.assertEqual(self.listed(session)["device"], {"width": 390, "height": 844})
+
+    def test_device_survives_later_batches_and_never_lists_as_chunk(self):
+        session = "dev2" + "x" * 28
+        self.ingest(session, {"events": [{"type": 4, "data": {"width": 1496, "height": 900}}]})
+        self.ingest(session, {"events": [{"type": 4, "data": {"width": 390, "height": 844}}]})
+        self.assertEqual(self.listed(session)["device"]["width"], 1496)
+        manifest = json.loads(request(f"{self.base}/api/sessions/{session}/chunks")[1])
+        self.assertNotIn("device.json", [c["name"] for c in manifest["chunks"]])
+
+    def test_malformed_meta_events_never_break_ingest(self):
+        session = "dev3" + "x" * 28
+        status = self.ingest(session, {"events": [
+            {"type": 4, "data": "junk"},
+            {"type": 4, "data": {"width": "wide", "height": 10}},
+            {"type": 4},
+            {"type": 3, "data": {"source": 2}},
+        ]})
+        self.assertEqual(status, 200)
+        self.assertNotIn("device", self.listed(session))
+
 class TestHealthz(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": "s3cret"}
 

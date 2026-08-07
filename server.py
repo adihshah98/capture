@@ -343,6 +343,7 @@ async def ingest(
         )
     )
     index_interactions(session_dir, events)
+    index_device(session_dir, events)
     _pool_bytes[pool] = pool_bytes(pool) + chunk_path.stat().st_size
 
     return {"status": "ok", "stored": len(events)}
@@ -353,6 +354,23 @@ ORDER_MAX_BODY_BYTES = 4096
 VISITOR_FILE = "visitor.json"
 
 INTERACTIONS_FILE = "interactions.json"
+
+DEVICE_FILE = "device.json"
+
+def index_device(session_dir: Path, events: list) -> None:
+    path = session_dir / DEVICE_FILE
+    if path.exists():
+        return
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != 4:
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        width, height = data.get("width"), data.get("height")
+        if isinstance(width, int) and isinstance(height, int) and width > 0:
+            path.write_text(json.dumps({"width": width, "height": height}))
+            return
 
 def index_interactions(session_dir: Path, events: list) -> None:
     clicks = rage = 0
@@ -674,6 +692,14 @@ def list_sessions(request: Request, project: Optional[str] = Query(None)):
                 interactions = json.loads(interactions_path.read_text())
                 if isinstance(interactions, dict):
                     info["interactions"] = interactions
+            except Exception:
+                pass
+        device_path = entry / DEVICE_FILE
+        if device_path.is_file():
+            try:
+                device = json.loads(device_path.read_text())
+                if isinstance(device, dict):
+                    info["device"] = device
             except Exception:
                 pass
         sessions.append(info)

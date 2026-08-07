@@ -1,6 +1,8 @@
 import { CapturePlayer } from '../player.js';
-import { fetchJson, projectQuery } from './api.js';
+import { currentProject, fetchJson, projectQuery } from './api.js';
+import { writeHash } from './deeplink.js';
 import { formatBytes, hostPath } from './format.js';
+import { clearSessionDetails, renderSessionDetails } from './session-details.js';
 import { allSessions } from './session-list.js';
 import {
   currentSpeed,
@@ -28,6 +30,11 @@ export let player = null;
 let loadSeq = 0;
 export let loadedSessionId = null;
 
+let pendingSeekMs = null;
+export function setPendingSeek(ms) {
+  pendingSeekMs = ms;
+}
+
 export function clearPlayer() {
   loadSeq += 1;
   loadedSessionId = null;
@@ -35,6 +42,7 @@ export function clearPlayer() {
   windowTabsEl.innerHTML = '';
   clearTimeline();
   resetAnalysis(null);
+  clearSessionDetails();
   loadProgressEl.textContent = '';
   sessionTitleEl.textContent = 'Select a session';
   sessionTitleEl.title = '';
@@ -49,6 +57,8 @@ function showPlayerMessage(message) {
 export async function loadSession(sessionId) {
   const seq = ++loadSeq;
   loadedSessionId = sessionId;
+  writeHash({ p: currentProject, s: sessionId });
+  renderSessionDetails(allSessions.find((s) => s.session_id === sessionId));
   sessionTitleEl.textContent = `Session ${sessionId}`;
   sessionTitleEl.title = '';
   showCachedAnalysis(sessionId);
@@ -78,9 +88,23 @@ export async function loadSession(sessionId) {
     return;
   }
   const bytesOf = (chunks) => chunks.reduce((n, c) => n + c.bytes, 0);
-  const defaultWindow = [...byWindow.entries()].sort(
-    (a, b) => bytesOf(b[1]) - bytesOf(a[1])
-  )[0][0];
+  const session = allSessions.find((s) => s.session_id === sessionId);
+  const checkoutAt = session && session.order && session.order.checkout_started_at;
+  let checkoutWindow = null;
+  if (checkoutAt) {
+    let latest = -Infinity;
+    for (const [key, chunks] of byWindow) {
+      for (const chunk of chunks) {
+        if (chunk.timestamp <= checkoutAt + 5000 && chunk.timestamp > latest) {
+          latest = chunk.timestamp;
+          checkoutWindow = key;
+        }
+      }
+    }
+  }
+  const defaultWindow =
+    checkoutWindow ??
+    [...byWindow.entries()].sort((a, b) => bytesOf(b[1]) - bytesOf(a[1]))[0][0];
 
   windowTabsEl.innerHTML = '';
   if (byWindow.size > 1) {
@@ -89,7 +113,9 @@ export async function loadSession(sessionId) {
       n += 1;
       const btn = document.createElement('button');
       btn.textContent = `Tab ${n}`;
-      btn.title = `${chunks.length} chunks · ${formatBytes(bytesOf(chunks))}`;
+      btn.title =
+        `${chunks.length} chunks · ${formatBytes(bytesOf(chunks))}` +
+        (key === checkoutWindow ? ' · reached checkout from this tab' : '');
       btn.dataset.window = key;
       btn.addEventListener('click', () => {
         playWindow(sessionId, byWindow.get(key), key, ++loadSeq);
@@ -157,6 +183,7 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
 
   setSyncStart(allEvents[0].timestamp);
   renderTimeline(allEvents, navigations, session);
+  let lastHashWrite = 0;
   player = new CapturePlayer({
     events: allEvents,
     mount: stageEl,
@@ -165,6 +192,11 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
     onTime: (ms) => {
       updateScrubber(ms);
       syncTimeline(ms);
+      const now = Date.now();
+      if (now - lastHashWrite > 2000) {
+        lastHashWrite = now;
+        writeHash({ p: currentProject, s: sessionId, t: Math.floor(ms / 1000) });
+      }
     },
     onState: updatePlayState,
     onSkip: showSkipNote,
@@ -173,4 +205,9 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
   controlsEl.hidden = false;
   renderScrubberChrome(player);
   updateScrubber(0);
+  if (pendingSeekMs != null) {
+    const at = Math.min(pendingSeekMs, player.duration - 1);
+    pendingSeekMs = null;
+    player.seekTo(at);
+  }
 }

@@ -72,8 +72,11 @@ export function renderTimeline(events, navigations, session) {
       typeof order.total === 'number'
         ? ` — purchased ${order.total.toFixed(2)}${order.currency ? ' ' + order.currency : ''}`
         : '';
+    const first = events[0].timestamp;
+    const last = events[events.length - 1].timestamp;
+    const at = order.checkout_started_at;
     entries.push({
-      t: events[events.length - 1].timestamp,
+      t: at ? Math.min(Math.max(at, first), last) : last,
       kind: order.purchased_at ? 'purchased' : 'checkout',
       css: 'kind-order',
       detail: `continued to checkout${order.purchased_at ? amount : ''}`,
