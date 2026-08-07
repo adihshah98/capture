@@ -19,7 +19,16 @@ const END_EPSILON_MS = 50;
 const REPLAY_STYLE_RULES = [
   '@media (prefers-reduced-motion: no-preference) { .scroll-trigger:not(.scroll-trigger--offscreen).animate--slide-in { animation: var(--animation-slide-in) } }',
   '*, *::before, *::after { animation-duration: 0s !important; animation-delay: 0s !important; animation-iteration-count: 1 !important; animation-fill-mode: forwards !important; transition-duration: 0s !important; transition-delay: 0s !important; }',
+  '* { content-visibility: visible !important; }',
 ];
+
+const EAGER_IMAGES_PLUGIN = {
+  onBuild(node) {
+    if (node && node.nodeName === 'IMG' && node.getAttribute('loading') === 'lazy') {
+      node.setAttribute('loading', 'eager');
+    }
+  },
+};
 
 function isActiveEvent(e) {
   return (
@@ -100,6 +109,7 @@ export class CapturePlayer {
       useVirtualDom: false,
       triggerFocus: false,
       insertStyleRules: REPLAY_STYLE_RULES,
+      plugins: [EAGER_IMAGES_PLUGIN],
       mouseTail: { strokeStyle: 'rgba(79, 70, 229, 0.5)', lineWidth: 2, duration: 700 },
     });
 

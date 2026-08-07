@@ -184,8 +184,18 @@ function collectAssetUrls(events) {
   };
   for (const e of events) {
     if (e.type === 2) visit(e.data && e.data.node);
-    else if (e.type === 3 && e.data && e.data.source === 0 && e.data.adds) {
-      for (const a of e.data.adds) visit(a.node);
+    else if (e.type === 3 && e.data && e.data.source === 0) {
+      if (e.data.adds) for (const a of e.data.adds) visit(a.node);
+      if (e.data.attributes) {
+        for (const m of e.data.attributes) {
+          const attrs = m.attributes || {};
+          add(attrs.src);
+          add(attrs.poster);
+          if (typeof attrs.srcset === 'string') {
+            for (const part of attrs.srcset.split(',')) add(part.trim().split(/\s+/)[0]);
+          }
+        }
+      }
     }
   }
   return [...urls];
