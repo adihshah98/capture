@@ -3,10 +3,11 @@ import test from 'node:test';
 
 import {
   activeMs,
+  activeSpans,
   clicksOf,
   collectEvents,
-  dwellBySection,
   idleWindows,
+  pickFrameTimes,
   scrollTimeline,
   viewportOf,
 } from '../src/analyze/extract.mjs';
@@ -87,36 +88,75 @@ test('clicksOf carries image identity and the rage flag', () => {
   assert.equal(clicks[0].rage, true);
 });
 
-test('dwellBySection credits every section visible in the viewport', () => {
-  const sections = [
-    { id: 's0', label: 'Hero', top: 0, bottom: 500 },
-    { id: 's1', label: 'Benefits', top: 500, bottom: 1500 },
-  ];
-  const dwell = dwellBySection(
-    [{ t: 0, y: 0 }, { t: 10000, y: 600 }],
-    sections,
-    { width: 800, height: 400 },
-    [],
-    12000
-  );
-  const byLabel = Object.fromEntries(dwell.map((d) => [d.label, d.dwellMs]));
-  // y=0..400 shows only the hero for 10s; y=600..1000 shows only benefits for 2s
-  assert.equal(byLabel.Hero, 10000);
-  assert.equal(byLabel.Benefits, 2000);
+const scrollAt = (y, timestamp) => scroll(y, timestamp);
+const snapshot = (timestamp) => ({ type: 2, data: { initialOffset: { top: 0 } }, timestamp });
+const click = (timestamp) => ({
+  type: 5,
+  data: { tag: 'capture-click', payload: { selector: 'button#cta', x: 1, y: 1 } },
+  timestamp,
 });
 
-test('dwellBySection excludes idle time from the winning section', () => {
-  const sections = [{ id: 's0', label: 'Hero', top: 0, bottom: 500 }];
-  const dwell = dwellBySection(
-    [{ t: 0, y: 0 }],
-    sections,
-    { width: 800, height: 400 },
-    [[2000, 8000]],
-    10000
-  );
-  assert.equal(dwell[0].dwellMs, 4000);
+test('activeSpans splits on gaps longer than the activity threshold', () => {
+  const spans = activeSpans([
+    snapshot(0),
+    scrollAt(10, 1000),
+    scrollAt(20, 2000),
+    // 60s of nothing
+    scrollAt(30, 62000),
+    scrollAt(40, 63000),
+  ]);
+  assert.equal(spans.length, 2);
+  assert.deepEqual(spans[0], { start: 0, end: 2000 });
+  assert.deepEqual(spans[1], { start: 62000, end: 63000 });
 });
 
-test('dwellBySection returns nothing without measured geometry', () => {
-  assert.deepEqual(dwellBySection([{ t: 0, y: 0 }], [], { width: 800, height: 400 }, [], 100), []);
+test('activeSpans needs no idle markers to find dead air', () => {
+  const events = [snapshot(0), scrollAt(10, 3000), scrollAt(20, 400000)];
+  assert.equal(idleWindows(events).length, 0);
+  const spans = activeSpans(events);
+  assert.equal(spans.length, 2);
+  assert.equal(spans[0].end, 3000);
+  assert.equal(spans[1].start, 400000);
+});
+
+test('pickFrameTimes samples about once per second of activity', () => {
+  const events = [snapshot(0)];
+  for (let t = 1000; t <= 6000; t += 1000) events.push(scrollAt(t / 10, t));
+  const times = pickFrameTimes(events);
+  // ~6s of activity, so ~6 frames rather than one per event or one per ms
+  assert.ok(times.length >= 5 && times.length <= 8, `got ${times.length}`);
+});
+
+test('pickFrameTimes skips dead air', () => {
+  const events = [snapshot(0), scrollAt(10, 5000), scrollAt(20, 500000), click(500500)];
+  const times = pickFrameTimes(events);
+  assert.equal(times.filter((t) => t > 20000 && t < 480000).length, 0);
+  assert.ok(times.some((t) => t >= 480000));
+});
+
+test('pickFrameTimes returns ascending times inside the recording', () => {
+  const events = [snapshot(0), scrollAt(10, 4000), click(9000), scrollAt(20, 12000)];
+  const times = pickFrameTimes(events);
+  const duration = events[events.length - 1].timestamp - events[0].timestamp;
+  assert.ok(times.every((t, i) => i === 0 || t > times[i - 1]));
+  assert.ok(times.every((t) => t >= 0 && t <= duration));
+});
+
+test('pickFrameTimes is deterministic', () => {
+  const events = [snapshot(0), scrollAt(10, 3000), click(7000), scrollAt(20, 11000)];
+  assert.deepEqual(pickFrameTimes(events), pickFrameTimes(events));
+});
+
+test('pickFrameTimes honours a frame cap', () => {
+  const events = [snapshot(0)];
+  for (let t = 1000; t <= 60000; t += 1000) events.push(scrollAt(t / 100, t));
+  const capped = pickFrameTimes(events, { maxFrames: 10 });
+  assert.ok(capped.length <= 10, `got ${capped.length}`);
+  assert.ok(capped.every((t, i) => i === 0 || t > capped[i - 1]));
+});
+
+test('pickFrameTimes survives a session too short to sample', () => {
+  const times = pickFrameTimes([snapshot(0), scrollAt(1, 100)]);
+  assert.ok(times.length >= 1);
+  assert.ok(times.every((t) => Number.isFinite(t)));
 });
