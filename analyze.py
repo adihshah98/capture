@@ -17,6 +17,7 @@ from typing import Optional
 BASE_DIR = Path(__file__).resolve().parent
 
 ANALYSIS_FILE = "analysis.json"
+ANALYSIS_STATUS_FILE = "analysis.status.json"
 ANALYSIS_DIR = ".analysis"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -81,6 +82,10 @@ def analysis_paths(session_dir: Path) -> tuple:
     return session_dir / ANALYSIS_FILE, session_dir / ANALYSIS_DIR
 
 
+def status_path(session_dir: Path) -> Path:
+    return session_dir / ANALYSIS_STATUS_FILE
+
+
 def read_analysis(session_dir: Path) -> Optional[dict]:
     path = session_dir / ANALYSIS_FILE
     if not path.is_file():
@@ -90,6 +95,40 @@ def read_analysis(session_dir: Path) -> Optional[dict]:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def read_job(session_dir: Path) -> Optional[dict]:
+    """In-progress or failed async analysis job, if any."""
+    path = status_path(session_dir)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def write_job(session_dir: Path, status: str, error: Optional[str] = None) -> dict:
+    job = {
+        "status": status,
+        "updated_at": int(time.time() * 1000),
+    }
+    if error:
+        job["error"] = error
+    path = status_path(session_dir)
+    path.write_text(json.dumps(job))
+    return job
+
+
+def clear_job(session_dir: Path) -> None:
+    status_path(session_dir).unlink(missing_ok=True)
+
+
+def clear_analysis(session_dir: Path) -> None:
+    """Drop a finished result so a re-analyze starts clean."""
+    (session_dir / ANALYSIS_FILE).unlink(missing_ok=True)
+    shutil.rmtree(session_dir / ANALYSIS_DIR, ignore_errors=True)
 
 
 async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> dict:
@@ -238,6 +277,7 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
     text = await call_gemini(digest, digest.get("frames") or [])
 
     result = {
+        "status": "done",
         "text": text,
         "model": GEMINI_MODEL,
         "created_at": int(time.time() * 1000),
@@ -245,4 +285,5 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
         "warnings": digest.get("warnings") or [],
     }
     analysis_path.write_text(json.dumps(result))
+    clear_job(session_dir)
     return result

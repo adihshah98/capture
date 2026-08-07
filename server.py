@@ -941,17 +941,36 @@ def session_chunk(request: Request, session_id: str, chunk_name: str, project: O
         path, media_type="application/json", headers={"Cache-Control": "max-age=86400"}
     )
 
-_analysis_locks: dict = {}
-_analysis_waiters: dict = {}
+_analysis_tasks: dict = {}
+# One Chromium at a time — a t3.micro cannot survive concurrent extractions.
+_analysis_worker_lock = asyncio.Lock()
+
+def _analysis_key(session_dir: Path) -> str:
+    return str(session_dir.resolve())
+
+async def _run_analysis_job(session_dir: Path, chunk_names: list) -> None:
+    analyze.write_job(session_dir, "running")
+    try:
+        async with _analysis_worker_lock:
+            await analyze.analyze_session(session_dir, chunk_names, force=True)
+    except Exception as exc:
+        analyze.write_job(session_dir, "error", error=str(exc))
+    finally:
+        _analysis_tasks.pop(_analysis_key(session_dir), None)
 
 @app.get("/api/sessions/{session_id}/analysis")
 def get_analysis(request: Request, session_id: str, project: Optional[str] = Query(None)):
     require_read_access(request, project)
     session_dir = resolve_session(session_id, project)
     cached = analyze.read_analysis(session_dir)
-    if not cached:
-        raise ApiError(404, "not analyzed yet")
-    return cached
+    if cached:
+        if "status" not in cached:
+            cached = {**cached, "status": "done"}
+        return cached
+    job = analyze.read_job(session_dir)
+    if job and job.get("status") in ("running", "error"):
+        return job
+    raise ApiError(404, "not analyzed yet")
 
 @app.post("/api/sessions/{session_id}/analysis")
 async def create_analysis(
@@ -963,30 +982,39 @@ async def create_analysis(
     require_read_access(request, project)
     if not analyze.ANALYSIS_ENABLED:
         raise ApiError(503, "analysis is not configured on this server")
+    if not analyze.runtime_present():
+        raise ApiError(503, "analysis runtime is unavailable on this server")
     session_dir = resolve_session(session_id, project)
     chunks = chunk_files(session_dir)
     if not chunks:
         raise ApiError(400, "this session has no chunks to analyze")
 
-    # One reconstruction per session at a time: it launches a browser, and a
-    # double-click on the button should wait for the first run, not start a second.
-    lock = _analysis_locks.setdefault(session_dir, asyncio.Lock())
-    waiters = _analysis_waiters[session_dir] = _analysis_waiters.get(session_dir, 0) + 1
-    try:
-        async with lock:
-            try:
-                return await analyze.analyze_session(
-                    session_dir, [c.name for c in chunks], force=force
-                )
-            except RuntimeError as exc:
-                raise ApiError(500, str(exc))
-    finally:
-        waiters = _analysis_waiters[session_dir] - 1
-        if waiters <= 0:
-            _analysis_waiters.pop(session_dir, None)
-            _analysis_locks.pop(session_dir, None)
-        else:
-            _analysis_waiters[session_dir] = waiters
+    if not force:
+        cached = analyze.read_analysis(session_dir)
+        if cached:
+            if "status" not in cached:
+                cached = {**cached, "status": "done"}
+            return cached
+
+    key = _analysis_key(session_dir)
+    existing = _analysis_tasks.get(key)
+    if existing and not existing.done():
+        return JSONResponse({"status": "running"}, status_code=202)
+
+    job = analyze.read_job(session_dir)
+    if job and job.get("status") == "running" and (existing is None or existing.done()):
+        # Stale status from a crashed worker — allow a fresh start.
+        analyze.clear_job(session_dir)
+
+    if force:
+        analyze.clear_analysis(session_dir)
+
+    analyze.write_job(session_dir, "running")
+    task = asyncio.create_task(
+        _run_analysis_job(session_dir, [c.name for c in chunks])
+    )
+    _analysis_tasks[key] = task
+    return JSONResponse({"status": "running"}, status_code=202)
 
 def sweep_expired_sessions() -> int:
 

@@ -1,12 +1,15 @@
-import { fetchJson, projectQuery } from './api.js';
+import { fetchJson, currentProject } from './api.js';
 import { loadedSessionId } from './session-player.js';
 
 const panelEl = document.getElementById('analysis-panel');
 const buttonEl = document.getElementById('analyze-btn');
 const bodyEl = document.getElementById('analysis-body');
 
+const POLL_MS = 2000;
+
 let enabled = false;
 let running = false;
+let pollTimer = null;
 
 export function setAnalysisEnabled(on) {
   enabled = !!on;
@@ -76,13 +79,66 @@ function renderResult(result) {
   bodyEl.innerHTML = parts.join('');
 }
 
+function renderProgress() {
+  bodyEl.innerHTML =
+    '<p class="empty">Replaying the session and sampling frames. This can take a few minutes — you can leave this page and come back.</p>';
+}
+
+function renderError(message) {
+  bodyEl.innerHTML = `<p class="warn">${escapeHtml(message)}</p>`;
+}
+
 function setButton(label, disabled) {
   buttonEl.textContent = label;
   buttonEl.disabled = disabled;
 }
 
+function stopPolling() {
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function analysisUrl(sessionId, { force = false } = {}) {
+  const params = new URLSearchParams();
+  if (currentProject) params.set('project', currentProject);
+  if (force) params.set('force', '1');
+  const qs = params.toString();
+  return `/api/sessions/${sessionId}/analysis${qs ? `?${qs}` : ''}`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    pollTimer = setTimeout(resolve, ms);
+  });
+}
+
+async function pollUntilSettled(sessionId) {
+  while (sessionId === loadedSessionId && running) {
+    await sleep(POLL_MS);
+    if (sessionId !== loadedSessionId || !running) return null;
+    let body;
+    try {
+      body = await fetchJson(analysisUrl(sessionId));
+    } catch (err) {
+      // 404 mid-run is transient right after a force clear; keep waiting.
+      if (/not analyzed yet/i.test(err.message || '')) continue;
+      throw err;
+    }
+    if (body.status === 'running') continue;
+    if (body.status === 'error') {
+      throw new Error(body.error || 'Analysis failed.');
+    }
+    return body;
+  }
+  return null;
+}
+
 export function resetAnalysis(sessionId = loadedSessionId) {
   if (!enabled) return;
+  stopPolling();
+  running = false;
   bodyEl.innerHTML =
     '<p class="empty">Analyze this session to see where attention went.</p>';
   setButton('Analyze with AI', !sessionId);
@@ -94,11 +150,33 @@ export async function showCachedAnalysis(sessionId) {
   // us, but resetAnalysis also runs from clearPlayer, where it must read null.
   resetAnalysis(sessionId);
   try {
-    const cached = await fetchJson(
-      `/api/sessions/${sessionId}/analysis${projectQuery()}`
-    );
+    const body = await fetchJson(analysisUrl(sessionId));
     if (sessionId !== loadedSessionId) return;
-    renderResult(cached);
+    if (body.status === 'running') {
+      running = true;
+      setButton('Analyzing…', true);
+      renderProgress();
+      try {
+        const result = await pollUntilSettled(sessionId);
+        if (sessionId !== loadedSessionId || !result) return;
+        renderResult(result);
+        setButton('Re-analyze', false);
+      } catch (err) {
+        if (sessionId !== loadedSessionId) return;
+        renderError(err.message);
+        setButton('Try again', false);
+      } finally {
+        if (sessionId === loadedSessionId) running = false;
+        stopPolling();
+      }
+      return;
+    }
+    if (body.status === 'error') {
+      renderError(body.error || 'Analysis failed.');
+      setButton('Try again', false);
+      return;
+    }
+    renderResult(body);
     setButton('Re-analyze', false);
   } catch {
     // No cached analysis is the normal case; leave the empty prompt in place.
@@ -109,23 +187,31 @@ async function runAnalysis() {
   const sessionId = loadedSessionId;
   if (!sessionId || running) return;
   running = true;
+  stopPolling();
   setButton('Analyzing…', true);
-  bodyEl.innerHTML =
-    '<p class="empty">Replaying the session and sampling frames. This takes a few moments.</p>';
+  renderProgress();
 
-  const query = projectQuery();
-  const url = `/api/sessions/${sessionId}/analysis${query ? `${query}&force=1` : '?force=1'}`;
   try {
-    const result = await fetchJson(url, { method: 'POST' });
+    const started = await fetchJson(analysisUrl(sessionId, { force: true }), {
+      method: 'POST',
+    });
     if (sessionId !== loadedSessionId) return;
+    if (started.status === 'done' || started.text) {
+      renderResult(started);
+      setButton('Re-analyze', false);
+      return;
+    }
+    const result = await pollUntilSettled(sessionId);
+    if (sessionId !== loadedSessionId || !result) return;
     renderResult(result);
     setButton('Re-analyze', false);
   } catch (err) {
     if (sessionId !== loadedSessionId) return;
-    bodyEl.innerHTML = `<p class="warn">${escapeHtml(err.message)}</p>`;
+    renderError(err.message);
     setButton('Try again', false);
   } finally {
-    running = false;
+    if (sessionId === loadedSessionId) running = false;
+    stopPolling();
   }
 }
 

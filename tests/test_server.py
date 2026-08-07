@@ -651,6 +651,44 @@ class TestIndexRebuild(ServerCase):
             time.sleep(0.2)
         self.assertEqual(listed, set(ids))
 
+class TestAnalysisStatus(ServerCase):
+    # Isolate from a developer machine that has GEMINI_API_KEY in the environment.
+    env = {"GEMINI_API_KEY": ""}
+
+    def test_get_returns_cached_analysis(self):
+        sid = "a" * 32
+        self.assertEqual(self.ingest(sid), 200)
+        session = self.data_dir / "sessions" / sid
+        (session / "analysis.json").write_text(
+            json.dumps({"text": "hello", "model": "test", "frame_count": 1, "warnings": []})
+        )
+        status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["text"], "hello")
+        self.assertEqual(data["status"], "done")
+
+    def test_get_returns_running_job(self):
+        sid = "b" * 32
+        self.assertEqual(self.ingest(sid), 200)
+        session = self.data_dir / "sessions" / sid
+        (session / "analysis.status.json").write_text(
+            json.dumps({"status": "running", "updated_at": 1})
+        )
+        status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "running")
+
+    def test_post_without_key_is_unavailable(self):
+        sid = "c" * 32
+        self.assertEqual(self.ingest(sid), 200)
+        status, body = request(
+            f"{self.base}/api/sessions/{sid}/analysis?force=1", method="POST", data=b""
+        )
+        self.assertEqual(status, 503)
+        self.assertIn("not configured", json.loads(body)["error"])
+
+
 if __name__ == "__main__":
     if not UVICORN.exists():
         sys.exit(f"missing {UVICORN} — run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt")
