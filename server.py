@@ -223,7 +223,13 @@ def gunzip(body: bytes, limit: int) -> bytes:
     return raw
 
 def dir_bytes(path: Path) -> int:
-    return sum(f.stat().st_size for f in path.rglob("*.json") if f.is_file())
+    # Only recorded chunks count toward the ingest quota. Analysis output is
+    # derived, is bounded per session, and must never throttle recording.
+    return sum(
+        f.stat().st_size
+        for f in path.rglob("*.json")
+        if f.is_file() and SAFE_CHUNK.match(f.name)
+    )
 
 _pool_bytes: dict = {}
 
@@ -707,6 +713,7 @@ def session_chunk(request: Request, session_id: str, chunk_name: str, project: O
     )
 
 _analysis_locks: dict = {}
+_analysis_waiters: dict = {}
 
 @app.get("/api/sessions/{session_id}/analysis")
 def get_analysis(request: Request, session_id: str, project: Optional[str] = Query(None)):
@@ -735,16 +742,22 @@ async def create_analysis(
     # One reconstruction per session at a time: it launches a browser, and a
     # double-click on the button should wait for the first run, not start a second.
     lock = _analysis_locks.setdefault(session_dir, asyncio.Lock())
-    async with lock:
-        try:
-            return await analyze.analyze_session(
-                session_dir, [c.name for c in chunks], force=force
-            )
-        except RuntimeError as exc:
-            raise ApiError(500, str(exc))
-        finally:
-            if not lock.locked():
-                _analysis_locks.pop(session_dir, None)
+    waiters = _analysis_waiters[session_dir] = _analysis_waiters.get(session_dir, 0) + 1
+    try:
+        async with lock:
+            try:
+                return await analyze.analyze_session(
+                    session_dir, [c.name for c in chunks], force=force
+                )
+            except RuntimeError as exc:
+                raise ApiError(500, str(exc))
+    finally:
+        waiters = _analysis_waiters[session_dir] - 1
+        if waiters <= 0:
+            _analysis_waiters.pop(session_dir, None)
+            _analysis_locks.pop(session_dir, None)
+        else:
+            _analysis_waiters[session_dir] = waiters
 
 def sweep_expired_sessions() -> int:
 
