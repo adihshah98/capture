@@ -965,6 +965,97 @@ class TestInsightsSummary(ServerCase):
             {s["segment"] for s in summary["by_segment"]},
             {"spring", "(none)"},
         )
+        # Default contrast is purchased vs non-purchase with a narrative.
+        self.assertEqual(summary["contrast"]["a"]["label"], "purchased")
+        self.assertTrue(summary["narrative"])
+
+    def test_meta_purchased_vs_rest_contrast_and_narrative(self):
+        import analyze
+
+        rows = [
+            {
+                "session_id": "m1",
+                "outcome": "purchased",
+                "attribution": {"fbclid": True, "utm_source": "facebook"},
+                "themes": ["shipping_hesitation", "checkout_friction"],
+            },
+            {
+                "session_id": "m2",
+                "outcome": "purchased",
+                "attribution": {"fbclid": True},
+                "themes": ["shipping_hesitation"],
+            },
+            {
+                "session_id": "g1",
+                "outcome": "purchased",
+                "attribution": {"utm_source": "google"},
+                "themes": ["price_hesitation"],
+            },
+            {
+                "session_id": "o1",
+                "outcome": "all",
+                "attribution": {"utm_source": "google"},
+                "themes": ["exit_before_checkout"],
+            },
+        ]
+        contrast = analyze.build_slice_contrast(
+            rows,
+            {"outcome": "purchased", "utm_source": "meta"},
+            None,
+        )
+        self.assertEqual(contrast["a"]["label"], "Meta + purchased")
+        self.assertEqual(contrast["b"]["label"], "everyone else")
+        self.assertEqual(contrast["a"]["n"], 2)
+        self.assertEqual(contrast["b"]["n"], 2)
+        self.assertEqual(contrast["a"]["themes"]["shipping_hesitation"], 2)
+        self.assertNotIn("shipping_hesitation", contrast["b"]["themes"])
+        narrative = " ".join(contrast["narrative"]).lower()
+        self.assertIn("shipping", narrative)
+        self.assertIn("meta", narrative)
+
+    def test_slice_api_preset_meta_purchased(self):
+        buy_meta = "abmeta" + "x" * 26
+        buy_google = "abgoog" + "x" * 26
+        other = "aballx" + "x" * 26
+        self.seed(
+            buy_meta,
+            purchased=True,
+            url="https://brand.example/?utm_source=facebook&fbclid=Iw123",
+            themes=["shipping_hesitation"],
+        )
+        self.seed(
+            buy_google,
+            purchased=True,
+            url="https://brand.example/?utm_source=google",
+            themes=["price_hesitation"],
+        )
+        self.seed(
+            other,
+            url="https://brand.example/?utm_source=google",
+            themes=["exit_before_checkout"],
+        )
+        status, body = request(
+            f"{self.base}/api/cohort?purchased=2&all=1",
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 202, body)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            status, body = request(f"{self.base}/api/cohort")
+            if json.loads(body)["status"] == "done":
+                break
+            time.sleep(0.1)
+
+        status, body = request(
+            f"{self.base}/api/insights/summary?contrast=meta_purchased_vs_rest"
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertEqual(data["contrast"]["a"]["n"], 1)
+        self.assertEqual(data["contrast"]["b"]["n"], 2)
+        self.assertIn("shipping_hesitation", data["contrast"]["a"]["themes"])
+        self.assertTrue(any("shipping" in line.lower() for line in data["narrative"]))
 
 
 class TestCohortUnavailable(ServerCase):

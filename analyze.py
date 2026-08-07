@@ -474,10 +474,321 @@ def segment_label(attribution: Optional[dict], group_by: str) -> str:
     return str(value) if value else "(none)"
 
 
-def build_insights_summary(rows: list, group_by: str = "none") -> dict:
+META_SOURCES = frozenset({"facebook", "meta", "fb", "instagram", "ig"})
+
+
+def is_meta_attribution(attribution: Optional[dict]) -> bool:
+    attrs = attribution if isinstance(attribution, dict) else {}
+    if attrs.get("fbclid"):
+        return True
+    source = str(attrs.get("utm_source") or "").strip().lower()
+    return source in META_SOURCES
+
+
+def normalize_slice(spec: Optional[dict]) -> dict:
+    """Normalize a slice dict: outcome + optional attribution constraints.
+
+    Keys: outcome ("purchased"|"all"|None), utm_source, utm_medium, utm_campaign,
+    utm_content, fbclid (True|False|None). utm_source="meta" matches Meta traffic
+    (fbclid or known Meta source values).
+    """
+    if not isinstance(spec, dict):
+        return {}
+    out = {}
+    outcome = spec.get("outcome")
+    if outcome in ("purchased", "all"):
+        out["outcome"] = outcome
+    for key in ("utm_source", "utm_medium", "utm_campaign", "utm_content"):
+        value = spec.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip().lower()
+    if "fbclid" in spec and spec["fbclid"] is not None:
+        out["fbclid"] = bool(spec["fbclid"])
+    return out
+
+
+def slice_is_empty(spec: dict) -> bool:
+    return not spec
+
+
+def row_matches_slice(row: dict, spec: dict) -> bool:
+    if not spec:
+        return True
+    outcome = row.get("outcome")
+    if spec.get("outcome") == "purchased" and outcome != "purchased":
+        return False
+    if spec.get("outcome") == "all" and outcome == "purchased":
+        return False
+    attrs = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
+    if "fbclid" in spec:
+        has = bool(attrs.get("fbclid"))
+        if spec["fbclid"] and not has:
+            return False
+        if not spec["fbclid"] and has:
+            return False
+    for key in ("utm_medium", "utm_campaign", "utm_content"):
+        want = spec.get(key)
+        if not want:
+            continue
+        got = str(attrs.get(key) or "").strip().lower()
+        if got != want:
+            return False
+    want_source = spec.get("utm_source")
+    if want_source:
+        if want_source == "meta":
+            if not is_meta_attribution(attrs):
+                return False
+        elif want_source in ("google", "non_meta"):
+            if want_source == "non_meta":
+                if is_meta_attribution(attrs):
+                    return False
+            else:
+                got = str(attrs.get("utm_source") or "").strip().lower()
+                if got != want_source:
+                    return False
+        else:
+            got = str(attrs.get("utm_source") or "").strip().lower()
+            if got != want_source:
+                return False
+    return True
+
+
+def slice_label(spec: dict) -> str:
+    if not spec:
+        return "everyone else"
+    parts = []
+    if spec.get("outcome") == "purchased":
+        parts.append("purchased")
+    elif spec.get("outcome") == "all":
+        parts.append("non-purchase")
+    if spec.get("utm_source") == "meta" or spec.get("fbclid") is True:
+        parts.append("Meta")
+    elif spec.get("utm_source") == "non_meta":
+        parts.append("non-Meta")
+    elif spec.get("utm_source"):
+        parts.append(spec["utm_source"])
+    if spec.get("fbclid") is False and spec.get("utm_source") != "non_meta":
+        parts.append("no fbclid")
+    for key, label in (
+        ("utm_medium", "medium"),
+        ("utm_campaign", "campaign"),
+        ("utm_content", "content"),
+    ):
+        if spec.get(key):
+            parts.append(f"{label}={spec[key]}")
+    if not parts:
+        return "all sessions"
+    if len(parts) == 1:
+        return parts[0]
+    # "Meta + purchased" reads better than "purchased + Meta"
+    if "Meta" in parts and "purchased" in parts:
+        rest = [p for p in parts if p not in ("Meta", "purchased")]
+        return "Meta + purchased" + ("" if not rest else " · " + " · ".join(rest))
+    return " + ".join(parts)
+
+
+def _theme_rates(rows: list) -> tuple:
+    """Return (n_sessions, theme→session_count)."""
+    n = len(rows)
+    counts: dict = {}
+    for row in rows:
+        seen = set()
+        for theme in row.get("themes") or []:
+            if isinstance(theme, str) and theme and theme not in seen:
+                seen.add(theme)
+                counts[theme] = counts.get(theme, 0) + 1
+    return n, counts
+
+
+def _fmt_ratio(ratio: float) -> str:
+    if ratio >= 10:
+        return f"{ratio:.0f}×"
+    text = f"{ratio:.1f}"
+    if text.endswith(".0"):
+        text = text[:-2]
+    return f"{text}×"
+
+
+def theme_display_name(theme: str) -> str:
+    raw = theme[6:] if theme.startswith("other:") else theme
+    return raw.replace("_", " ")
+
+
+def contrast_narrative(contrast: dict) -> list:
+    """Deterministic sentences from A/B theme rates — no model call."""
+    a = contrast.get("a") or {}
+    b = contrast.get("b") or {}
+    a_label = a.get("label") or "slice A"
+    b_label = b.get("label") or "slice B"
+    n_a, n_b = a.get("n") or 0, b.get("n") or 0
+    lines = []
+    if n_a == 0 and n_b == 0:
+        return ["No analyzed sessions match this contrast yet."]
+    if n_a == 0:
+        return [f"No sessions in {a_label} to compare against {b_label}."]
+    if n_b == 0:
+        return [f"Every analyzed session is in {a_label} — nothing left in {b_label}."]
+
+    for item in (contrast.get("enriched_a") or [])[:3]:
+        theme = theme_display_name(item["theme"])
+        a_c, b_c = item["a_count"], item["b_count"]
+        ratio = item.get("ratio")
+        if ratio and ratio >= 1.5 and b_c > 0:
+            lines.append(
+                f"{theme} shows up {_fmt_ratio(ratio)} more often in {a_label} "
+                f"({a_c}/{n_a}) than in {b_label} ({b_c}/{n_b})."
+            )
+        elif b_c == 0 and a_c > 0:
+            lines.append(
+                f"{theme} appears in {a_c}/{n_a} {a_label} sessions and nowhere in {b_label}."
+            )
+        else:
+            lines.append(
+                f"{theme} is more common in {a_label} ({a_c}/{n_a}) than {b_label} ({b_c}/{n_b})."
+            )
+
+    for item in (contrast.get("enriched_b") or [])[:2]:
+        theme = theme_display_name(item["theme"])
+        a_c, b_c = item["a_count"], item["b_count"]
+        ratio = item.get("ratio")
+        if ratio and ratio >= 1.5 and a_c > 0:
+            lines.append(
+                f"{theme} shows up {_fmt_ratio(ratio)} more often in {b_label} "
+                f"({b_c}/{n_b}) than in {a_label} ({a_c}/{n_a})."
+            )
+        elif a_c == 0 and b_c > 0:
+            lines.append(
+                f"{theme} appears in {b_c}/{n_b} {b_label} sessions and nowhere in {a_label}."
+            )
+
+    shared = contrast.get("shared") or []
+    if shared and not lines:
+        names = ", ".join(theme_display_name(s["theme"]) for s in shared[:3])
+        lines.append(f"Both slices share {names}.")
+    elif shared and len(lines) < 2:
+        top = shared[0]
+        lines.append(
+            f"Both sides see {theme_display_name(top['theme'])} "
+            f"({top['a_count']}/{n_a} vs {top['b_count']}/{n_b})."
+        )
+
+    if not lines:
+        lines.append(
+            f"No strong theme differences between {a_label} (n={n_a}) and {b_label} (n={n_b})."
+        )
+    return lines
+
+
+def build_slice_contrast(rows: list, slice_a: Optional[dict], slice_b: Optional[dict] = None) -> dict:
+    """A/B theme contrast. If slice_b is empty, B is the complement of A."""
+    spec_a = normalize_slice(slice_a)
+    spec_b = normalize_slice(slice_b)
+    if slice_is_empty(spec_a) and slice_is_empty(spec_b):
+        # Default: purchased vs non-purchase
+        spec_a = {"outcome": "purchased"}
+        spec_b = {"outcome": "all"}
+        complement = False
+    elif slice_is_empty(spec_b):
+        complement = True
+    else:
+        complement = False
+
+    rows_a, rows_b = [], []
+    for row in rows:
+        in_a = row_matches_slice(row, spec_a)
+        if complement:
+            in_b = not in_a
+        else:
+            in_b = row_matches_slice(row, spec_b)
+        # A session matching both custom slices counts in A only (exclusive A).
+        if in_a and in_b and not complement:
+            rows_a.append(row)
+        elif in_a:
+            rows_a.append(row)
+        elif in_b:
+            rows_b.append(row)
+
+    label_a = slice_label(spec_a)
+    label_b = "everyone else" if complement else slice_label(spec_b)
+    n_a, themes_a = _theme_rates(rows_a)
+    n_b, themes_b = _theme_rates(rows_b)
+    all_themes = sorted(set(themes_a) | set(themes_b))
+
+    def rate(count, n):
+        return (count / n) if n else 0.0
+
+    enriched_a, enriched_b, shared = [], [], []
+    for theme in all_themes:
+        a_c = themes_a.get(theme, 0)
+        b_c = themes_b.get(theme, 0)
+        a_r, b_r = rate(a_c, n_a), rate(b_c, n_b)
+        item = {
+            "theme": theme,
+            "a_count": a_c,
+            "b_count": b_c,
+            "a_rate": round(a_r, 4),
+            "b_rate": round(b_r, 4),
+            "ratio": round(a_r / b_r, 2) if b_r > 0 else (None if a_c == 0 else None),
+        }
+        # Prefer rate delta for "enriched".
+        if a_r > b_r + 1e-12:
+            if b_r > 0:
+                item["ratio"] = round(a_r / b_r, 2)
+            enriched_a.append(item)
+        elif b_r > a_r + 1e-12:
+            inv = dict(item)
+            if a_r > 0:
+                inv["ratio"] = round(b_r / a_r, 2)
+            else:
+                inv["ratio"] = None
+            enriched_b.append(inv)
+        elif a_c > 0 and b_c > 0:
+            shared.append(item)
+
+    enriched_a.sort(key=lambda x: (-(x["a_rate"] - x["b_rate"]), -x["a_count"], x["theme"]))
+    enriched_b.sort(key=lambda x: (-(x["b_rate"] - x["a_rate"]), -x["b_count"], x["theme"]))
+    shared.sort(key=lambda x: (-min(x["a_count"], x["b_count"]), x["theme"]))
+
+    contrast = {
+        "a": {
+            "label": label_a,
+            "spec": spec_a,
+            "n": n_a,
+            "themes": dict(sorted(themes_a.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "sessions": [
+                {"session_id": r.get("session_id"), "outcome": r.get("outcome"), "themes": r.get("themes") or []}
+                for r in rows_a
+            ],
+        },
+        "b": {
+            "label": label_b,
+            "spec": {"complement": True} if complement else spec_b,
+            "n": n_b,
+            "themes": dict(sorted(themes_b.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "sessions": [
+                {"session_id": r.get("session_id"), "outcome": r.get("outcome"), "themes": r.get("themes") or []}
+                for r in rows_b
+            ],
+        },
+        "complement": complement,
+        "enriched_a": enriched_a,
+        "enriched_b": enriched_b,
+        "shared": shared,
+    }
+    contrast["narrative"] = contrast_narrative(contrast)
+    return contrast
+
+
+def build_insights_summary(
+    rows: list,
+    group_by: str = "none",
+    slice_a: Optional[dict] = None,
+    slice_b: Optional[dict] = None,
+) -> dict:
     """Roll theme counts by outcome and optional attribution segment.
 
     Each row: {session_id, outcome ("purchased"|"all"), attribution, themes}.
+    Always includes an A/B contrast (default purchased vs non-purchase).
     """
     group_by = group_by if group_by in (
         "utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid", "none"
@@ -543,6 +854,8 @@ def build_insights_summary(rows: list, group_by: str = "none") -> dict:
     col_labels = [seg["segment"] for seg in segments]
     matrix = [[seg["themes"].get(theme, 0) for seg in segments] for theme in theme_names]
 
+    contrast = build_slice_contrast(rows, slice_a, slice_b)
+
     return {
         "group_by": group_by,
         "n": len(rows),
@@ -558,6 +871,8 @@ def build_insights_summary(rows: list, group_by: str = "none") -> dict:
             "cols": col_labels,
             "counts": matrix,
         },
+        "contrast": contrast,
+        "narrative": contrast.get("narrative") or [],
     }
 
 

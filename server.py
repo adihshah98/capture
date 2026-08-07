@@ -1317,8 +1317,23 @@ def insights_summary(
     group_by: str = Query("none"),
     filter: Optional[str] = Query(None),
     scope: str = Query("cohort"),
+    # Slice A — intersection of these constraints. Empty B ⇒ complement of A.
+    a_outcome: Optional[str] = Query(None),
+    a_utm_source: Optional[str] = Query(None),
+    a_utm_medium: Optional[str] = Query(None),
+    a_utm_campaign: Optional[str] = Query(None),
+    a_utm_content: Optional[str] = Query(None),
+    a_fbclid: Optional[str] = Query(None),
+    b_outcome: Optional[str] = Query(None),
+    b_utm_source: Optional[str] = Query(None),
+    b_utm_medium: Optional[str] = Query(None),
+    b_utm_campaign: Optional[str] = Query(None),
+    b_utm_content: Optional[str] = Query(None),
+    b_fbclid: Optional[str] = Query(None),
+    # Preset shortcuts: purchased_vs_all | meta_vs_rest | meta_purchased_vs_rest | google_vs_meta
+    contrast: Optional[str] = Query(None),
 ):
-    """Theme × segment rollup for the current cohort (default) or all analyzed sessions."""
+    """Theme × segment rollup plus A/B intersection contrast and narrative."""
     require_read_access(request, project)
     if group_by not in SUMMARY_GROUP_BY:
         raise ApiError(400, f"group_by must be one of: {', '.join(sorted(SUMMARY_GROUP_BY))}")
@@ -1338,13 +1353,80 @@ def insights_summary(
         rows = _summary_rows_from_cohort(pool, live, outcome_filter)
         label = live.get("label")
 
-    summary = analyze.build_insights_summary(rows, group_by=group_by)
+    slice_a, slice_b = _parse_contrast_slices(
+        contrast,
+        a_outcome, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid,
+        b_outcome, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid,
+    )
+    summary = analyze.build_insights_summary(
+        rows, group_by=group_by, slice_a=slice_a, slice_b=slice_b
+    )
     return {
         **summary,
         "scope": "all" if scope == "all" else "cohort",
         "filter": filter or None,
         **({"label": label} if label else {}),
     }
+
+
+def _parse_fbclid_flag(raw: Optional[str]) -> Optional[bool]:
+    if raw is None or raw == "":
+        return None
+    value = str(raw).strip().lower()
+    if value in ("1", "true", "yes", "meta"):
+        return True
+    if value in ("0", "false", "no"):
+        return False
+    raise ApiError(400, "fbclid must be 1 or 0")
+
+
+def _slice_from_params(outcome, utm_source, utm_medium, utm_campaign, utm_content, fbclid) -> dict:
+    spec = {}
+    if outcome in ("purchased", "all"):
+        spec["outcome"] = outcome
+    elif outcome not in (None, ""):
+        raise ApiError(400, "outcome must be purchased or all")
+    for key, value in (
+        ("utm_source", utm_source),
+        ("utm_medium", utm_medium),
+        ("utm_campaign", utm_campaign),
+        ("utm_content", utm_content),
+    ):
+        if isinstance(value, str) and value.strip():
+            spec[key] = value.strip()
+    flag = _parse_fbclid_flag(fbclid)
+    if flag is not None:
+        spec["fbclid"] = flag
+    return spec
+
+
+def _parse_contrast_slices(
+    contrast,
+    a_outcome, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid,
+    b_outcome, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid,
+) -> tuple:
+    presets = {
+        "purchased_vs_all": ({"outcome": "purchased"}, {"outcome": "all"}),
+        "meta_vs_rest": ({"utm_source": "meta"}, None),
+        "meta_purchased_vs_rest": ({"outcome": "purchased", "utm_source": "meta"}, None),
+        "google_vs_meta": ({"utm_source": "google"}, {"utm_source": "meta"}),
+        "google_purchased_vs_rest": ({"outcome": "purchased", "utm_source": "google"}, None),
+    }
+    if contrast:
+        if contrast not in presets:
+            raise ApiError(
+                400,
+                "contrast must be one of: " + ", ".join(sorted(presets)),
+            )
+        return presets[contrast]
+
+    slice_a = _slice_from_params(
+        a_outcome, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid
+    )
+    slice_b = _slice_from_params(
+        b_outcome, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid
+    )
+    return slice_a or None, slice_b or None
 
 
 def sweep_expired_sessions() -> int:
