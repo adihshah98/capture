@@ -157,7 +157,15 @@ function renderQueue(body) {
             <span class="badge ${escapeAttr(status)}">${escapeHtml(status)}</span>
             ${err}
           </td>
-          <td>${entry.analysis ? escapeHtml(entry.analysis) : '—'}</td>
+          <td>${
+            (entry.themes || []).length
+              ? `<div class="theme-chips">${entry.themes
+                  .map((t) => `<span class="theme-chip">${escapeHtml(String(t))}</span>`)
+                  .join('')}</div>`
+              : entry.analysis
+                ? escapeHtml(entry.analysis)
+                : '—'
+          }</td>
         </tr>`;
     })
     .join('');
@@ -169,7 +177,7 @@ function renderQueue(body) {
           <th>Session</th>
           <th>Sample</th>
           <th>Analysis</th>
-          <th>Result</th>
+          <th>Themes</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -208,7 +216,13 @@ function insightCard(entry) {
   const standout = entry.standout
     ? `<p class="insight-standout">${escapeHtml(entry.standout)}</p>`
     : '';
+  const themes = (entry.themes || []).length
+    ? `<div class="theme-chips">${entry.themes
+        .map((t) => `<span class="theme-chip">${escapeHtml(String(t))}</span>`)
+        .join('')}</div>`
+    : '';
   return `<article class="insight-card">${head}
+    ${themes}
     ${standout}
     <details>
       <summary>Full write-up</summary>

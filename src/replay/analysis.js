@@ -61,8 +61,20 @@ export function renderMarkdown(md) {
   return html.join('');
 }
 
+function renderThemeChips(themes) {
+  if (!themes || !themes.length) return '';
+  return (
+    '<div class="theme-chips">' +
+    themes
+      .map((t) => `<span class="theme-chip">${escapeHtml(String(t))}</span>`)
+      .join('') +
+    '</div>'
+  );
+}
+
 function renderResult(result) {
-  const parts = [renderMarkdown(result.text || '')];
+  const themes = (result.insights && result.insights.themes) || result.themes || [];
+  const parts = [renderThemeChips(themes), renderMarkdown(result.text || '')];
 
   for (const warning of result.warnings || []) {
     parts.push(`<p class="warn">${escapeHtml(warning)}</p>`);
