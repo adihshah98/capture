@@ -35,7 +35,6 @@ class TestAnalyzeGates(unittest.TestCase):
             "ANALYSIS_ENABLED": analyze.ANALYSIS_ENABLED,
             "run_extractor": analyze.run_extractor,
             "call_gemini": analyze.call_gemini,
-            "call_gemini_insights": analyze.call_gemini_insights,
             "extract": analyze.ANALYZE_EXTRACT_CONCURRENCY,
             "model": analyze.ANALYZE_MODEL_CONCURRENCY,
         }
@@ -48,7 +47,6 @@ class TestAnalyzeGates(unittest.TestCase):
         analyze.ANALYSIS_ENABLED = self._saved["ANALYSIS_ENABLED"]
         analyze.run_extractor = self._saved["run_extractor"]
         analyze.call_gemini = self._saved["call_gemini"]
-        analyze.call_gemini_insights = self._saved["call_gemini_insights"]
         analyze.ANALYZE_EXTRACT_CONCURRENCY = self._saved["extract"]
         analyze.ANALYZE_MODEL_CONCURRENCY = self._saved["model"]
         analyze._gate_loop = None
@@ -72,13 +70,8 @@ class TestAnalyzeGates(unittest.TestCase):
             await model_probe.enter()
             return "## What stands out\n- something"
 
-        async def fake_insights(digest, markdown):
-            return {"themes": ["checkout_friction"], "friction": [], "pages": [],
-                    "outcome_signals": [], "confidence": "low"}
-
         analyze.run_extractor = fake_extract
         analyze.call_gemini = fake_gemini
-        analyze.call_gemini_insights = fake_insights
 
         dirs = []
         for i in range(n):
@@ -109,8 +102,7 @@ class TestAnalyzeGates(unittest.TestCase):
         for d in dirs:
             saved = json.loads((d / analyze.ANALYSIS_FILE).read_text())
             self.assertEqual(saved["status"], "done")
-            insights = json.loads((d / analyze.ANALYSIS_INSIGHTS_FILE).read_text())
-            self.assertEqual(insights["themes"], ["checkout_friction"])
+            self.assertIn("What stands out", saved["text"])
 
 
 if __name__ == "__main__":

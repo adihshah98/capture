@@ -663,15 +663,11 @@ class TestAnalysisStatus(ServerCase):
         (session / "analysis.json").write_text(
             json.dumps({"text": "hello", "model": "test", "frame_count": 1, "warnings": []})
         )
-        (session / "analysis.insights.json").write_text(
-            json.dumps({"themes": ["shipping_hesitation"], "confidence": "medium"})
-        )
         status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
         self.assertEqual(status, 200)
         data = json.loads(body)
         self.assertEqual(data["text"], "hello")
         self.assertEqual(data["status"], "done")
-        self.assertEqual(data["insights"]["themes"], ["shipping_hesitation"])
 
     def test_get_returns_running_job(self):
         sid = "b" * 32
@@ -705,44 +701,69 @@ class TestCohort(ServerCase):
             headers={"Content-Type": "application/json"},
         )[0]
 
-    def seed_analysis(self, sid, themes=None):
+    def seed_analysis(self, sid):
         session = self.data_dir / "sessions" / sid
         (session / "analysis.json").write_text(
-            json.dumps({"text": f"write-up for {sid[:8]}", "model": "test", "frame_count": 1, "warnings": []})
-        )
-        if themes is not None:
-            (session / "analysis.insights.json").write_text(
-                json.dumps(
-                    {
-                        "themes": themes,
-                        "friction": [],
-                        "pages": ["pdp"],
-                        "outcome_signals": [],
-                        "confidence": "medium",
-                    }
-                )
+            json.dumps(
+                {
+                    "text": f"write-up for {sid[:8]}",
+                    "model": "test",
+                    "frame_count": 1,
+                    "warnings": [],
+                }
             )
+        )
+
+    def cohorts(self):
+        status, body = request(f"{self.base}/api/cohorts")
+        self.assertEqual(status, 200)
+        return json.loads(body)["cohorts"]
+
+    def wait_done(self, cohort_id, expect_done=None):
+        deadline = time.time() + 10
+        cohort = None
+        while time.time() < deadline:
+            status, body = request(f"{self.base}/api/cohorts/{cohort_id}")
+            self.assertEqual(status, 200)
+            cohort = json.loads(body)
+            if cohort["status"] == "done" and (
+                expect_done is None or cohort["progress"]["done"] == expect_done
+            ):
+                return cohort
+            time.sleep(0.1)
+        return cohort
 
     def test_get_without_cohort_is_404(self):
-        status, body = request(f"{self.base}/api/cohort")
+        status, body = request(f"{self.base}/api/cohorts/cohort-does-not-exist")
         self.assertEqual(status, 404)
-        self.assertIn("no cohort", json.loads(body)["error"])
+        self.assertIn("no such cohort", json.loads(body)["error"])
+
+    def test_list_reports_every_cohort_with_its_progress(self):
+        sid = "listed" + "x" * 26
+        cohort_id = self._cohort_of_one(sid)
+        listed = {c["id"]: c for c in self.cohorts()}
+        self.assertIn(cohort_id, listed)
+        row = listed[cohort_id]
+        self.assertEqual(row["status"], "done")
+        self.assertTrue(row["label"])
+        # The listing's counts agree with the cohort's own detail view.
+        detail = json.loads(request(f"{self.base}/api/cohorts/{cohort_id}")[1])
+        self.assertEqual(row["progress"], detail["progress"])
+        self.assertEqual(row["progress"]["done"], len(detail["sessions"]))
 
     def test_samples_purchased_and_all_and_reuses_cached_analysis(self):
         purchased = [f"buy{i}" + "x" * 28 for i in range(3)]
         plain = [f"all{i}" + "x" * 28 for i in range(4)]
-        for i, sid in enumerate(purchased):
+        for sid in purchased:
             self.assertEqual(self.ingest(sid), 200)
             self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-            self.seed_analysis(sid, themes=["shipping_hesitation", "checkout_friction"][i % 2 :])
-        for i, sid in enumerate(plain):
+            self.seed_analysis(sid)
+        for sid in plain:
             self.assertEqual(self.ingest(sid), 200)
-            self.seed_analysis(sid, themes=["exit_before_checkout"] if i % 2 == 0 else [])
+            self.seed_analysis(sid)
 
         status, body = request(
-            f"{self.base}/api/cohort?purchased=2&all=2",
-            method="POST",
-            data=b"",
+            f"{self.base}/api/cohorts?purchased=2&all=2", method="POST", data=b""
         )
         self.assertEqual(status, 202, body)
         cohort = json.loads(body)
@@ -757,14 +778,7 @@ class TestCohort(ServerCase):
         self.assertTrue(all_ids <= set(plain))
         self.assertFalse(purchased_ids & all_ids)
 
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            status, body = request(f"{self.base}/api/cohort")
-            self.assertEqual(status, 200)
-            cohort = json.loads(body)
-            if cohort["status"] == "done" and cohort["progress"]["done"] == 4:
-                break
-            time.sleep(0.1)
+        cohort = self.wait_done(cohort["id"], expect_done=4)
         self.assertEqual(cohort["status"], "done")
         self.assertEqual(cohort["progress"]["done"], 4)
         self.assertEqual(cohort["progress"]["error"], 0)
@@ -773,35 +787,113 @@ class TestCohort(ServerCase):
             self.assertEqual(entry["analysis"], "analysis.json")
             self.assertTrue(entry.get("text", "").startswith("write-up for"))
             self.assertIn("standout", entry)
-            self.assertIn("themes", entry)
-            self.assertEqual(entry.get("insights_file"), "analysis.insights.json")
 
-        saved = json.loads((self.data_dir / "cohort.json").read_text())
+        saved = json.loads(
+            (self.data_dir / "cohorts" / f"{cohort['id']}.json").read_text()
+        )
         self.assertEqual(saved["id"], cohort["id"])
         self.assertEqual(len(saved["sessions"]), 4)
-        # Write-ups are response-only — not bloating cohort.json on disk.
+        # Write-ups are response-only — not bloating the cohort file on disk.
         for entry in saved["sessions"]:
             self.assertNotIn("text", entry)
+
+    def test_cohorts_accumulate_rather_than_overwrite(self):
+        for i in range(2):
+            sid = f"acc{i}" + "x" * 28
+            self.assertEqual(self.ingest(sid), 200)
+            self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
+            self.seed_analysis(sid)
+
+        ids = []
+        for _ in range(2):
+            status, body = request(
+                f"{self.base}/api/cohorts?purchased=1&all=0", method="POST", data=b""
+            )
+            self.assertEqual(status, 202, body)
+            cohort_id = json.loads(body)["id"]
+            ids.append(cohort_id)
+            self.wait_done(cohort_id)
+            # Ids embed a millisecond stamp; keep the two runs distinguishable.
+            time.sleep(0.002)
+
+        # Two runs, two distinct cohorts — the second did not overwrite the first.
+        self.assertEqual(len(set(ids)), 2)
+        listed = [c["id"] for c in self.cohorts()]
+        for cohort_id in ids:
+            self.assertIn(cohort_id, listed)
+        # Newest first, so the later run sorts ahead of the earlier one.
+        self.assertLess(listed.index(ids[1]), listed.index(ids[0]))
+
+    def test_rename_sets_the_label_and_keeps_membership(self):
+        sid = "rename" + "x" * 26
+        cohort_id = self._cohort_of_one(sid)
+        before = json.loads(request(f"{self.base}/api/cohorts/{cohort_id}")[1])
+
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}",
+            method="PATCH",
+            data=json.dumps({"label": "  Spring campaign check  "}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200, body)
+        renamed = json.loads(body)
+        self.assertEqual(renamed["label"], "Spring campaign check")
+        self.assertEqual(
+            [s["session_id"] for s in renamed["sessions"]],
+            [s["session_id"] for s in before["sessions"]],
+        )
+        self.assertEqual(self.cohorts()[0]["label"], "Spring campaign check")
+
+    def test_rename_rejects_an_empty_label(self):
+        sid = "rename2" + "x" * 25
+        cohort_id = self._cohort_of_one(sid)
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}",
+            method="PATCH",
+            data=json.dumps({"label": "   "}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("empty", json.loads(body)["error"])
+
+    def test_legacy_cohort_file_is_migrated_on_read(self):
+        sid = "legacy" + "x" * 26
+        self.assertEqual(self.ingest(sid), 200)
+        self.seed_analysis(sid)
+        legacy = {
+            "id": "cohort-1700000000000",
+            "label": "Sample 1+0",
+            "created_at": 1700000000000,
+            "status": "done",
+            "purchased_n": 1,
+            "all_n": 0,
+            "sessions": [{"session_id": sid, "filter": "purchased", "status": "done"}],
+        }
+        (self.data_dir / "cohort.json").write_text(json.dumps(legacy))
+
+        self.assertIn("cohort-1700000000000", [c["id"] for c in self.cohorts()])
+        self.assertTrue(
+            (self.data_dir / "cohorts" / "cohort-1700000000000.json").is_file()
+        )
+        # The legacy file is consumed, so the migration runs exactly once.
+        self.assertFalse((self.data_dir / "cohort.json").exists())
 
     def _cohort_of_one(self, sid):
         """A settled one-session cohort, with cached analysis so it lands done."""
         self.assertEqual(self.ingest(sid), 200)
         self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-        self.seed_analysis(sid, themes=["checkout_friction"])
-        status, _ = request(
-            f"{self.base}/api/cohort?purchased=1&all=0", method="POST", data=b""
+        self.seed_analysis(sid)
+        status, body = request(
+            f"{self.base}/api/cohorts?purchased=1&all=0", method="POST", data=b""
         )
         self.assertEqual(status, 202)
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            _, body = request(f"{self.base}/api/cohort")
-            if json.loads(body)["status"] == "done":
-                break
-            time.sleep(0.1)
+        cohort_id = json.loads(body)["id"]
+        self.wait_done(cohort_id)
+        return cohort_id
 
     def test_retry_clears_the_recorded_error_for_that_row(self):
         sid = "retry1" + "x" * 26
-        self._cohort_of_one(sid)
+        cohort_id = self._cohort_of_one(sid)
 
         # Simulate a row that failed during the run: status is re-derived from
         # disk, so the cached analysis has to go along with the error marker.
@@ -810,55 +902,55 @@ class TestCohort(ServerCase):
         (session / "analysis.status.json").write_text(
             json.dumps({"status": "error", "error": "page reconstruction timed out"})
         )
-        path = self.data_dir / "cohort.json"
+        path = self.data_dir / "cohorts" / f"{cohort_id}.json"
         saved = json.loads(path.read_text())
         saved["sessions"][0]["status"] = "error"
         saved["sessions"][0]["error"] = "page reconstruction timed out"
         saved["status"] = "error"
         path.write_text(json.dumps(saved))
 
-        _, body = request(f"{self.base}/api/cohort")
+        _, body = request(f"{self.base}/api/cohorts/{cohort_id}")
         self.assertEqual(json.loads(body)["sessions"][0]["status"], "error")
 
         # Restore the cache so the retry settles without a real Gemini call.
-        self.seed_analysis(sid, themes=["checkout_friction"])
+        self.seed_analysis(sid)
 
         status, body = request(
-            f"{self.base}/api/cohort/sessions/{sid}/retry", method="POST", data=b""
+            f"{self.base}/api/cohorts/{cohort_id}/sessions/{sid}/retry",
+            method="POST",
+            data=b"",
         )
         self.assertEqual(status, 202, body)
 
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            _, body = request(f"{self.base}/api/cohort")
-            entry = json.loads(body)["sessions"][0]
-            if entry["status"] == "done":
-                break
-            time.sleep(0.1)
+        cohort = self.wait_done(cohort_id)
+        entry = cohort["sessions"][0]
         self.assertEqual(entry["status"], "done")
         self.assertNotIn("error", entry)
 
     def test_retry_rejects_a_session_outside_the_cohort(self):
         sid = "retry2" + "x" * 26
-        self._cohort_of_one(sid)
+        cohort_id = self._cohort_of_one(sid)
         other = "nother" + "x" * 26
         self.assertEqual(self.ingest(other), 200)
 
         status, body = request(
-            f"{self.base}/api/cohort/sessions/{other}/retry", method="POST", data=b""
+            f"{self.base}/api/cohorts/{cohort_id}/sessions/{other}/retry",
+            method="POST",
+            data=b"",
         )
         self.assertEqual(status, 404)
-        self.assertIn("not in the current cohort", json.loads(body)["error"])
+        self.assertIn("not in this cohort", json.loads(body)["error"])
 
     def test_retry_without_a_cohort_is_404(self):
         sid = "retry3" + "x" * 26
         self.assertEqual(self.ingest(sid), 200)
-        (self.data_dir / "cohort.json").unlink(missing_ok=True)
         status, body = request(
-            f"{self.base}/api/cohort/sessions/{sid}/retry", method="POST", data=b""
+            f"{self.base}/api/cohorts/cohort-nope/sessions/{sid}/retry",
+            method="POST",
+            data=b"",
         )
         self.assertEqual(status, 404)
-        self.assertIn("no cohort", json.loads(body)["error"])
+        self.assertIn("no such cohort", json.loads(body)["error"])
 
 
 class TestAttribution(ServerCase):
@@ -912,7 +1004,7 @@ class TestAttribution(ServerCase):
         self.assertIsNone(server.parse_attribution(None))
 
 
-class TestInsightsSummary(ServerCase):
+class TestCutEndpoint(ServerCase):
     env = {"GEMINI_API_KEY": "test-key-not-used-when-cached"}
 
     def order(self, session_id, payload):
@@ -923,331 +1015,94 @@ class TestInsightsSummary(ServerCase):
             headers={"Content-Type": "application/json"},
         )[0]
 
-    def seed(self, sid, *, purchased=False, url=None, themes=None):
-        payload = {"events": [{"type": 4, "data": {}}]}
-        if url:
-            payload["url"] = url
-        self.assertEqual(self.ingest(sid, payload), 200)
+    def seed(self, sid, purchased=False):
+        self.assertEqual(self.ingest(sid), 200)
         if purchased:
             self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-        session = self.data_dir / "sessions" / sid
-        (session / "analysis.json").write_text(
-            json.dumps({"text": f"write-up {sid[:6]}", "model": "test", "frame_count": 1, "warnings": []})
-        )
-        (session / "analysis.insights.json").write_text(
-            json.dumps(
-                {
-                    "themes": themes or [],
-                    "friction": [],
-                    "pages": [],
-                    "outcome_signals": [],
-                    "confidence": "medium",
-                }
-            )
+        (self.data_dir / "sessions" / sid / "analysis.json").write_text(
+            json.dumps({"text": f"write-up for {sid[:6]}", "model": "test", "warnings": []})
         )
 
-    def test_summary_theme_x_campaign(self):
-        buy = "sumbuy" + "x" * 26
-        other = "sumall" + "x" * 26
-        self.seed(
-            buy,
-            purchased=True,
-            url="https://brand.example/?utm_campaign=spring_sale",
-            themes=["shipping_hesitation", "checkout_friction"],
-        )
-        self.seed(
-            other,
-            url="https://brand.example/?utm_campaign=brand_search",
-            themes=["exit_before_checkout", "shipping_hesitation"],
-        )
-
+    def a_cohort(self):
+        self.seed("cutbuy" + "x" * 26, purchased=True)
+        self.seed("cutall" + "x" * 26)
         status, body = request(
-            f"{self.base}/api/cohort?purchased=1&all=1",
-            method="POST",
-            data=b"",
+            f"{self.base}/api/cohorts?purchased=1&all=1", method="POST", data=b""
         )
         self.assertEqual(status, 202, body)
+        cohort_id = json.loads(body)["id"]
         deadline = time.time() + 10
         while time.time() < deadline:
-            status, body = request(f"{self.base}/api/cohort")
-            cohort = json.loads(body)
-            if cohort["status"] == "done":
-                break
-            time.sleep(0.1)
-        self.assertEqual(cohort["status"], "done")
-
-        status, body = request(
-            f"{self.base}/api/insights/summary?group_by=utm_campaign"
-        )
-        self.assertEqual(status, 200, body)
-        summary = json.loads(body)
-        self.assertEqual(summary["group_by"], "utm_campaign")
-        self.assertEqual(summary["n"], 2)
-        self.assertEqual(summary["by_outcome"]["purchased"]["n"], 1)
-        self.assertEqual(summary["by_outcome"]["all"]["n"], 1)
-        self.assertEqual(
-            summary["by_outcome"]["purchased"]["themes"]["checkout_friction"], 1
-        )
-        self.assertEqual(summary["theme_x_segment"]["cols"], ["brand_search", "spring_sale"])
-        # shipping appears in both segments
-        ship_idx = summary["theme_x_segment"]["rows"].index("shipping_hesitation")
-        self.assertEqual(summary["theme_x_segment"]["counts"][ship_idx], [1, 1])
-
-        status, body = request(
-            f"{self.base}/api/insights/summary?group_by=utm_campaign&filter=purchased"
-        )
-        self.assertEqual(status, 200)
-        purchased_only = json.loads(body)
-        self.assertEqual(purchased_only["n"], 1)
-        self.assertEqual(purchased_only["by_segment"][0]["segment"], "spring_sale")
-
-    def test_summary_without_cohort_is_404(self):
-        cohort_path = self.data_dir / "cohort.json"
-        cohort_path.unlink(missing_ok=True)
-        status, body = request(f"{self.base}/api/insights/summary")
-        self.assertEqual(status, 404)
-        self.assertIn("no cohort", json.loads(body)["error"])
-
-    def test_build_insights_summary_enriched_deltas(self):
-        import analyze
-
-        summary = analyze.build_insights_summary(
-            [
-                {
-                    "session_id": "a",
-                    "outcome": "purchased",
-                    "attribution": {"utm_campaign": "spring"},
-                    "themes": ["shipping_hesitation", "checkout_friction"],
-                },
-                {
-                    "session_id": "b",
-                    "outcome": "all",
-                    "attribution": {"utm_campaign": "spring"},
-                    "themes": ["exit_before_checkout"],
-                },
-                {
-                    "session_id": "c",
-                    "outcome": "all",
-                    "attribution": None,
-                    "themes": ["exit_before_checkout", "shipping_hesitation"],
-                },
-            ],
-            group_by="utm_campaign",
-        )
-        enriched_purchased = {e["theme"] for e in summary["enriched"]["purchased"]}
-        enriched_all = {e["theme"] for e in summary["enriched"]["all"]}
-        self.assertIn("checkout_friction", enriched_purchased)
-        self.assertIn("exit_before_checkout", enriched_all)
-        self.assertEqual(
-            {s["segment"] for s in summary["by_segment"]},
-            {"spring", "(none)"},
-        )
-        # Default contrast is purchased vs non-purchase with a narrative.
-        self.assertEqual(summary["contrast"]["a"]["label"], "purchased")
-        self.assertTrue(summary["narrative"])
-
-    def test_meta_purchased_vs_rest_contrast_and_narrative(self):
-        import analyze
-
-        rows = [
-            {
-                "session_id": "m1",
-                "outcome": "purchased",
-                "attribution": {"fbclid": True, "utm_source": "facebook"},
-                "themes": ["shipping_hesitation", "checkout_friction"],
-            },
-            {
-                "session_id": "m2",
-                "outcome": "purchased",
-                "attribution": {"fbclid": True},
-                "themes": ["shipping_hesitation"],
-            },
-            {
-                "session_id": "g1",
-                "outcome": "purchased",
-                "attribution": {"utm_source": "google"},
-                "themes": ["price_hesitation"],
-            },
-            {
-                "session_id": "o1",
-                "outcome": "all",
-                "attribution": {"utm_source": "google"},
-                "themes": ["exit_before_checkout"],
-            },
-        ]
-        contrast = analyze.build_slice_contrast(
-            rows,
-            {"outcome": "purchased", "utm_source": "meta"},
-            None,
-        )
-        self.assertEqual(contrast["a"]["label"], "Meta + purchased")
-        self.assertEqual(contrast["b"]["label"], "everyone else")
-        self.assertEqual(contrast["a"]["n"], 2)
-        self.assertEqual(contrast["b"]["n"], 2)
-        self.assertEqual(contrast["a"]["themes"]["shipping_hesitation"], 2)
-        self.assertNotIn("shipping_hesitation", contrast["b"]["themes"])
-        narrative = " ".join(contrast["narrative"]).lower()
-        self.assertIn("shipping", narrative)
-        self.assertIn("meta", narrative)
-
-    def test_slice_api_preset_meta_purchased(self):
-        buy_meta = "abmeta" + "x" * 26
-        buy_google = "abgoog" + "x" * 26
-        other = "aballx" + "x" * 26
-        self.seed(
-            buy_meta,
-            purchased=True,
-            url="https://brand.example/?utm_source=facebook&fbclid=Iw123",
-            themes=["shipping_hesitation"],
-        )
-        self.seed(
-            buy_google,
-            purchased=True,
-            url="https://brand.example/?utm_source=google",
-            themes=["price_hesitation"],
-        )
-        self.seed(
-            other,
-            url="https://brand.example/?utm_source=google",
-            themes=["exit_before_checkout"],
-        )
-        status, body = request(
-            f"{self.base}/api/cohort?purchased=2&all=1",
-            method="POST",
-            data=b"",
-        )
-        self.assertEqual(status, 202, body)
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            status, body = request(f"{self.base}/api/cohort")
+            _, body = request(f"{self.base}/api/cohorts/{cohort_id}")
             if json.loads(body)["status"] == "done":
                 break
             time.sleep(0.1)
+        return cohort_id
 
+    def test_uncached_cut_is_absent_rather_than_a_silent_model_call(self):
+        cohort_id = self.a_cohort()
         status, body = request(
-            f"{self.base}/api/insights/summary?contrast=meta_purchased_vs_rest"
+            f"{self.base}/api/cohorts/{cohort_id}/cut?contrast=purchased_vs_all"
         )
-        self.assertEqual(status, 200, body)
+        self.assertEqual(status, 404)
         data = json.loads(body)
-        self.assertEqual(data["contrast"]["a"]["n"], 1)
-        self.assertEqual(data["contrast"]["b"]["n"], 2)
-        self.assertIn("shipping_hesitation", data["contrast"]["a"]["themes"])
-        self.assertTrue(any("shipping" in line.lower() for line in data["narrative"]))
+        self.assertEqual(data["status"], "absent")
+        self.assertEqual(data["cohort_id"], cohort_id)
+        # Nothing was written, so no call was made.
+        self.assertFalse((self.data_dir / "cohorts" / f"{cohort_id}.cuts.json").is_file())
 
-    def test_qa_accept_reject_and_accepted_only_rollup(self):
-        buy = "qabuyx" + "x" * 26
-        other = "qaallx" + "x" * 26
-        self.seed(
-            buy,
-            purchased=True,
-            url="https://brand.example/?utm_source=facebook&fbclid=1",
-            themes=["shipping_hesitation", "bogus_hallucination"],
-        )
-        self.seed(
-            other,
-            url="https://brand.example/?utm_source=google",
-            themes=["exit_before_checkout"],
-        )
-        status, body = request(
-            f"{self.base}/api/cohort?purchased=1&all=1", method="POST", data=b""
-        )
-        self.assertEqual(status, 202, body)
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            if json.loads(request(f"{self.base}/api/cohort")[1])["status"] == "done":
-                break
-            time.sleep(0.1)
-
-        # Edit themes + accept purchased session
-        status, body = request(
-            f"{self.base}/api/sessions/{buy}/qa",
-            method="PUT",
-            data=json.dumps(
-                {"status": "accepted", "themes": ["shipping_hesitation", "checkout_friction"]}
-            ).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        self.assertEqual(status, 200, body)
-        qa = json.loads(body)
-        self.assertEqual(qa["status"], "accepted")
-        self.assertEqual(qa["themes"], ["shipping_hesitation", "checkout_friction"])
-
-        # Reject the other session
-        status, body = request(
-            f"{self.base}/api/sessions/{other}/qa",
-            method="PUT",
-            data=json.dumps({"status": "rejected"}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        self.assertEqual(status, 200, body)
-
-        status, body = request(
-            f"{self.base}/api/insights/summary?qa_mode=include_pending&contrast=purchased_vs_all"
-        )
-        self.assertEqual(status, 200)
-        data = json.loads(body)
-        self.assertEqual(data["n"], 1)
-        self.assertIn("checkout_friction", data["contrast"]["a"]["themes"])
-        self.assertNotIn("bogus_hallucination", data["contrast"]["a"]["themes"])
-        self.assertEqual(data["qa_counts"]["accepted"], 1)
-        self.assertEqual(data["qa_counts"]["rejected"], 1)
-
-        status, body = request(
-            f"{self.base}/api/insights/summary?qa_mode=accepted&contrast=purchased_vs_all"
-        )
-        self.assertEqual(status, 200)
-        accepted = json.loads(body)
-        self.assertEqual(accepted["n"], 1)
-
-        status, body = request(
-            f"{self.base}/api/insights/summary?qa_mode=raw&contrast=purchased_vs_all"
-        )
-        self.assertEqual(status, 200)
-        raw = json.loads(body)
-        self.assertEqual(raw["n"], 2)
-
-    def test_theme_details_mark_one_offs_and_examples(self):
+    def test_a_cached_cut_is_served_without_run(self):
         import analyze
 
-        summary = analyze.build_insights_summary(
-            [
-                {
-                    "session_id": "s1",
-                    "outcome": "purchased",
-                    "attribution": {"utm_campaign": "spring"},
-                    "themes": ["shipping_hesitation"],
-                    "standout": "Paused on shipping table",
-                },
-                {
-                    "session_id": "s2",
-                    "outcome": "purchased",
-                    "attribution": {"utm_campaign": "spring"},
-                    "themes": ["shipping_hesitation", "checkout_friction"],
-                    "standout": "Rage on pay",
-                },
-                {
-                    "session_id": "s3",
-                    "outcome": "all",
-                    "attribution": None,
-                    "themes": ["exit_before_checkout"],
-                    "standout": "Bounced from PDP",
-                },
-            ]
+        cohort_id = self.a_cohort()
+        key = analyze.cut_key({"outcome": "purchased"}, {"outcome": "all"})
+        analyze.write_cut(
+            self.data_dir / "sessions",
+            cohort_id,
+            key,
+            {
+                "cut": key,
+                "label_a": "purchased",
+                "label_b": "non-purchase",
+                "n_a": 1,
+                "n_b": 1,
+                "analysis": {"headline": "cached headline", "shared": [], "caveats": []},
+            },
         )
-        details = {d["theme"]: d for d in summary["theme_details"]}
-        self.assertFalse(details["shipping_hesitation"]["one_off"])
-        self.assertTrue(details["checkout_friction"]["one_off"])
-        self.assertEqual(len(details["shipping_hesitation"]["examples"]), 2)
-        self.assertEqual(
-            details["shipping_hesitation"]["examples"][0]["standout"],
-            "Paused on shipping table",
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}/cut?contrast=purchased_vs_all"
         )
-        # Co-occurrence needs the pair in ≥2 sessions; with one pair session it stays empty.
-        self.assertEqual(summary["cooccurrence"], [])
-        # Enriched contrast examples still list the singleton theme.
-        enriched = {e["theme"]: e for e in summary["contrast"]["enriched_a"]}
-        self.assertTrue(enriched["checkout_friction"]["one_off"])
-        self.assertEqual(enriched["checkout_friction"]["examples"][0]["session_id"], "s2")
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["cached"])
+        self.assertEqual(data["analysis"]["headline"], "cached headline")
+
+    def test_each_preset_is_cached_separately(self):
+        import analyze
+
+        cohort_id = self.a_cohort()
+        key = analyze.cut_key({"outcome": "purchased"}, {"outcome": "all"})
+        analyze.write_cut(
+            self.data_dir / "sessions", cohort_id, key, {"cut": key, "analysis": {}}
+        )
+        # A different preset is a different key, so it is still a miss.
+        status, _ = request(
+            f"{self.base}/api/cohorts/{cohort_id}/cut?contrast=google_vs_meta"
+        )
+        self.assertEqual(status, 404)
+
+    def test_unknown_preset_is_rejected(self):
+        cohort_id = self.a_cohort()
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}/cut?contrast=not_a_preset"
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("contrast must be", json.loads(body)["error"])
+
+    def test_cut_on_a_missing_cohort_is_404(self):
+        status, body = request(f"{self.base}/api/cohorts/cohort-nope/cut")
+        self.assertEqual(status, 404)
+        self.assertIn("no such cohort", json.loads(body)["error"])
 
 
 class TestCohortUnavailable(ServerCase):
@@ -1256,7 +1111,7 @@ class TestCohortUnavailable(ServerCase):
     def test_post_without_key_is_unavailable(self):
         sid = "d" * 32
         self.assertEqual(self.ingest(sid), 200)
-        status, body = request(f"{self.base}/api/cohort", method="POST", data=b"")
+        status, body = request(f"{self.base}/api/cohorts", method="POST", data=b"")
         self.assertEqual(status, 503)
         self.assertIn("not configured", json.loads(body)["error"])
 
@@ -1301,68 +1156,6 @@ class TestCohortSampling(unittest.TestCase):
         )
         self.assertEqual(analyze.standout_line(text), "Shipping fee surprise at checkout.")
         self.assertEqual(analyze.standout_line("## Hello\nPlain opener."), "Plain opener.")
-
-
-class TestInsightsNormalize(unittest.TestCase):
-    def test_maps_vocab_and_other_and_drops_junk(self):
-        import analyze
-
-        out = analyze.normalize_insights(
-            {
-                "themes": [
-                    "shipping_hesitation",
-                    "Shipping_Hesitation",
-                    "weird freeform",
-                    "other:Custom Tag",
-                    "",
-                    12,
-                ],
-                "pages": ["pdp", "PDP", "spaceship", "cart"],
-                "outcome_signals": ["reached_checkout", "teleported", "purchased"],
-                "friction": [
-                    {"atMs": 42000, "label": "Rage on Add to Cart"},
-                    {"label": ""},
-                    "nope",
-                    {"atMs": -1, "label": "bad_time"},
-                ],
-                "confidence": "high",
-            }
-        )
-        self.assertEqual(
-            out["themes"],
-            ["shipping_hesitation", "other:weird_freeform", "other:custom_tag"],
-        )
-        self.assertEqual(out["pages"], ["pdp", "cart"])
-        self.assertEqual(out["outcome_signals"], ["reached_checkout", "purchased"])
-        self.assertEqual(
-            out["friction"],
-            [
-                {"label": "rage_on_add_to_cart", "atMs": 42000},
-                {"label": "bad_time"},
-            ],
-        )
-        self.assertEqual(out["confidence"], "high")
-
-    def test_empty_and_bad_input(self):
-        import analyze
-
-        self.assertEqual(analyze.normalize_insights(None)["themes"], [])
-        self.assertEqual(analyze.normalize_insights([])["confidence"], "low")
-        self.assertEqual(analyze.normalize_insights({"confidence": "nope"})["confidence"], "low")
-
-    def test_write_and_read_insights_sidecar(self):
-        import analyze
-
-        with tempfile.TemporaryDirectory() as tmp:
-            session = Path(tmp)
-            payload = analyze.normalize_insights(
-                {"themes": ["checkout_friction"], "confidence": "medium"}
-            )
-            analyze.write_insights(session, payload)
-            self.assertTrue((session / "analysis.insights.json").is_file())
-            self.assertEqual(analyze.read_insights(session)["themes"], ["checkout_friction"])
-            analyze.clear_analysis(session)
-            self.assertIsNone(analyze.read_insights(session))
 
 
 if __name__ == "__main__":
