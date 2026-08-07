@@ -307,60 +307,42 @@
   </div>
   <div id="insights">
     <div class="insights-tabs">
-      <button type="button" data-insights-tab="compare" class="active">Compare</button>
-      <button type="button" data-insights-tab="queue">Queue</button>
+      <button type="button" data-insights-tab="compare" class="active">Split</button>
+      <button type="button" data-insights-tab="queue">Sessions</button>
       <button type="button" data-insights-tab="review">Review</button>
     </div>
     <section class="insights-panel" id="insights-compare">
       <div class="insights-toolbar">
-        <h2 id="compare-label">Purchased vs all</h2>
+        <h2 id="compare-label">Sample of 10</h2>
         <span class="meta" id="compare-progress">No cohort yet</span>
         <label class="meta compare-group">
-          Contrast
-          <select id="compare-contrast">
-            <option value="purchased_vs_all">Purchased vs all</option>
-            <option value="meta_purchased_vs_rest">Meta + purchased vs rest</option>
-            <option value="meta_vs_rest">Meta vs rest</option>
+          Split by
+          <select id="compare-split">
+            <option value="purchased_vs_all">Purchased vs not</option>
+            <option value="meta_vs_rest">Meta vs not Meta</option>
+            <option value="meta_purchased_vs_rest">Meta buyers vs everyone else</option>
             <option value="google_vs_meta">Google vs Meta</option>
-            <option value="google_purchased_vs_rest">Google + purchased vs rest</option>
-          </select>
-        </label>
-        <label class="meta compare-group">
-          Group by
-          <select id="compare-group-by">
-            <option value="none">None</option>
-            <option value="utm_campaign">utm_campaign</option>
-            <option value="utm_source">utm_source</option>
-            <option value="utm_medium">utm_medium</option>
-            <option value="fbclid">Meta (fbclid)</option>
-          </select>
-        </label>
-        <label class="meta compare-group">
-          Rollup
-          <select id="compare-qa-mode">
-            <option value="include_pending">Include pending</option>
-            <option value="accepted">Accepted only</option>
-            <option value="raw">Raw (ignore QA)</option>
+            <option value="google_purchased_vs_rest">Google buyers vs everyone else</option>
           </select>
         </label>
         <span class="spacer"></span>
-        <button type="button" id="cohort-run-compare" disabled>Run sample cohort (5+5)</button>
+        <button type="button" id="cohort-run-compare" disabled>Analyze 10 sessions</button>
       </div>
-      <div id="compare-summary" hidden></div>
+      <div id="compare-summary">
+        <div class="insights-placeholder">Analyze 10 sessions, then pick a split to see what differs between the two groups.</div>
+      </div>
       <div id="compare-examples" hidden></div>
-      <div id="compare-body">
-        <div class="insights-placeholder">Run a sample cohort to compare write-ups for purchased vs other sessions side by side.</div>
-      </div>
+      <div id="compare-body" hidden></div>
     </section>
     <section class="insights-panel" id="insights-queue" hidden>
       <div class="insights-toolbar">
-        <h2 id="cohort-label">Sample cohort</h2>
+        <h2 id="cohort-label">Sessions</h2>
         <span class="meta" id="cohort-progress">No cohort yet</span>
         <span class="spacer"></span>
-        <button type="button" id="cohort-run" disabled>Run sample cohort (5+5)</button>
+        <button type="button" id="cohort-run" disabled>Analyze 10 sessions</button>
       </div>
       <div id="cohort-table-wrap">
-        <div id="cohort-empty">Run a sample cohort to analyze 5 purchased and 5 other sessions. Open any row to watch it in Replay.</div>
+        <div id="cohort-empty">Run analysis on 5 purchased and 5 other sessions. Open any row to watch it in Replay.</div>
       </div>
     </section>
     <section class="insights-panel" id="insights-review" hidden>
@@ -368,10 +350,10 @@
         <h2>Review</h2>
         <span class="meta" id="review-progress">No sessions to review</span>
         <span class="spacer"></span>
-        <span class="meta">Keys: A accept · R reject · N next · S skip</span>
+        <span class="meta">Keys: A accept · R reject · N next</span>
       </div>
       <div id="review-body">
-        <div class="insights-placeholder">Analyze a cohort first, then accept or reject themes here before trusting Compare rollups.</div>
+        <div class="insights-placeholder">Optional: fix bad theme tags before you trust a split.</div>
       </div>
     </section>
   </div>

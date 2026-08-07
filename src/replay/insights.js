@@ -17,9 +17,7 @@ const tableWrapEl = document.getElementById('cohort-table-wrap');
 const compareBodyEl = document.getElementById('compare-body');
 const compareSummaryEl = document.getElementById('compare-summary');
 const compareExamplesEl = document.getElementById('compare-examples');
-const groupByEl = document.getElementById('compare-group-by');
-const contrastEl = document.getElementById('compare-contrast');
-const qaModeEl = document.getElementById('compare-qa-mode');
+const splitEl = document.getElementById('compare-split');
 const queuePanelEl = document.getElementById('insights-queue');
 const comparePanelEl = document.getElementById('insights-compare');
 const reviewPanelEl = document.getElementById('insights-review');
@@ -53,11 +51,11 @@ function syncRunButtons() {
       btn.title = '';
     }
     if (running) {
-      btn.textContent = 'Running…';
+      btn.textContent = 'Analyzing…';
     } else if (cohort && cohort.sessions && cohort.sessions.length) {
-      btn.textContent = 'Run again (5+5)';
+      btn.textContent = 'Analyze 10 again';
     } else {
-      btn.textContent = 'Run sample cohort (5+5)';
+      btn.textContent = 'Analyze 10 sessions';
     }
   }
 }
@@ -77,9 +75,9 @@ function cohortUrl({ start = false, force = false } = {}) {
 function summaryUrl() {
   const params = new URLSearchParams();
   if (currentProject) params.set('project', currentProject);
-  params.set('group_by', groupByEl.value || 'none');
-  params.set('contrast', (contrastEl && contrastEl.value) || 'purchased_vs_all');
-  params.set('qa_mode', (qaModeEl && qaModeEl.value) || 'include_pending');
+  params.set('group_by', 'none');
+  params.set('contrast', (splitEl && splitEl.value) || 'purchased_vs_all');
+  params.set('qa_mode', 'include_pending');
   return `/api/insights/summary?${params.toString()}`;
 }
 
@@ -379,8 +377,8 @@ function bindThemeChipClicks(root) {
 function renderSummary(body) {
   summary = body;
   if (!body || !body.n) {
-    compareSummaryEl.hidden = true;
-    compareSummaryEl.innerHTML = '';
+    compareSummaryEl.innerHTML =
+      '<div class="insights-placeholder">Analyze 10 sessions, then pick a split to see what differs between the two groups.</div>';
     renderThemeExamples(null);
     return;
   }
@@ -389,15 +387,10 @@ function renderSummary(body) {
   const sideA = contrast.a || { n: 0, themes: {}, label: 'A' };
   const sideB = contrast.b || { n: 0, themes: {}, label: 'B' };
   const narrative = body.narrative || contrast.narrative || [];
-  const qaCounts = body.qa_counts || {};
-  const qaNote =
-    qaCounts.accepted || qaCounts.rejected || qaCounts.pending
-      ? `<p class="status-note">QA · ${qaCounts.accepted || 0} accepted · ${
-          qaCounts.pending || 0
-        } pending · ${qaCounts.rejected || 0} rejected</p>`
-      : '';
+  compareLabelEl.textContent = `${sideA.label} vs ${sideB.label}`;
+
   const narrativeHtml = narrative.length
-    ? `<div class="summary-narrative"><h4>What stands out</h4><ul>${narrative
+    ? `<div class="summary-narrative"><h4>What differs</h4><ul>${narrative
         .map((line) => `<li>${escapeHtml(line)}</li>`)
         .join('')}</ul></div>`
     : '';
@@ -405,86 +398,45 @@ function renderSummary(body) {
   const enrichedA = (contrast.enriched_a || [])
     .slice(0, 5)
     .map((e) => {
-      const delta = e.ratio
-        ? `${e.ratio}×`
-        : `+${Math.round((e.a_rate - e.b_rate) * 100)}pp`;
-      const oneOff = e.one_off ? ' <span class="meta">one-off</span>' : '';
+      const delta = e.ratio ? `${e.ratio}×` : 'more';
       return (
         `<li><button type="button" class="theme-chip${selectedTheme === e.theme ? ' active' : ''}${
           e.one_off ? ' one-off' : ''
         }" data-theme="${escapeAttr(e.theme)}">${escapeHtml(e.theme)}</button> ` +
         `<span class="delta">${escapeHtml(String(delta))}</span> ` +
-        `<span class="meta">(${e.a_count}/${sideA.n} vs ${e.b_count}/${sideB.n})</span>${oneOff}</li>`
+        `<span class="meta">(${e.a_count}/${sideA.n} vs ${e.b_count}/${sideB.n})</span></li>`
       );
     })
     .join('');
   const enrichedB = (contrast.enriched_b || [])
     .slice(0, 5)
     .map((e) => {
-      const delta = e.ratio
-        ? `${e.ratio}×`
-        : `+${Math.round((e.b_rate - e.a_rate) * 100)}pp`;
-      const oneOff = e.one_off ? ' <span class="meta">one-off</span>' : '';
+      const delta = e.ratio ? `${e.ratio}×` : 'more';
       return (
         `<li><button type="button" class="theme-chip${selectedTheme === e.theme ? ' active' : ''}${
           e.one_off ? ' one-off' : ''
         }" data-theme="${escapeAttr(e.theme)}">${escapeHtml(e.theme)}</button> ` +
         `<span class="delta">${escapeHtml(String(delta))}</span> ` +
-        `<span class="meta">(${e.b_count}/${sideB.n} vs ${e.a_count}/${sideA.n})</span>${oneOff}</li>`
+        `<span class="meta">(${e.b_count}/${sideB.n} vs ${e.a_count}/${sideA.n})</span></li>`
       );
     })
     .join('');
 
-  let table = '';
-  const matrix = body.theme_x_segment;
-  if (
-    matrix &&
-    matrix.cols &&
-    matrix.cols.length &&
-    matrix.rows &&
-    matrix.rows.length &&
-    body.group_by !== 'none'
-  ) {
-    const head = matrix.cols.map((c) => `<th>${escapeHtml(c)}</th>`).join('');
-    const rows = matrix.rows
-      .map((theme, i) => {
-        const cells = (matrix.counts[i] || [])
-          .map((n) => `<td class="num">${n || ''}</td>`)
-          .join('');
-        return `<tr><td><button type="button" class="theme-chip${
-          selectedTheme === theme ? ' active' : ''
-        }" data-theme="${escapeAttr(theme)}">${escapeHtml(theme)}</button></td>${cells}</tr>`;
-      })
-      .join('');
-    table = `<div class="theme-table-wrap"><table class="theme-table"><thead><tr><th>Theme</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
-  }
-
-  const co = (body.cooccurrence || [])
-    .slice(0, 5)
-    .map(
-      (c) =>
-        `<li>${escapeHtml(c.themes.join(' + '))} <span class="meta">×${c.count}</span></li>`
-    )
-    .join('');
-
-  compareSummaryEl.hidden = false;
   compareSummaryEl.innerHTML = `
-    ${qaNote}
     ${narrativeHtml}
     <div class="summary-grid">
       <div class="summary-col">
         <h4>${escapeHtml(sideA.label)} <span class="n">(n=${sideA.n})</span></h4>
         ${themeCountChips(sideA.theme_details || sideA.themes, 'a')}
-        ${enrichedA ? `<ul class="enriched"><li><strong>Enriched here</strong></li>${enrichedA}</ul>` : ''}
+        ${enrichedA ? `<ul class="enriched"><li><strong>More common here</strong></li>${enrichedA}</ul>` : ''}
       </div>
       <div class="summary-col">
         <h4>${escapeHtml(sideB.label)} <span class="n">(n=${sideB.n})</span></h4>
         ${themeCountChips(sideB.theme_details || sideB.themes, 'b')}
-        ${enrichedB ? `<ul class="enriched"><li><strong>Enriched here</strong></li>${enrichedB}</ul>` : ''}
+        ${enrichedB ? `<ul class="enriched"><li><strong>More common here</strong></li>${enrichedB}</ul>` : ''}
       </div>
     </div>
-    ${co ? `<ul class="enriched" style="margin-top:10px"><li><strong>Co-occurring themes</strong></li>${co}</ul>` : ''}
-    ${table}`;
+    <p class="status-note">Click a theme for example sessions. Individual write-ups are under Sessions.</p>`;
   bindThemeChipClicks(compareSummaryEl);
   renderThemeExamples(selectedTheme);
 }
@@ -495,48 +447,19 @@ async function refreshSummary() {
     renderSummary(body);
   } catch (err) {
     if (/no cohort/i.test(err.message || '')) {
-      compareSummaryEl.hidden = true;
-      compareSummaryEl.innerHTML = '';
+      compareSummaryEl.innerHTML =
+        '<div class="insights-placeholder">Analyze 10 sessions, then pick a split to see what differs between the two groups.</div>';
       renderThemeExamples(null);
       return;
     }
-    compareSummaryEl.hidden = false;
     compareSummaryEl.innerHTML = `<p class="status-note error">${escapeHtml(err.message)}</p>`;
   }
 }
 
-function renderCompare(body) {
-  const sessions = body.sessions || [];
-  if (!sessions.length) {
-    compareBodyEl.innerHTML =
-      '<div class="insights-placeholder">No sessions matched this sample.</div>';
-    return;
-  }
-
-  const purchased = sessions.filter((s) => s.filter === 'purchased');
-  const all = sessions.filter((s) => s.filter !== 'purchased');
-  const donePurchased = purchased.filter((s) => s.status === 'done' && s.text).length;
-  const doneAll = all.filter((s) => s.status === 'done' && s.text).length;
-
-  compareLabelEl.textContent = body.label || 'Purchased vs all';
-  compareBodyEl.innerHTML = `
-    <div class="compare-grid">
-      <div class="compare-col">
-        <h3>Purchased <span class="n">(${donePurchased}/${purchased.length})</span></h3>
-        ${purchased.map(insightCard).join('') || '<p class="status-note">No purchased sessions in this sample.</p>'}
-      </div>
-      <div class="compare-col">
-        <h3>All / non-purchase <span class="n">(${doneAll}/${all.length})</span></h3>
-        ${all.map(insightCard).join('') || '<p class="status-note">No other sessions in this sample.</p>'}
-      </div>
-    </div>`;
-
-  compareBodyEl.querySelectorAll('button.open').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      openSession(btn.dataset.sid);
-    });
-  });
+function renderCompare(_body) {
+  // Per-session write-ups live under Sessions; Split stays aggregate-only.
+  compareBodyEl.hidden = true;
+  compareBodyEl.innerHTML = '';
 }
 
 function buildReviewQueue(body) {
@@ -712,8 +635,10 @@ function renderCohort(body) {
   if (hasInsights) {
     refreshSummary().catch(() => {});
   } else {
-    compareSummaryEl.hidden = true;
-    compareSummaryEl.innerHTML = '';
+    compareSummaryEl.innerHTML =
+      body.status === 'running' || body.status === 'queued'
+        ? '<div class="insights-placeholder">Analyzing sessions… Split results will appear here when themes are ready.</div>'
+        : '<div class="insights-placeholder">Analyze 10 sessions, then pick a split to see what differs between the two groups.</div>';
     renderThemeExamples(null);
   }
 
@@ -742,22 +667,22 @@ function resetEmptyState() {
   summary = null;
   selectedTheme = null;
   autoSwitchedForRun = false;
-  labelEl.textContent = 'Sample cohort';
-  compareLabelEl.textContent = 'Purchased vs all';
+  labelEl.textContent = 'Sessions';
+  compareLabelEl.textContent = 'Sample of 10';
   progressEl.textContent = 'No cohort yet';
   compareProgressEl.textContent = 'No cohort yet';
   reviewProgressEl.textContent = 'No sessions to review';
   syncRunButtons();
-  compareSummaryEl.hidden = true;
-  compareSummaryEl.innerHTML = '';
+  compareSummaryEl.innerHTML =
+    '<div class="insights-placeholder">Analyze 10 sessions, then pick a split to see what differs between the two groups.</div>';
   renderThemeExamples(null);
   renderEmpty(
-    'Run a sample cohort to analyze 5 purchased and 5 other sessions. Open any row to watch it in Replay.'
+    'Run analysis on 5 purchased and 5 other sessions. Open any row to watch it in Replay.'
   );
-  compareBodyEl.innerHTML =
-    '<div class="insights-placeholder">Run a sample cohort to compare write-ups for purchased vs other sessions side by side.</div>';
+  compareBodyEl.hidden = true;
+  compareBodyEl.innerHTML = '';
   reviewBodyEl.innerHTML =
-    '<div class="insights-placeholder">Analyze a cohort first, then accept or reject themes here.</div>';
+    '<div class="insights-placeholder">Optional: fix bad theme tags before you trust a split.</div>';
 }
 
 export async function refreshCohort() {
@@ -808,12 +733,12 @@ export function initInsights() {
   });
   runBtn.addEventListener('click', runCohort);
   runBtnCompare.addEventListener('click', runCohort);
-  const refreshSummaryIfReady = () => {
-    if (cohort) refreshSummary().catch(() => {});
-  };
-  groupByEl.addEventListener('change', refreshSummaryIfReady);
-  if (contrastEl) contrastEl.addEventListener('change', refreshSummaryIfReady);
-  if (qaModeEl) qaModeEl.addEventListener('change', refreshSummaryIfReady);
+  if (splitEl) {
+    splitEl.addEventListener('change', () => {
+      selectedTheme = null;
+      if (cohort) refreshSummary().catch(() => {});
+    });
+  }
   document.addEventListener('keydown', onReviewKeydown);
   setTab('compare');
 
