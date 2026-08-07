@@ -57,6 +57,7 @@ function showPlayerMessage(message) {
 export async function loadSession(sessionId) {
   const seq = ++loadSeq;
   loadedSessionId = sessionId;
+  destroyPlayer();
   writeHash({ p: currentProject, s: sessionId });
   sessionTitleEl.textContent = `Session ${sessionId}`;
   sessionTitleEl.title = '';
@@ -281,6 +282,13 @@ async function playWindow(sessionId, chunks, windowKey, seq, session, showOrder)
   if (allEvents.length < 2) {
     showPlayerMessage(
       results.includes(null) ? 'Could not load this session.' : 'Not enough events to replay yet.'
+    );
+    renderTimeline(allEvents, navigations, session, showOrder);
+    return;
+  }
+  if (playable.length < 2) {
+    showPlayerMessage(
+      'This recording never delivered a full snapshot, so there is nothing to render.'
     );
     renderTimeline(allEvents, navigations, session, showOrder);
     return;
