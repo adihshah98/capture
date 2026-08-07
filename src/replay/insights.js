@@ -230,57 +230,6 @@ function renderQueue(body) {
   });
 }
 
-function insightCard(entry) {
-  const status = entry.status || 'queued';
-  const pending = status !== 'done' || !entry.text;
-  const campaign = entry.attribution && entry.attribution.utm_campaign;
-  const attrBadge = campaign
-    ? `<span class="attr-badge">${escapeHtml(campaign)}</span>`
-    : entry.attribution && entry.attribution.fbclid
-      ? `<span class="attr-badge">Meta</span>`
-      : '';
-  const head = `
-    <div class="insight-card-head">
-      <span class="sid">${escapeHtml(entry.session_id.slice(0, 8))}…</span>
-      ${attrBadge}
-      ${qaBadge(entry.qa_status)}
-      <span class="badge ${escapeAttr(status)}">${escapeHtml(status)}</span>
-      <button type="button" class="open" data-sid="${escapeAttr(entry.session_id)}">Open</button>
-    </div>`;
-
-  if (status === 'error') {
-    return `<article class="insight-card pending">${head}
-      <p class="status-note error">${escapeHtml(entry.error || 'Analysis failed.')}</p>
-    </article>`;
-  }
-  if (pending) {
-    const note =
-      status === 'running'
-        ? 'Analyzing… write-up will appear here when ready.'
-        : 'Queued — waiting for analysis.';
-    return `<article class="insight-card pending">${head}
-      <p class="status-note">${note}</p>
-    </article>`;
-  }
-
-  const standout = entry.standout
-    ? `<p class="insight-standout">${escapeHtml(entry.standout)}</p>`
-    : '';
-  const themes = (entry.themes || []).length
-    ? `<div class="theme-chips">${entry.themes
-        .map((t) => `<span class="theme-chip">${escapeHtml(String(t))}</span>`)
-        .join('')}</div>`
-    : '';
-  return `<article class="insight-card">${head}
-    ${themes}
-    ${standout}
-    <details>
-      <summary>Full write-up</summary>
-      <div class="md">${renderMarkdown(entry.text)}</div>
-    </details>
-  </article>`;
-}
-
 function themeCountChips(detailsOrMap, side) {
   const details = Array.isArray(detailsOrMap)
     ? detailsOrMap
