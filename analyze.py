@@ -452,6 +452,114 @@ def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
     return {**cohort, "sessions": sessions}
 
 
+def count_themes(theme_lists) -> dict:
+    """theme → count, sorted by frequency then name."""
+    counts: dict = {}
+    for themes in theme_lists:
+        for theme in themes or []:
+            if not isinstance(theme, str) or not theme:
+                continue
+            counts[theme] = counts.get(theme, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def segment_label(attribution: Optional[dict], group_by: str) -> str:
+    if not group_by or group_by == "none":
+        return "(all)"
+    attrs = attribution if isinstance(attribution, dict) else {}
+    if group_by == "fbclid":
+        return "meta" if attrs.get("fbclid") else "(none)"
+    value = attrs.get(group_by)
+    return str(value) if value else "(none)"
+
+
+def build_insights_summary(rows: list, group_by: str = "none") -> dict:
+    """Roll theme counts by outcome and optional attribution segment.
+
+    Each row: {session_id, outcome ("purchased"|"all"), attribution, themes}.
+    """
+    group_by = group_by if group_by in (
+        "utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid", "none"
+    ) else "none"
+
+    by_outcome = {"purchased": [], "all": []}
+    by_segment: dict = {}
+    for row in rows:
+        outcome = "purchased" if row.get("outcome") == "purchased" else "all"
+        themes = list(row.get("themes") or [])
+        by_outcome[outcome].append(themes)
+        label = segment_label(row.get("attribution"), group_by)
+        bucket = by_segment.setdefault(label, {"n": 0, "theme_lists": [], "sessions": []})
+        bucket["n"] += 1
+        bucket["theme_lists"].append(themes)
+        bucket["sessions"].append(
+            {
+                "session_id": row.get("session_id"),
+                "outcome": outcome,
+                "themes": themes,
+            }
+        )
+
+    outcome_summary = {}
+    for key, lists in by_outcome.items():
+        outcome_summary[key] = {
+            "n": len(lists),
+            "themes": count_themes(lists),
+        }
+
+    purchased_themes = outcome_summary["purchased"]["themes"]
+    all_themes = outcome_summary["all"]["themes"]
+    all_keys = sorted(set(purchased_themes) | set(all_themes))
+    enriched = {
+        "purchased": [
+            {"theme": t, "purchased": purchased_themes.get(t, 0), "all": all_themes.get(t, 0)}
+            for t in all_keys
+            if purchased_themes.get(t, 0) > all_themes.get(t, 0)
+        ],
+        "all": [
+            {"theme": t, "purchased": purchased_themes.get(t, 0), "all": all_themes.get(t, 0)}
+            for t in all_keys
+            if all_themes.get(t, 0) > purchased_themes.get(t, 0)
+        ],
+    }
+
+    segments = []
+    for label, bucket in sorted(by_segment.items(), key=lambda kv: (-kv[1]["n"], kv[0])):
+        themes = count_themes(bucket["theme_lists"])
+        segments.append(
+            {
+                "segment": label,
+                "n": bucket["n"],
+                "themes": themes,
+                "sessions": bucket["sessions"],
+            }
+        )
+
+    theme_names = sorted(
+        {t for seg in segments for t in seg["themes"]},
+        key=lambda t: (-sum(seg["themes"].get(t, 0) for seg in segments), t),
+    )
+    col_labels = [seg["segment"] for seg in segments]
+    matrix = [[seg["themes"].get(theme, 0) for seg in segments] for theme in theme_names]
+
+    return {
+        "group_by": group_by,
+        "n": len(rows),
+        "themes": [
+            {"theme": theme, "count": count}
+            for theme, count in count_themes(by_outcome["purchased"] + by_outcome["all"]).items()
+        ],
+        "by_outcome": outcome_summary,
+        "enriched": enriched,
+        "by_segment": segments,
+        "theme_x_segment": {
+            "rows": theme_names,
+            "cols": col_labels,
+            "counts": matrix,
+        },
+    }
+
+
 def sample_cohort_rows(
     conn: sqlite3.Connection,
     pool: str,

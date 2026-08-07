@@ -784,6 +784,189 @@ class TestCohort(ServerCase):
             self.assertNotIn("text", entry)
 
 
+class TestAttribution(ServerCase):
+    EVENTS = [{"type": 4, "data": {}}]
+
+    def listed(self, session_id):
+        sessions = json.loads(request(f"{self.base}/api/sessions")[1])["sessions"]
+        return next(s for s in sessions if s["session_id"] == session_id)
+
+    def test_utm_and_fbclid_indexed_at_ingest(self):
+        sid = "utm" + "x" * 29
+        url = (
+            "https://brand.example/landing"
+            "?utm_source=facebook&utm_medium=paid&utm_campaign=spring_sale"
+            "&utm_content=creative_a&fbclid=IwAR123&page=2"
+        )
+        self.assertEqual(
+            self.ingest(sid, {"events": self.EVENTS, "url": url}),
+            200,
+        )
+        listed = self.listed(sid)
+        self.assertEqual(
+            listed["attribution"],
+            {
+                "utm_source": "facebook",
+                "utm_medium": "paid",
+                "utm_campaign": "spring_sale",
+                "utm_content": "creative_a",
+                "fbclid": True,
+            },
+        )
+
+    def test_plain_url_has_no_attribution(self):
+        sid = "plain" + "x" * 27
+        self.assertEqual(
+            self.ingest(sid, {"events": self.EVENTS, "url": "https://brand.example/p/1"}),
+            200,
+        )
+        self.assertNotIn("attribution", self.listed(sid))
+
+    def test_parse_attribution_helpers(self):
+        import server
+
+        self.assertEqual(
+            server.parse_attribution(
+                "https://x.test/?utm_campaign=fall&fbclid=abc&utm_source=meta"
+            ),
+            {"utm_campaign": "fall", "fbclid": True, "utm_source": "meta"},
+        )
+        self.assertIsNone(server.parse_attribution("https://x.test/path"))
+        self.assertIsNone(server.parse_attribution(None))
+
+
+class TestInsightsSummary(ServerCase):
+    env = {"GEMINI_API_KEY": "test-key-not-used-when-cached"}
+
+    def order(self, session_id, payload):
+        return request(
+            f"{self.base}/order?session_id={session_id}",
+            method="POST",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )[0]
+
+    def seed(self, sid, *, purchased=False, url=None, themes=None):
+        payload = {"events": [{"type": 4, "data": {}}]}
+        if url:
+            payload["url"] = url
+        self.assertEqual(self.ingest(sid, payload), 200)
+        if purchased:
+            self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
+        session = self.data_dir / "sessions" / sid
+        (session / "analysis.json").write_text(
+            json.dumps({"text": f"write-up {sid[:6]}", "model": "test", "frame_count": 1, "warnings": []})
+        )
+        (session / "analysis.insights.json").write_text(
+            json.dumps(
+                {
+                    "themes": themes or [],
+                    "friction": [],
+                    "pages": [],
+                    "outcome_signals": [],
+                    "confidence": "medium",
+                }
+            )
+        )
+
+    def test_summary_theme_x_campaign(self):
+        buy = "sumbuy" + "x" * 26
+        other = "sumall" + "x" * 26
+        self.seed(
+            buy,
+            purchased=True,
+            url="https://brand.example/?utm_campaign=spring_sale",
+            themes=["shipping_hesitation", "checkout_friction"],
+        )
+        self.seed(
+            other,
+            url="https://brand.example/?utm_campaign=brand_search",
+            themes=["exit_before_checkout", "shipping_hesitation"],
+        )
+
+        status, body = request(
+            f"{self.base}/api/cohort?purchased=1&all=1",
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 202, body)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            status, body = request(f"{self.base}/api/cohort")
+            cohort = json.loads(body)
+            if cohort["status"] == "done":
+                break
+            time.sleep(0.1)
+        self.assertEqual(cohort["status"], "done")
+
+        status, body = request(
+            f"{self.base}/api/insights/summary?group_by=utm_campaign"
+        )
+        self.assertEqual(status, 200, body)
+        summary = json.loads(body)
+        self.assertEqual(summary["group_by"], "utm_campaign")
+        self.assertEqual(summary["n"], 2)
+        self.assertEqual(summary["by_outcome"]["purchased"]["n"], 1)
+        self.assertEqual(summary["by_outcome"]["all"]["n"], 1)
+        self.assertEqual(
+            summary["by_outcome"]["purchased"]["themes"]["checkout_friction"], 1
+        )
+        self.assertEqual(summary["theme_x_segment"]["cols"], ["brand_search", "spring_sale"])
+        # shipping appears in both segments
+        ship_idx = summary["theme_x_segment"]["rows"].index("shipping_hesitation")
+        self.assertEqual(summary["theme_x_segment"]["counts"][ship_idx], [1, 1])
+
+        status, body = request(
+            f"{self.base}/api/insights/summary?group_by=utm_campaign&filter=purchased"
+        )
+        self.assertEqual(status, 200)
+        purchased_only = json.loads(body)
+        self.assertEqual(purchased_only["n"], 1)
+        self.assertEqual(purchased_only["by_segment"][0]["segment"], "spring_sale")
+
+    def test_summary_without_cohort_is_404(self):
+        cohort_path = self.data_dir / "cohort.json"
+        cohort_path.unlink(missing_ok=True)
+        status, body = request(f"{self.base}/api/insights/summary")
+        self.assertEqual(status, 404)
+        self.assertIn("no cohort", json.loads(body)["error"])
+
+    def test_build_insights_summary_enriched_deltas(self):
+        import analyze
+
+        summary = analyze.build_insights_summary(
+            [
+                {
+                    "session_id": "a",
+                    "outcome": "purchased",
+                    "attribution": {"utm_campaign": "spring"},
+                    "themes": ["shipping_hesitation", "checkout_friction"],
+                },
+                {
+                    "session_id": "b",
+                    "outcome": "all",
+                    "attribution": {"utm_campaign": "spring"},
+                    "themes": ["exit_before_checkout"],
+                },
+                {
+                    "session_id": "c",
+                    "outcome": "all",
+                    "attribution": None,
+                    "themes": ["exit_before_checkout", "shipping_hesitation"],
+                },
+            ],
+            group_by="utm_campaign",
+        )
+        enriched_purchased = {e["theme"] for e in summary["enriched"]["purchased"]}
+        enriched_all = {e["theme"] for e in summary["enriched"]["all"]}
+        self.assertIn("checkout_friction", enriched_purchased)
+        self.assertIn("exit_before_checkout", enriched_all)
+        self.assertEqual(
+            {s["segment"] for s in summary["by_segment"]},
+            {"spring", "(none)"},
+        )
+
+
 class TestCohortUnavailable(ServerCase):
     env = {"GEMINI_API_KEY": ""}
 
