@@ -89,7 +89,8 @@ export async function loadSession(sessionId) {
   }
   const bytesOf = (chunks) => chunks.reduce((n, c) => n + c.bytes, 0);
   const session = allSessions.find((s) => s.session_id === sessionId);
-  const checkoutAt = session && session.order && session.order.checkout_started_at;
+  const order = session && session.order;
+  const checkoutAt = order && (order.checkout_started_at || order.purchased_at);
   let checkoutWindow = null;
   if (checkoutAt) {
     let latest = -Infinity;
