@@ -7,11 +7,15 @@ import { tryTransition } from './triggers.js';
 import { abort, stopFn } from './recording.js';
 
 const KEEPALIVE_SAFE_BYTES = 51 * 1024;
+const BEACON_SAFE_BYTES = 60 * 1024;
+const HEAL_COOLDOWN_MS = 60 * 1000;
 
 let buffer = [];
 let bufferBytes = 0;
 let flushTimer = null;
 let inFlight = false;
+let snapshotDeliveredFor = null;
+let lastHealAt = 0;
 
 export function resetBuffer() {
   buffer = [];
@@ -68,6 +72,27 @@ function payloadFor(events) {
 
 const bodyBytes = (body) => (typeof body === 'string' ? body.length : body.byteLength);
 
+function noteDelivery(events, sid) {
+  if (events.some((e) => e.type === 2)) snapshotDeliveredFor = sid;
+}
+
+function healMissingSnapshot() {
+  if (!stopFn || !sessionId || snapshotDeliveredFor === sessionId) return;
+  if (buffer.some((e) => e.type === 2)) return;
+  if (Date.now() - lastHealAt < HEAL_COOLDOWN_MS) return;
+  lastHealAt = Date.now();
+  record.takeFullSnapshot(true);
+}
+
+function dropFromBuffer(events) {
+  const sent = new Set(events);
+  const remaining = buffer.filter((e) => !sent.has(e));
+  if (remaining.length !== buffer.length) {
+    buffer = remaining;
+    bufferBytes = buffer.reduce((n, e) => n + JSON.stringify(e).length, 0);
+  }
+}
+
 function requeue(events) {
   buffer = events.concat(buffer);
   bufferBytes = buffer.reduce((n, e) => n + JSON.stringify(e).length, 0);
@@ -86,9 +111,14 @@ function ingestUrl(compressed) {
 
 async function flushAsync() {
   if (inFlight) return;
+  inFlight = true;
+  try {
+    healMissingSnapshot();
+  } catch {
+  }
   const events = buffer;
   resetBuffer();
-  inFlight = true;
+  const sid = sessionId;
 
   try {
     const { body, compressed } = await gzipBody(payloadFor(events));
@@ -105,6 +135,8 @@ async function flushAsync() {
       requeue(events);
     } else if (!res.ok) {
       console.error(`capture: ingest rejected a batch (${res.status}), dropping it`);
+    } else {
+      noteDelivery(events, sid);
     }
   } catch {
     requeue(events);
@@ -113,35 +145,72 @@ async function flushAsync() {
   }
 }
 
-function flushBeacon() {
+function flushBeacon(unloading) {
   const events = buffer;
   resetBuffer();
   const url = ingestUrl(false);
+  const sid = sessionId;
+  let batch = [];
+  const kept = [];
   beaconEvents(
     events,
-    (batch) => payloadFor(batch),
+    (b) => {
+      batch = b;
+      return payloadFor(b);
+    },
     (json) => {
       try {
-        return Boolean(
+        const ok = Boolean(
           navigator.sendBeacon && navigator.sendBeacon(url, new Blob([json], { type: 'text/plain' }))
         );
+        if (ok) noteDelivery(batch, sid);
+        return ok;
       } catch {
         return false;
       }
     },
     (json) => {
+      if (!unloading) {
+        kept.push(...batch);
+        return;
+      }
       try {
         fetch(url, { method: 'POST', body: json, headers: { 'Content-Type': 'application/json' } });
       } catch {
       }
     }
   );
+  if (kept.length) retainAndRetry(kept, sid);
 }
 
-export function flush(useKeepalive) {
+async function retainAndRetry(events, sid) {
+  requeue(events);
+  try {
+    const { body, compressed } = await gzipBody(payloadFor(events));
+    let delivered = false;
+    if (compressed && bodyBytes(body) < BEACON_SAFE_BYTES && navigator.sendBeacon) {
+      delivered = navigator.sendBeacon(ingestUrl(true), new Blob([body], { type: 'text/plain' }));
+    }
+    if (!delivered) {
+      const res = await fetch(ingestUrl(compressed), {
+        method: 'POST',
+        body,
+        headers: { 'Content-Type': compressed ? 'application/octet-stream' : 'application/json' },
+      });
+      delivered = res.ok;
+    }
+    if (delivered) {
+      dropFromBuffer(events);
+      noteDelivery(events, sid);
+    }
+  } catch {
+  }
+}
+
+export function flush(mode) {
   if (status !== 'active' || buffer.length === 0) return;
-  if (useKeepalive) {
-    flushBeacon();
+  if (mode) {
+    flushBeacon(mode === 'unload');
   } else {
     return flushAsync();
   }

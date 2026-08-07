@@ -32,10 +32,10 @@ async function boot() {
     watchForNextSession();
   }
 
-  window.addEventListener('pagehide', () => flush(true));
-  window.addEventListener('beforeunload', () => flush(true));
+  window.addEventListener('pagehide', () => flush('unload'));
+  window.addEventListener('beforeunload', () => flush('unload'));
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') flush(true);
+    if (document.visibilityState === 'hidden') flush('hidden');
   });
 }
 
