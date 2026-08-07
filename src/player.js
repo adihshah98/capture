@@ -15,6 +15,8 @@ export const ACTIVE_SOURCES = new Set([
 const ACTIVITY_THRESHOLD_MS = 5000;
 const MIN_SKIP_MS = 2000;
 const END_EPSILON_MS = 50;
+const TAIL_BUFFER_MS = 1500;
+const SNAPSHOT_META_WINDOW_MS = 500;
 
 const REPLAY_STYLE_RULES = [
   '@media (prefers-reduced-motion: no-preference) { .scroll-trigger:not(.scroll-trigger--offscreen).animate--slide-in { animation: var(--animation-slide-in) } }',
@@ -30,21 +32,19 @@ const EAGER_IMAGES_PLUGIN = {
   },
 };
 
-function isActiveEvent(e) {
-  return (
-    e.type === EventType.FullSnapshot ||
-    e.type === EventType.Meta ||
-    (e.type === EventType.IncrementalSnapshot && ACTIVE_SOURCES.has(e.data && e.data.source))
-  );
-}
-
 function buildSegments(events) {
   const t0 = events[0].timestamp;
-  const duration = Math.max(events[events.length - 1].timestamp - t0, 1);
+  const rawDuration = Math.max(events[events.length - 1].timestamp - t0, 1);
   const active = [];
   let seg = null;
+  let lastMetaTs = -Infinity;
   for (const e of events) {
-    if (!isActiveEvent(e)) continue;
+    if (e.type === EventType.Meta) lastMetaTs = e.timestamp;
+    const isActive =
+      e.type === EventType.Meta ||
+      (e.type === EventType.FullSnapshot && e.timestamp - lastMetaTs <= SNAPSHOT_META_WINDOW_MS) ||
+      (e.type === EventType.IncrementalSnapshot && ACTIVE_SOURCES.has(e.data && e.data.source));
+    if (!isActive) continue;
     const t = e.timestamp - t0;
     if (seg && t - seg.end <= ACTIVITY_THRESHOLD_MS) {
       seg.end = t;
@@ -54,6 +54,8 @@ function buildSegments(events) {
     }
   }
   if (seg) active.push(seg);
+  const lastActiveEnd = active.length ? active[active.length - 1].end : rawDuration;
+  const duration = Math.max(Math.min(rawDuration, lastActiveEnd + TAIL_BUFFER_MS), 1);
 
   const segments = [];
   let cursor = 0;
