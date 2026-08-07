@@ -34,7 +34,7 @@ export function clearPlayer() {
   destroyPlayer();
   windowTabsEl.innerHTML = '';
   clearTimeline();
-  resetAnalysis();
+  resetAnalysis(null);
   loadProgressEl.textContent = '';
   sessionTitleEl.textContent = 'Select a session';
   sessionTitleEl.title = '';

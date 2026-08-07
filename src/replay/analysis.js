@@ -88,16 +88,18 @@ function setButton(label, disabled) {
   buttonEl.disabled = disabled;
 }
 
-export function resetAnalysis() {
+export function resetAnalysis(sessionId = loadedSessionId) {
   if (!enabled) return;
   bodyEl.innerHTML =
     '<p class="empty">Analyze this session to see where attention went.</p>';
-  setButton('Analyze with AI', !loadedSessionId);
+  setButton('Analyze with AI', !sessionId);
 }
 
 export async function showCachedAnalysis(sessionId) {
   if (!enabled) return;
-  resetAnalysis();
+  // Pass the id explicitly: loadSession assigns loadedSessionId before calling
+  // us, but resetAnalysis also runs from clearPlayer, where it must read null.
+  resetAnalysis(sessionId);
   try {
     const cached = await fetchJson(
       `/api/sessions/${sessionId}/analysis${projectQuery()}`
