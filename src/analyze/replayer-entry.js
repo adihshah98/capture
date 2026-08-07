@@ -1,4 +1,3 @@
-import { Replayer } from 'rrweb';
-import 'rrweb/dist/style.css';
+import { CapturePlayer } from '../player.js';
 
-window.rrweb = { Replayer };
+window.captureAnalyze = { CapturePlayer };
