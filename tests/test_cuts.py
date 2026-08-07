@@ -199,28 +199,77 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
         out = analyze.normalize_cut_analysis(
             {
                 "headline": "  Buyers switch off the default supply size.  ",
-                "path": ["landed on /p at [00:02]", "", 12, None],
-                "stalls": ["40s on the guarantee at [01:10]"],
-                "clicks": ["tapped 'Add to cart' at [00:44]"],
-                "friction": ["cart icon at [00:17] does nothing"],
+                "journey": [
+                    {
+                        "observation": "Landed on /p at [00:02] and scrolled to the FAQ",
+                        "share": "44% (4 of 9)",
+                        "action": "Move the guarantee above the fold",
+                    },
+                    "",
+                    12,
+                    None,
+                ],
+                "attention": [
+                    {"observation": "40s on the guarantee at [01:10]", "share": "56%"}
+                ],
+                "intent": [{"observation": "Tapped 'Add to cart' at [00:44]"}],
+                "blockers": [
+                    {
+                        "observation": "Cart icon at [00:17] does nothing",
+                        "share": "3 of 9",
+                        "action": "Fix the cart icon on mobile",
+                    }
+                ],
                 "caveats": ["only 2 sessions"],
                 "extra_key": "ignored",
             }
         )
         self.assertEqual(out["headline"], "Buyers switch off the default supply size.")
-        self.assertEqual(out["path"], ["landed on /p at [00:02]"])
-        self.assertEqual(out["stalls"], ["40s on the guarantee at [01:10]"])
-        self.assertEqual(out["clicks"], ["tapped 'Add to cart' at [00:44]"])
-        self.assertEqual(out["friction"], ["cart icon at [00:17] does nothing"])
+        self.assertEqual(
+            out["journey"],
+            [
+                {
+                    "observation": "Landed on /p at [00:02] and scrolled to the FAQ",
+                    "share": "44% (4 of 9)",
+                    "action": "Move the guarantee above the fold",
+                }
+            ],
+        )
+        # Absent share/action become empty strings, never missing keys.
+        self.assertEqual(out["attention"][0]["action"], "")
+        self.assertEqual(out["intent"][0]["share"], "")
+        self.assertEqual(out["blockers"][0]["action"], "Fix the cart icon on mobile")
+        # Caveats stay plain strings.
         self.assertEqual(out["caveats"], ["only 2 sessions"])
         self.assertNotIn("extra_key", out)
-        # The two-sided fields are gone, not merely unused.
-        self.assertNotIn("a_distinctive", out)
-        self.assertNotIn("b_distinctive", out)
+
+    def test_every_insight_item_has_all_three_fields(self):
+        """The renderer reads .observation/.share/.action without guarding."""
+        out = analyze.normalize_cut_analysis(
+            {key: [{"observation": "x at [00:01]"}] for key in analyze.CUT_INSIGHT_SECTIONS}
+        )
+        for key in analyze.CUT_INSIGHT_SECTIONS:
+            self.assertEqual(
+                set(out[key][0]), {"observation", "share", "action"}, key
+            )
+
+    def test_an_item_with_no_observation_is_dropped(self):
+        out = analyze.normalize_cut_analysis(
+            {"journey": [{"share": "44%", "action": "do a thing"}, {"observation": "  "}]}
+        )
+        self.assertEqual(out["journey"], [])
+
+    def test_a_bare_string_is_accepted_as_the_observation(self):
+        """The model sometimes falls back to the old flat shape."""
+        out = analyze.normalize_cut_analysis({"attention": ["40s on the guarantee"]})
+        self.assertEqual(
+            out["attention"],
+            [{"observation": "40s on the guarantee", "share": "", "action": ""}],
+        )
 
     def test_every_documented_section_is_present(self):
         out = analyze.normalize_cut_analysis({})
-        for key in ("path", "stalls", "clicks", "friction", "caveats"):
+        for key in analyze.CUT_SECTIONS:
             self.assertEqual(out[key], [], key)
 
     def test_garbage_becomes_an_empty_analysis(self):
@@ -232,16 +281,37 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
 
     def test_long_lists_and_strings_are_capped(self):
         out = analyze.normalize_cut_analysis(
-            {"path": [f"item {i}" for i in range(50)], "headline": "x" * 900}
+            {
+                "journey": [{"observation": f"item {i} at [00:0{i%10}]"} for i in range(50)],
+                "headline": "x" * 900,
+            }
         )
-        self.assertEqual(len(out["path"]), analyze.CUT_ITEMS_PER_SECTION)
+        self.assertEqual(len(out["journey"]), analyze.CUT_ITEMS_PER_SECTION)
         self.assertEqual(len(out["headline"]), 600)
 
+    def test_overlong_fields_are_truncated_not_dropped(self):
+        out = analyze.normalize_cut_analysis(
+            {
+                "journey": [
+                    {
+                        "observation": "o" * 2000,
+                        "share": "s" * 200,
+                        "action": "a" * 2000,
+                    }
+                ]
+            }
+        )
+        item = out["journey"][0]
+        self.assertEqual(len(item["observation"]), 900)
+        self.assertEqual(len(item["share"]), 60)
+        self.assertEqual(len(item["action"]), 400)
+
     def test_junk_entries_do_not_eat_the_item_budget(self):
-        """A list of non-strings must not trip the cap before real items land."""
-        items = [None] * 20 + ["a real item with [00:05]"]
-        out = analyze.normalize_cut_analysis({"friction": items})
-        self.assertEqual(out["friction"], ["a real item with [00:05]"])
+        """A list of non-items must not trip the cap before real ones land."""
+        items = [None] * 20 + [{"observation": "a real item with [00:05]"}]
+        out = analyze.normalize_cut_analysis({"blockers": items})
+        self.assertEqual(len(out["blockers"]), 1)
+        self.assertEqual(out["blockers"][0]["observation"], "a real item with [00:05]")
 
 
 class TestBuildCutAnalysis(unittest.TestCase):
@@ -460,6 +530,39 @@ class TestCutPromptContent(unittest.TestCase):
     def test_a_minority_cluster_is_not_demoted_to_an_anecdote(self):
         prompt = analyze.CUT_PROMPT
         self.assertIn("is a real pattern, not an anecdote", prompt)
+
+    def test_is_written_for_a_marketing_audience(self):
+        prompt = analyze.CUT_PROMPT
+        self.assertIn("MARKETING", prompt)
+        self.assertIn('answer "so what?"', prompt)
+        # The engineer-facing framing this replaced must not creep back.
+        self.assertNotIn("a designer or developer could go change tomorrow", prompt)
+
+    def test_asks_for_shares_as_percentages(self):
+        prompt = analyze.CUT_PROMPT
+        self.assertIn("44% (4 of 9)", prompt)
+        self.assertIn("Marketers think in shares", prompt)
+
+    def test_requires_an_action_per_item(self):
+        prompt = analyze.CUT_PROMPT
+        self.assertIn('"action"', prompt)
+        # Non-actions that would make the field worthless.
+        self.assertIn('Never "investigate further" or "monitor this"', prompt)
+
+    def test_allows_hedged_inference_but_not_asserted_mind_reading(self):
+        """Marketing insight needs interpretation; it still must be marked."""
+        prompt = analyze.CUT_PROMPT
+        self.assertIn("suggests", prompt)
+        self.assertIn("may indicate", prompt)
+        self.assertIn("NOT OK", prompt)
+        # The observed/inferred split has to stay explicit.
+        self.assertIn("Keep observation and interpretation separate", prompt)
+
+    def test_asks_for_the_object_item_shape(self):
+        prompt = analyze.CUT_PROMPT
+        self.assertIn("never a bare string", prompt)
+        for field in ('"observation"', '"share"', '"action"'):
+            self.assertIn(field, prompt)
 
     def test_demands_evidence_in_every_item(self):
         """Depth regression guard: vague items must be explicitly disallowed."""

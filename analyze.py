@@ -593,12 +593,45 @@ def select_rows_by_cut(rows: list, slice_spec: Optional[dict]) -> tuple:
     return [row for row in rows if row_matches_slice(row, spec)], spec
 
 
-CUT_PROMPT = """You describe one group of recorded web sessions for a product team
-that is trying to decide what to change on the site.
+CUT_PROMPT = """You turn recorded web sessions into insights a MARKETING team can
+act on: what these visitors responded to, where they lost interest, which
+messaging and offers carried weight, and what the team should do next.
 
 You receive per-session write-ups, each already grounded in that session's
 replay. Work only from what the write-ups say — never invent a page, a click,
 a number, or an outcome that is not written there.
+
+## Write for a marketer, not an engineer
+
+Your reader plans campaigns, landing pages, offers and creative. They do not
+read replays and will not act on a raw log of clicks and timestamps. Every
+item must answer "so what?" — what does this tell us about these customers,
+and what should we do about it?
+
+  BAD   "Clicked the supply selector at [01:12] and chose '30-Night Supply'."
+  GOOD  "44% (4 of 9) switched off the default '90-Night Supply' to the
+         cheapest option after ~40s on the guarantee — the 90-night default
+         may be anchoring too high for first-time buyers.
+         Action: test '30-Night' as the default, or lead with the guarantee
+         earlier to justify the larger pack."
+
+  BAD   "Sessions from mobile scrolled to the ingredient breakdown."
+  GOOD  "Mobile visitors spent 25-60s on the ingredient breakdown, roughly
+         twice as long as desktop — the scientific detail is doing real work
+         for this segment.
+         Action: keep the ingredient depth on mobile and consider leading
+         Meta creative with the science rather than the discount."
+
+Lead with the customer behaviour and its share, then the reading, then the
+action. Timestamps and quoted labels are still required as EVIDENCE inside
+the observation — they prove the claim — but they are never the point of it.
+
+## Use percentages, not just counts
+
+Marketers think in shares. Give the percentage first with the raw count in
+brackets: "44% (4 of 9)". Round to whole numbers. With fewer than 5 sessions
+a percentage overstates precision, so use "4 of 9 sessions" alone and say the
+evidence is directional.
 
 ## The single most important rule
 
@@ -624,16 +657,18 @@ The same test kills "none of them clicked a CTA" when the group is defined as
 not converting, and "sessions came from campaign X" when X is the filter.
 
 What IS a finding, for the same group:
-  KEEP  "Switched from the default '90-Night Supply' to '30-Night Supply'
-         before buying (4 of 7) — the default may be the wrong anchor."
-  KEEP  "Reached 'Choose your supply' only after the sticky CTA scrolled them
-         there; none reached it by scrolling alone (4 of 7)."
-  KEEP  "Clicked the cart icon at [00:17] and nothing happened (1 of 5)."
+  KEEP  "57% (4 of 7) switched off the default '90-Night Supply' before
+         buying — the default may be anchoring too high."
+  KEEP  "Nobody reached 'Choose your supply' by scrolling; all 4 who got
+         there were carried by the sticky CTA — the offer is effectively
+         invisible without it."
+  KEEP  "Clicked the cart icon at [00:17] and nothing happened (1 of 5) —
+         a broken path to checkout."
 
-The difference: a finding names something specific and CHANGEABLE about the
-page — an element, a default, a position, a broken interaction. If your item
-does not point at something a designer or developer could go change tomorrow,
-it is not worth writing.
+The difference: a finding tells the team something they did not already know
+about these customers, and points at a decision — an offer, a default, a
+message, a placement, a channel, a broken step. If your item does not change
+what someone would do next week, it is not worth writing.
 
 Route unavoidable outcome facts into how they happened, never that they
 happened.
@@ -707,20 +742,23 @@ session here and cannot split anything — skip it and use the rest.)
 - outcome (purchased / reached checkout / did not reach checkout): what did
   the sessions that converted do differently on the page from those that did
   not? This is the most valuable split in the set.
-- device (mobile / desktop): a stall or a dead click on one and not the other
-  usually means a layout or hit-target problem.
-- utm_source and utm_campaign: visitors from different sources often land with
-  different expectations and behave differently on the same page.
+- device (mobile / desktop): the same page often works very differently on
+  each, and mobile and desktop usually deserve different creative.
+- utm_source and utm_campaign: visitors from different sources land with
+  different expectations. A source whose visitors behave differently is a
+  targeting or creative decision, and one of the most actionable splits here.
 
 State the behavioural difference, never the label itself. The labels are given
 to you — that the purchasers purchased, or that the mobile sessions were on
 mobile, is not a finding (see the rule above). What they DID differently is.
 
-  GOOD  "The 4 purchasers all switched off the default '90-Night Supply' at
-         [01:12]-[01:40]; the 5 non-purchasers left the default untouched."
+  GOOD  "All 4 purchasers switched off the default '90-Night Supply'; the 5
+         who did not buy left it untouched — the pack size, not the product,
+         looks like the deciding factor."
   BAD   "Purchased sessions completed a purchase, unlike the others."
-  GOOD  "All 3 mobile sessions rage-clicked the cart icon at ~[00:17]; the 6
-         desktop sessions opened the drawer first time."
+  GOOD  "Meta visitors went straight to price and left within 40s; Google
+         visitors read through the ingredients first — the two channels are
+         arriving with different questions."
   BAD   "Mobile and desktop sessions behaved differently."
 
 When a metadata split shows no behavioural difference, say that plainly — "the
@@ -731,39 +769,59 @@ looking. "They all did X (9 of 9)" is a strong finding when it is true.
 
 ## Output
 
-Return a single JSON object with this exact shape. Each list is a section with
-its own job — do not blur them together:
+Return a single JSON object with this exact shape. Every item in every section
+is an OBJECT with three fields — never a bare string:
 {
-  "headline": "one sentence naming the sharpest finding — the clearest split between clusters, or the strongest shared behaviour when the group is uniform — with the specific evidence for it",
-  "path": ["the route through the site, in order, with [MM:SS] and the sections reached — naming where the group splits into different routes"],
-  "stalls": ["where sessions sat on one view — what was on screen at the time, and for how long — noting who stalled and who did not"],
-  "clicks": ["what they clicked, quoting the label, and what the click did — or failed to do — including clicks only one cluster made"],
-  "friction": ["what went wrong: dead clicks, rage clicks, unexpected redirects, modals, repeated attempts — with the element and timestamp"],
-  "caveats": ["what these sessions cannot tell you, and any single-session oddity worth a look"]
+  "headline": "one sentence a marketer could put at the top of a deck: the sharpest finding, with its share and what it means",
+  "journey": [
+    {
+      "observation": "what these visitors did, with the evidence — quoted labels, [MM:SS], durations — and one hedged reading of what it suggests",
+      "share": "44% (4 of 9)",
+      "action": "what the team should do about it: an offer, a message, a placement, a channel, a test"
+    }
+  ],
+  "attention": [{"observation": "...", "share": "...", "action": "..."}],
+  "intent": [{"observation": "...", "share": "...", "action": "..."}],
+  "blockers": [{"observation": "...", "share": "...", "action": "..."}],
+  "caveats": ["plain strings here — what these sessions cannot tell you, and any single-session oddity worth a look"]
 }
 
 What each section is for:
-- "path" is the shape of the journey. Where did they enter, what did they
-  reach, in what order, and where did each cluster stop? Cite [MM:SS]. If the
-  group took two different routes, that split belongs here first.
-- "stalls" is attention held or lost. Name the section or element on screen
-  and how long the page sat there. A stall on a guarantee means something
-  different from a stall on a form. Say which sessions stalled — a stall that
-  only half the group had is more informative than an average dwell time.
-- "clicks" is intent meeting the interface. Quote the button or link label
-  verbatim, then say what happened next. A click that did nothing belongs
-  here AND in friction. A control only one cluster ever touched is a finding.
-- "friction" is where the site failed them. This is the most valuable section:
-  every rage click, dead click, unexpected redirect, modal and repeated
-  attempt a write-up mentions belongs here with its element and timestamp. An
-  empty friction list must mean the write-ups describe none — not that you
-  did not look.
+- "journey" — how they moved through the site and where they dropped off.
+  Which entry points and routes worked, where each cluster stopped, and what
+  that says about the landing experience.
+- "attention" — what held them and what lost them. Which sections, claims or
+  offers they sat on, and for how long. This is where messaging and creative
+  insight lives: a 40s stall on a guarantee tells you what is doing the
+  selling.
+- "intent" — the moments that show buying intent or hesitation: the options
+  they compared, the defaults they changed, the controls they used, what they
+  did just before converting or leaving.
+- "blockers" — what stopped them: dead clicks, rage clicks, unexpected
+  redirects, modals, repeated attempts, confusing steps. Every one a write-up
+  mentions belongs here, because each is money left on the table. An empty
+  blockers list must mean the write-ups describe none — not that you did not
+  look.
+- "caveats" — plain strings, no objects. Sample limits and one-off oddities.
+
+Writing the three fields:
+- "observation" carries the evidence AND the reading. It must contain at least
+  one concrete anchor from the write-ups — a quoted label or heading, an
+  [MM:SS], a duration, or a scroll position — followed by what it suggests.
+- "share" is the size of the pattern: "44% (4 of 9)". Below 5 sessions use
+  "4 of 9 sessions" with no percentage. Use "9 of 9" for the whole group.
+  For a split, describe the side this item is about.
+- "action" is a concrete next step for a marketing team — test this default,
+  move this proof point up, lead this channel with that message, fix this
+  broken step. Never "investigate further" or "monitor this": if the evidence
+  does not support a real recommendation, leave the action as an empty string
+  and keep the observation.
 
 Rules:
-- Cite how many sessions back each item, e.g. "3 of 5 sessions". Count only
-  sessions whose write-up actually supports the point.
-- With fewer than 3 sessions, say the evidence is thin rather than asserting a
-  pattern. Small samples are the normal case here.
+- Every item's "share" must reflect only the sessions whose write-up actually
+  supports the point. Do not round a minority up into "most".
+- With fewer than 3 sessions, say the evidence is thin in the observation
+  rather than asserting a pattern. Small samples are the normal case here.
 - A behaviour visible in only 1 session is an anecdote — put it in caveats
   rather than stating it as a group pattern. A specific, surprising anecdote
   is worth more there than a vague pattern would be anywhere else. Friction is
@@ -771,16 +829,27 @@ Rules:
   friction on its own. This rule is about isolated sessions only — 2 or more
   sessions behaving the same way is a cluster and belongs in its section with
   a count, however small a share of the group it is.
-- The write-ups describe what was on screen, not where anyone looked. Say
-  "reached", "was shown", "scrolled past" — never "read", "noticed", "focused
-  on", or "was interested in".
+- Keep observation and interpretation separate, and mark which is which.
+  The write-ups describe what was on screen, not where anyone looked, so state
+  the OBSERVED part in those terms: "reached", "was shown", "scrolled past",
+  "sat 40s on" — never "read", "noticed", or "was interested in" as if it were
+  fact. You may then INFER what it suggests, provided the inference is hedged
+  and follows the evidence:
+    OK      "Sat 40s on the ingredient breakdown (56%) — suggests the
+             scientific detail is carrying weight for this segment."
+    OK      "...may indicate the price is the sticking point, not the claim."
+    NOT OK  "Users read the ingredients and were convinced by the science."
+  One hedged reading per item is plenty. An item that is all inference and no
+  evidence is worthless — the evidence is what makes the reading credible.
 - Aim for 3-8 items in each section, as many as the write-ups genuinely
   support. Prefer more specific items over fewer general ones: two precise
   observations are worth more than one that merges them and loses the detail.
   Never merge two distinct observations into one item to save room.
-- Every item must carry at least one [MM:SS] timestamp, a quoted label or
-  heading, a duration, or a scroll position. An item with none of these is
-  too vague to keep — cut it and write a sharper one.
+- Every "observation" must carry at least one [MM:SS] timestamp, a quoted
+  label or heading, a duration, or a scroll position. An observation with none
+  of these is too vague to keep — cut it and write a sharper one.
+- Two different items must not recommend the same action in different words.
+  If two observations lead to one action, merge them into a single item.
 - A section may be empty only when the write-ups genuinely say nothing about
   it. Empty because you ran out of room is not acceptable.
 - No preamble, no markdown — JSON only."""
@@ -855,7 +924,10 @@ def _given_facts(spec: dict) -> str:
     return "## Already known — never report these as findings\n\n" + "\n".join(lines)
 
 
-CUT_SECTIONS = ("path", "stalls", "clicks", "friction", "caveats")
+# Insight sections hold {observation, share, action} objects; caveats stays a
+# plain list of strings, since a sample limit has no share and no action.
+CUT_INSIGHT_SECTIONS = ("journey", "attention", "intent", "blockers")
+CUT_SECTIONS = CUT_INSIGHT_SECTIONS + ("caveats",)
 # The prompt asks for 3-8 items; keep a little headroom so a good extra item
 # is kept rather than silently dropped.
 CUT_ITEMS_PER_SECTION = 10
@@ -868,23 +940,50 @@ def empty_cut_analysis(error: Optional[str] = None) -> dict:
     return out
 
 
+def _clean_text(value, limit: int) -> str:
+    """Trimmed string, or "" for anything that is not usable text."""
+    return value.strip()[:limit] if isinstance(value, str) and value.strip() else ""
+
+
+def _insight_item(item) -> Optional[dict]:
+    """One {observation, share, action}, or None when there is no observation.
+
+    A bare string is accepted as the observation: the model occasionally falls
+    back to the old flat shape, and an item with no action still carries the
+    finding. Share and action are optional and render only when present.
+    """
+    if isinstance(item, str):
+        observation = _clean_text(item, 900)
+        return {"observation": observation, "share": "", "action": ""} if observation else None
+    if not isinstance(item, dict):
+        return None
+    # Generous limits: a good observation quotes labels and cites timestamps,
+    # so it runs long. Truncating it would strip exactly the useful part.
+    observation = _clean_text(item.get("observation"), 900)
+    if not observation:
+        return None
+    return {
+        "observation": observation,
+        "share": _clean_text(item.get("share"), 60),
+        "action": _clean_text(item.get("action"), 400),
+    }
+
+
 def normalize_cut_analysis(raw) -> dict:
     """Coerce the model's JSON into the documented shape, dropping anything else."""
     data = raw if isinstance(raw, dict) else {}
     out = empty_cut_analysis()
-    headline = data.get("headline")
-    if isinstance(headline, str):
-        out["headline"] = headline.strip()[:600]
+    out["headline"] = _clean_text(data.get("headline"), 600)
     for key in CUT_SECTIONS:
         items = data.get(key)
         if not isinstance(items, list):
             continue
         clean = []
         for item in items:
-            # Generous: a good item quotes labels and cites timestamps, so it
-            # runs long. Truncating it would strip exactly the useful part.
-            if isinstance(item, str) and item.strip():
-                clean.append(item.strip()[:900])
+            # Caveats stay plain strings; the insight sections are objects.
+            entry = _clean_text(item, 900) if key == "caveats" else _insight_item(item)
+            if entry:
+                clean.append(entry)
             if len(clean) >= CUT_ITEMS_PER_SECTION:
                 break
         out[key] = clean

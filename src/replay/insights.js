@@ -389,14 +389,26 @@ function renderCutPlaceholder(message) {
   cutBodyEl.innerHTML = `<div class="insights-placeholder">${escapeHtml(message)}</div>`;
 }
 
-/** Section order mirrors the prompt: journey, attention, intent, failure. */
+/** Section order mirrors the prompt: journey, attention, intent, blockers. */
 const CUT_SECTIONS = [
-  { key: 'path', title: 'The path they took', empty: 'The write-ups do not describe a common route.' },
-  { key: 'stalls', title: 'Where they slowed down', empty: 'No stalls stood out across these sessions.' },
-  { key: 'clicks', title: 'What they clicked', empty: 'No clicks were common across these sessions.' },
-  { key: 'friction', title: 'Friction', cls: 'friction', empty: 'No friction was reported in these write-ups.' },
+  { key: 'journey', title: 'How they moved through the site', empty: 'The write-ups do not describe a common route.' },
+  { key: 'attention', title: 'What held their attention', empty: 'Nothing held attention consistently across these sessions.' },
+  { key: 'intent', title: 'Signals of intent', empty: 'No consistent buying signals stood out.' },
+  { key: 'blockers', title: 'What stopped them', cls: 'friction', empty: 'No blockers were reported in these write-ups.' },
   { key: 'caveats', title: 'Worth checking', cls: 'caveats' },
 ];
+
+/** An insight item: observation, its share of the group, and what to do. */
+function insightItem(item) {
+  if (typeof item === 'string') return `<li>${escapeHtml(item)}</li>`;
+  const share = item.share
+    ? `<span class="cut-share">${escapeHtml(item.share)}</span>`
+    : '';
+  const action = item.action
+    ? `<p class="cut-action">${escapeHtml(item.action)}</p>`
+    : '';
+  return `<li>${share}${escapeHtml(item.observation || '')}${action}</li>`;
+}
 
 function renderCut(body) {
   const analysis = body.analysis || {};
@@ -414,12 +426,12 @@ function renderCut(body) {
     const items = analysis[key] || [];
     // Caveats have no empty copy: an absent caveat list is not worth a block.
     if (!items.length && !empty) return '';
-    const count = key === 'path' ? `<span class="n">(n=${n})</span>${thin}` : '';
+    const count = key === 'journey' ? `<span class="n">(n=${n})</span>${thin}` : '';
     return `<div class="cut-block ${cls || ''}">
       <h4>${escapeHtml(title)}${count}</h4>
       ${
         items.length
-          ? `<ul>${items.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
+          ? `<ul>${items.map(insightItem).join('')}</ul>`
           : `<p class="cut-empty">${escapeHtml(empty)}</p>`
       }
     </div>`;
