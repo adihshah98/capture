@@ -23,6 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+import analyze
+
 @asynccontextmanager
 async def lifespan(_app):
 
@@ -699,6 +701,46 @@ def session_chunk(request: Request, session_id: str, chunk_name: str, project: O
     return FileResponse(
         path, media_type="application/json", headers={"Cache-Control": "max-age=86400"}
     )
+
+_analysis_locks: dict = {}
+
+@app.get("/api/sessions/{session_id}/analysis")
+def get_analysis(request: Request, session_id: str, project: Optional[str] = Query(None)):
+    require_read_access(request, project)
+    session_dir = resolve_session(session_id, project)
+    cached = analyze.read_analysis(session_dir)
+    if not cached:
+        raise ApiError(404, "not analyzed yet")
+    return cached
+
+@app.post("/api/sessions/{session_id}/analysis")
+async def create_analysis(
+    request: Request,
+    session_id: str,
+    project: Optional[str] = Query(None),
+    force: bool = Query(False),
+):
+    require_read_access(request, project)
+    if not analyze.ANALYSIS_ENABLED:
+        raise ApiError(503, "analysis is not configured on this server")
+    session_dir = resolve_session(session_id, project)
+    chunks = chunk_files(session_dir)
+    if not chunks:
+        raise ApiError(400, "this session has no chunks to analyze")
+
+    # One reconstruction per session at a time: it launches a browser, and a
+    # double-click on the button should wait for the first run, not start a second.
+    lock = _analysis_locks.setdefault(session_dir, asyncio.Lock())
+    async with lock:
+        try:
+            return await analyze.analyze_session(
+                session_dir, [c.name for c in chunks], force=force
+            )
+        except RuntimeError as exc:
+            raise ApiError(500, str(exc))
+        finally:
+            if not lock.locked():
+                _analysis_locks.pop(session_dir, None)
 
 def sweep_expired_sessions() -> int:
 
