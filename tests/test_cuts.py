@@ -1,7 +1,9 @@
-"""Cut analysis: splitting a cohort, keying the cache, shaping the model's reply."""
+"""Cut analysis: filtering a cohort, keying the cache, shaping the model's reply."""
 
 import asyncio
+import inspect
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -197,14 +199,18 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
         out = analyze.normalize_cut_analysis(
             {
                 "headline": "  Buyers switch off the default supply size.  ",
-                "patterns": ["3 of 5 use the size chart", "", 12, None],
+                "path": ["landed on /p at [00:02]", "", 12, None],
+                "stalls": ["40s on the guarantee at [01:10]"],
+                "clicks": ["tapped 'Add to cart' at [00:44]"],
                 "friction": ["cart icon at [00:17] does nothing"],
                 "caveats": ["only 2 sessions"],
                 "extra_key": "ignored",
             }
         )
         self.assertEqual(out["headline"], "Buyers switch off the default supply size.")
-        self.assertEqual(out["patterns"], ["3 of 5 use the size chart"])
+        self.assertEqual(out["path"], ["landed on /p at [00:02]"])
+        self.assertEqual(out["stalls"], ["40s on the guarantee at [01:10]"])
+        self.assertEqual(out["clicks"], ["tapped 'Add to cart' at [00:44]"])
         self.assertEqual(out["friction"], ["cart icon at [00:17] does nothing"])
         self.assertEqual(out["caveats"], ["only 2 sessions"])
         self.assertNotIn("extra_key", out)
@@ -212,19 +218,30 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
         self.assertNotIn("a_distinctive", out)
         self.assertNotIn("b_distinctive", out)
 
+    def test_every_documented_section_is_present(self):
+        out = analyze.normalize_cut_analysis({})
+        for key in ("path", "stalls", "clicks", "friction", "caveats"):
+            self.assertEqual(out[key], [], key)
+
     def test_garbage_becomes_an_empty_analysis(self):
         for junk in (None, [], "text", {"headline": 42}):
             out = analyze.normalize_cut_analysis(junk)
             self.assertEqual(out["headline"], "")
-            self.assertEqual(out["patterns"], [])
-            self.assertEqual(out["friction"], [])
+            for key in analyze.CUT_SECTIONS:
+                self.assertEqual(out[key], [], key)
 
     def test_long_lists_and_strings_are_capped(self):
         out = analyze.normalize_cut_analysis(
-            {"patterns": [f"item {i}" for i in range(50)], "headline": "x" * 900}
+            {"path": [f"item {i}" for i in range(50)], "headline": "x" * 900}
         )
-        self.assertEqual(len(out["patterns"]), 8)
+        self.assertEqual(len(out["path"]), analyze.CUT_ITEMS_PER_SECTION)
         self.assertEqual(len(out["headline"]), 600)
+
+    def test_junk_entries_do_not_eat_the_item_budget(self):
+        """A list of non-strings must not trip the cap before real items land."""
+        items = [None] * 20 + ["a real item with [00:05]"]
+        out = analyze.normalize_cut_analysis({"friction": items})
+        self.assertEqual(out["friction"], ["a real item with [00:05]"])
 
 
 class TestBuildCutAnalysis(unittest.TestCase):
@@ -349,6 +366,25 @@ class TestGivenFacts(unittest.TestCase):
         self.assertIn("Every session in this group purchased", seen["given"])
 
 
+class TestCutOutputBudget(unittest.TestCase):
+    """Five sections of concrete items need room; too small a cap summarises."""
+
+    def test_the_answer_has_room_beyond_the_thinking_budget(self):
+        source = inspect.getsource(analyze.call_gemini_cut)
+        max_out = int(re.search(r"max_output_tokens=(\d+)", source).group(1))
+        thinking = int(re.search(r"thinking_budget=(\d+)", source).group(1))
+        answer_room = max_out - thinking
+        sections = len(analyze.CUT_SECTIONS)
+        # ~225 tokens for a 900-char item; the prompt asks for at least 3 each.
+        needed = sections * 3 * 225
+        self.assertGreater(
+            answer_room,
+            needed,
+            f"{answer_room} tokens of answer room cannot hold {sections} "
+            f"sections x 3 concrete items (~{needed})",
+        )
+
+
 class TestCutPromptContent(unittest.TestCase):
     """The prompt has to keep asking for the things the first version lost."""
 
@@ -364,6 +400,15 @@ class TestCutPromptContent(unittest.TestCase):
     def test_names_friction_as_the_priority(self):
         self.assertIn("rage click", analyze.CUT_PROMPT.lower())
 
+    def test_demands_evidence_in_every_item(self):
+        """Depth regression guard: vague items must be explicitly disallowed."""
+        prompt = analyze.CUT_PROMPT
+        self.assertIn("[MM:SS]", prompt)
+        self.assertIn("too vague to keep", prompt)
+        # An item budget that is too small is what drove the summarising.
+        self.assertIn("3-8 items", prompt)
+        self.assertNotIn("2-5 items", prompt)
+
     def test_keeps_banning_the_filter_restatement(self):
         """The tautology guard has to survive the move to a single group."""
         prompt = analyze.CUT_PROMPT
@@ -373,8 +418,9 @@ class TestCutPromptContent(unittest.TestCase):
 
     def test_asks_for_the_single_group_schema(self):
         prompt = analyze.CUT_PROMPT
-        for field in ('"headline"', '"patterns"', '"friction"', '"caveats"'):
-            self.assertIn(field, prompt)
+        self.assertIn('"headline"', prompt)
+        for key in analyze.CUT_SECTIONS:
+            self.assertIn(f'"{key}"', prompt)
         # Nothing should still be asking the model to contrast two sides.
         self.assertNotIn("a_distinctive", prompt)
         self.assertNotIn("b_distinctive", prompt)

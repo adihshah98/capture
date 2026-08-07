@@ -661,35 +661,62 @@ In every item, wherever the write-ups give it, include:
 Numbers and quoted labels are what makes an item worth reading. An item with
 none of them is almost certainly too vague to keep.
 
+You are reading several write-ups at once, so you can see what one session
+alone cannot: the same stall on the same section, the same dead click, the
+same abandoned step. Name those specifically. Resist the pull toward a tidy
+summary — the team already knows the shape of their funnel, and a sentence
+that would be true of any e-commerce site tells them nothing.
+
 ## Output
 
-Return a single JSON object with this exact shape:
+Return a single JSON object with this exact shape. Each list is a section with
+its own job — do not blur them together:
 {
   "headline": "one sentence naming the sharpest thing these sessions have in common, with the specific evidence for it",
-  "patterns": ["behaviour recurring across these sessions, with the concrete detail and counts"],
-  "friction": ["something that went wrong on the page — dead click, rage click, stall, unexpected redirect — with the element and timestamp"],
+  "path": ["the route through the site these sessions took, in order, with [MM:SS] and the pages and sections they reached"],
+  "stalls": ["where sessions sat on one view — what was on screen at the time, and for how long"],
+  "clicks": ["what they clicked, quoting the label, and what the click did — or failed to do"],
+  "friction": ["what went wrong: dead clicks, rage clicks, unexpected redirects, modals, repeated attempts — with the element and timestamp"],
   "caveats": ["what these sessions cannot tell you, and any single-session oddity worth a look"]
 }
+
+What each section is for:
+- "path" is the shape of the journey. Where did they enter, what did they
+  reach, in what order, and where did most of them stop? Cite [MM:SS].
+- "stalls" is attention held or lost. Name the section or element on screen
+  and how long the page sat there. A stall on a guarantee means something
+  different from a stall on a form.
+- "clicks" is intent meeting the interface. Quote the button or link label
+  verbatim, then say what happened next. A click that did nothing belongs
+  here AND in friction.
+- "friction" is where the site failed them. This is the most valuable section:
+  every rage click, dead click, unexpected redirect, modal and repeated
+  attempt a write-up mentions belongs here with its element and timestamp. An
+  empty friction list must mean the write-ups describe none — not that you
+  did not look.
 
 Rules:
 - Cite how many sessions back each item, e.g. "3 of 5 sessions". Count only
   sessions whose write-up actually supports the point.
 - With fewer than 3 sessions, say the evidence is thin rather than asserting a
   pattern. Small samples are the normal case here.
-- A behaviour visible in only 1 session is an anecdote — put it in caveats,
-  not in patterns. A specific, surprising anecdote is worth more there than a
-  vague pattern would be anywhere else. Friction is the exception: a single
-  dead click or rage click is worth reporting in friction on its own.
-- Friction is the most valuable thing you can find: rage clicks, dead clicks,
-  unexpected redirects, modals, long stalls, repeated attempts. Every one a
-  write-up mentions belongs in "friction", with the exact element and
-  timestamp. An empty friction list should mean the write-ups describe none,
-  not that you did not look.
+- A behaviour visible in only 1 session is an anecdote — put it in caveats
+  rather than stating it as a group pattern. A specific, surprising anecdote
+  is worth more there than a vague pattern would be anywhere else. Friction is
+  the exception: a single dead click or rage click is worth reporting in
+  friction on its own.
 - The write-ups describe what was on screen, not where anyone looked. Say
   "reached", "was shown", "scrolled past" — never "read", "noticed", "focused
   on", or "was interested in".
-- 2-5 items per list. Empty lists are fine when there is nothing solid; a
-  short list of specific items beats a long list of vague ones.
+- Aim for 3-8 items in each section, as many as the write-ups genuinely
+  support. Prefer more specific items over fewer general ones: two precise
+  observations are worth more than one that merges them and loses the detail.
+  Never merge two distinct observations into one item to save room.
+- Every item must carry at least one [MM:SS] timestamp, a quoted label or
+  heading, a duration, or a scroll position. An item with none of these is
+  too vague to keep — cut it and write a sharper one.
+- A section may be empty only when the write-ups genuinely say nothing about
+  it. Empty because you ran out of room is not acceptable.
 - No preamble, no markdown — JSON only."""
 
 
@@ -742,13 +769,14 @@ def _given_facts(spec: dict) -> str:
     return "## Already known — never report these as findings\n\n" + "\n".join(lines)
 
 
+CUT_SECTIONS = ("path", "stalls", "clicks", "friction", "caveats")
+# The prompt asks for 3-8 items; keep a little headroom so a good extra item
+# is kept rather than silently dropped.
+CUT_ITEMS_PER_SECTION = 10
+
+
 def empty_cut_analysis(error: Optional[str] = None) -> dict:
-    out = {
-        "headline": "",
-        "patterns": [],
-        "friction": [],
-        "caveats": [],
-    }
+    out = {"headline": "", **{key: [] for key in CUT_SECTIONS}}
     if error:
         out["error"] = error
     return out
@@ -761,7 +789,7 @@ def normalize_cut_analysis(raw) -> dict:
     headline = data.get("headline")
     if isinstance(headline, str):
         out["headline"] = headline.strip()[:600]
-    for key in ("patterns", "friction", "caveats"):
+    for key in CUT_SECTIONS:
         items = data.get(key)
         if not isinstance(items, list):
             continue
@@ -771,7 +799,7 @@ def normalize_cut_analysis(raw) -> dict:
             # runs long. Truncating it would strip exactly the useful part.
             if isinstance(item, str) and item.strip():
                 clean.append(item.strip()[:900])
-            if len(clean) >= 8:
+            if len(clean) >= CUT_ITEMS_PER_SECTION:
                 break
         out[key] = clean
     return out
@@ -801,9 +829,12 @@ async def call_gemini_cut(
         config=types.GenerateContentConfig(
             system_instruction=CUT_PROMPT,
             # Concrete items carry timestamps, px depths and quoted labels, so
-            # they run far longer than the abstracted one-liners this replaced.
-            max_output_tokens=4096,
-            thinking_config=types.ThinkingConfig(thinking_budget=2048),
+            # they run far longer than abstracted one-liners. Five sections of
+            # them did not fit in the old 4096 — the model hit the ceiling and
+            # summarised to fit, which is exactly the failure being fixed.
+            # Thinking is budgeted separately from the answer, so both grew.
+            max_output_tokens=12288,
+            thinking_config=types.ThinkingConfig(thinking_budget=4096),
             temperature=0.2,
             response_mime_type="application/json",
         ),

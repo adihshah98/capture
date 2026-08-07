@@ -297,14 +297,6 @@ async function retrySession(sessionId, btn) {
   }
 }
 
-function cutList(title, items, extraClass = '') {
-  if (!items || !items.length) return '';
-  return `<div class="cut-block ${extraClass}">
-    <h4>${escapeHtml(title)}</h4>
-    <ul>${items.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>
-  </div>`;
-}
-
 const HINT_TEXT = 'Leave every filter on "any" to read the whole cohort.';
 
 const FACET_LABELS = {
@@ -397,6 +389,15 @@ function renderCutPlaceholder(message) {
   cutBodyEl.innerHTML = `<div class="insights-placeholder">${escapeHtml(message)}</div>`;
 }
 
+/** Section order mirrors the prompt: journey, attention, intent, failure. */
+const CUT_SECTIONS = [
+  { key: 'path', title: 'The path they took', empty: 'The write-ups do not describe a common route.' },
+  { key: 'stalls', title: 'Where they slowed down', empty: 'No stalls stood out across these sessions.' },
+  { key: 'clicks', title: 'What they clicked', empty: 'No clicks were common across these sessions.' },
+  { key: 'friction', title: 'Friction', cls: 'friction', empty: 'No friction was reported in these write-ups.' },
+  { key: 'caveats', title: 'Worth checking', cls: 'caveats' },
+];
+
 function renderCut(body) {
   const analysis = body.analysis || {};
   const n = body.n || 0;
@@ -409,14 +410,20 @@ function renderCut(body) {
     ? `<div class="cut-headline">${escapeHtml(analysis.headline)}</div>`
     : '';
 
-  const patterns = `<div class="cut-block">
-    <h4>What these sessions did<span class="n">(n=${n})</span>${thin}</h4>
-    ${
-      (analysis.patterns || []).length
-        ? `<ul>${analysis.patterns.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
-        : '<p class="cut-empty">No recurring behaviour stood out across these sessions.</p>'
-    }
-  </div>`;
+  const sections = CUT_SECTIONS.map(({ key, title, cls, empty }) => {
+    const items = analysis[key] || [];
+    // Caveats have no empty copy: an absent caveat list is not worth a block.
+    if (!items.length && !empty) return '';
+    const count = key === 'path' ? `<span class="n">(n=${n})</span>${thin}` : '';
+    return `<div class="cut-block ${cls || ''}">
+      <h4>${escapeHtml(title)}${count}</h4>
+      ${
+        items.length
+          ? `<ul>${items.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
+          : `<p class="cut-empty">${escapeHtml(empty)}</p>`
+      }
+    </div>`;
+  }).join('');
 
   const meta = `<p class="cut-meta">
     Read from ${n} analyzed session write-up(s) in this cohort.
@@ -424,12 +431,7 @@ function renderCut(body) {
     Cohort membership is fixed, so this cut is cached and will not be recomputed.
   </p>`;
 
-  cutBodyEl.innerHTML =
-    headline +
-    patterns +
-    cutList('Friction', analysis.friction, 'friction') +
-    cutList('Worth checking', analysis.caveats, 'caveats') +
-    meta;
+  cutBodyEl.innerHTML = headline + sections + meta;
 }
 
 async function pollCut() {
