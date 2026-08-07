@@ -61,23 +61,16 @@ function renderMarkdown(md) {
 function renderResult(result) {
   const parts = [renderMarkdown(result.text || '')];
 
-  if (result.sections && result.sections.length) {
-    const rows = result.sections
-      .map(
-        (s) =>
-          `<tr><td class="k">${escapeHtml(s.label || '')}</td><td>${s.seconds}s</td></tr>`
-      )
-      .join('');
-    parts.push(
-      `<h4>Measured time on screen</h4><table class="dwell">${rows}</table>`
-    );
-  }
   for (const warning of result.warnings || []) {
     parts.push(`<p class="warn">${escapeHtml(warning)}</p>`);
   }
   parts.push(
-    '<p class="note">Time on screen is measured from scroll position with idle ' +
-      'gaps removed. It shows what was displayed, not where the visitor looked. ' +
+    '<p class="note">' +
+      (result.frame_count
+        ? `Read from ${result.frame_count} frames sampled about once per second ` +
+          'through the active parts of the session. '
+        : '') +
+      'Frames show what was displayed, not where the visitor looked. ' +
       `Written by ${escapeHtml(result.model || 'the model')}.</p>`
   );
   bodyEl.innerHTML = parts.join('');
@@ -118,7 +111,7 @@ async function runAnalysis() {
   running = true;
   setButton('Analyzing…', true);
   bodyEl.innerHTML =
-    '<p class="empty">Rebuilding the page and measuring attention. This takes a few moments.</p>';
+    '<p class="empty">Replaying the session and sampling frames. This takes a few moments.</p>';
 
   const query = projectQuery();
   const url = `/api/sessions/${sessionId}/analysis${query ? `${query}&force=1` : '?force=1'}`;
