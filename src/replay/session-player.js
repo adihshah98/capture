@@ -128,6 +128,16 @@ export async function loadSession(sessionId) {
   playWindow(sessionId, byWindow.get(defaultWindow), defaultWindow, seq, true);
 }
 
+function dedupe(events) {
+  const seen = new Set();
+  return events.filter((e) => {
+    const key = `${e.timestamp}:${e.type}:${JSON.stringify(e.data)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function dropUnrenderable(events) {
   const out = [];
   let dead = true;
@@ -167,9 +177,19 @@ async function playWindow(sessionId, chunks, windowKey, seq, showOrder) {
 
   let loaded = 0;
   loadProgressEl.textContent = `loading 0/${chunks.length} chunks…`;
+  const fetchChunk = async (name) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fetchJson(`/api/sessions/${sessionId}/chunks/${name}${projectQuery()}`);
+      } catch (err) {
+        if (attempt >= 2) throw err;
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      }
+    }
+  };
   const results = await Promise.all(
     chunks.map((c) =>
-      fetchJson(`/api/sessions/${sessionId}/chunks/${c.name}${projectQuery()}`)
+      fetchChunk(c.name)
         .then((chunk) => {
           loadProgressEl.textContent = `loading ${++loaded}/${chunks.length} chunks…`;
           return chunk;
@@ -178,7 +198,10 @@ async function playWindow(sessionId, chunks, windowKey, seq, showOrder) {
     )
   );
   if (seq !== loadSeq) return;
-  loadProgressEl.textContent = '';
+  const missing = results.filter((r) => r === null).length;
+  loadProgressEl.textContent = missing
+    ? `${missing} chunk${missing > 1 ? 's' : ''} failed to load — replay may be incomplete`
+    : '';
 
   const allEvents = [];
   const navigations = [];
@@ -191,7 +214,7 @@ async function playWindow(sessionId, chunks, windowKey, seq, showOrder) {
     allEvents.push(...events);
   }
   allEvents.sort((a, b) => a.timestamp - b.timestamp);
-  const playable = dropUnrenderable(allEvents);
+  const playable = dropUnrenderable(dedupe(allEvents));
 
   const session = allSessions.find((s) => s.session_id === sessionId);
   if (allEvents.length < 2) {
@@ -205,24 +228,30 @@ async function playWindow(sessionId, chunks, windowKey, seq, showOrder) {
   setSyncStart(allEvents[0].timestamp);
   renderTimeline(allEvents, navigations, session, showOrder);
   let lastHashWrite = 0;
-  player = new CapturePlayer({
-    events: playable,
-    mount: stageEl,
-    speed: currentSpeed(),
-    skipInactive: skipEnabled(),
-    onTime: (ms) => {
-      updateScrubber(ms);
-      syncTimeline(ms);
-      const now = Date.now();
-      if (now - lastHashWrite > 2000) {
-        lastHashWrite = now;
-        writeHash({ p: currentProject, s: sessionId, t: Math.floor(ms / 1000) });
-      }
-    },
-    onState: updatePlayState,
-    onSkip: showSkipNote,
-    onAssetErrors: showAssetErrors,
-  });
+  try {
+    player = new CapturePlayer({
+      events: playable,
+      mount: stageEl,
+      speed: currentSpeed(),
+      skipInactive: skipEnabled(),
+      onTime: (ms) => {
+        updateScrubber(ms);
+        syncTimeline(ms);
+        const now = Date.now();
+        if (now - lastHashWrite > 2000) {
+          lastHashWrite = now;
+          writeHash({ p: currentProject, s: sessionId, t: Math.floor(ms / 1000) });
+        }
+      },
+      onState: updatePlayState,
+      onSkip: showSkipNote,
+      onAssetErrors: showAssetErrors,
+    });
+  } catch (err) {
+    console.error('capture: replayer failed to start', err);
+    showPlayerMessage('This recording could not be rendered — its event data is malformed.');
+    return;
+  }
   controlsEl.hidden = false;
   renderScrubberChrome(player);
   updateScrubber(0);

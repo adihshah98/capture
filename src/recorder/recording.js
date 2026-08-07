@@ -96,6 +96,10 @@ export function startRecording() {
       pushEvent(event);
     },
     checkoutEveryNms: config.checkoutEveryNms,
+    errorHandler(err) {
+      console.warn('capture: rrweb internal error, recording continues', err);
+      return true;
+    },
 
     maskAllInputs: true,
     blockClass: 'capture-block',

@@ -248,7 +248,8 @@ export class CapturePlayer {
         want = seg.end;
       }
     }
-    const target = this.clampRenderable(want);
+    let target = this.clampRenderable(want);
+    if (this.snapshotOffsets.includes(target)) target += 1;
     const resume = opts.play != null ? opts.play : this.playing;
     if (target >= this.duration - END_EPSILON_MS && !resume) {
       this.finish();
