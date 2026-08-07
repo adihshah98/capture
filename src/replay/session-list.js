@@ -1,6 +1,7 @@
 import { currentProject, fetchJson, projectQuery, setProject } from './api.js';
 import { formatBytes, formatDuration, formatTime, pagePath } from './format.js';
 import { clearPlayer, loadSession, loadedSessionId } from './session-player.js';
+import { setAnalysisEnabled } from './analysis.js';
 
 const projectSelectEl = document.getElementById('project-select');
 const sessionListEl = document.getElementById('session-list');
@@ -33,6 +34,7 @@ async function loadProjects() {
     return false;
   }
   const projects = body.projects || [];
+  setAnalysisEnabled(body.analysis_enabled);
   if (body.email) {
     accountEmailEl.textContent = body.email;
     accountEl.hidden = false;

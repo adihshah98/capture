@@ -94,6 +94,23 @@
     #timeline-list li.future { opacity: 0.4; }
     #timeline-list li.current { background: #eef2ff; box-shadow: inset 2px 0 0 #4f46e5; }
     .empty { color: #9ca3af; padding: 12px 14px; font-size: 13px; }
+    #analysis-panel { flex: none; max-height: 45%; overflow-y: auto; border-top: 1px solid #e3e5e8; }
+    .analysis-head { display: flex; align-items: center; gap: 8px; padding-right: 12px; }
+    .analysis-head h2 { flex: 1; }
+    #analyze-btn { flex: none; font-size: 11px; padding: 4px 10px; border-radius: 6px; border: 1px solid #4f46e5; background: #4f46e5; color: #fff; cursor: pointer; }
+    #analyze-btn:hover:not(:disabled) { background: #4338ca; }
+    #analyze-btn:disabled { background: #f0f2f5; border-color: #d0d3d8; color: #9ca3af; cursor: default; }
+    #analysis-body { padding: 0 14px 12px; font-size: 13px; line-height: 1.5; }
+    #analysis-body h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; margin: 12px 0 4px; }
+    #analysis-body p { margin: 0 0 8px; }
+    #analysis-body ul { margin: 0 0 8px; padding-left: 18px; }
+    #analysis-body li { margin-bottom: 3px; }
+    #analysis-body .empty { padding: 8px 0; }
+    #analysis-body .warn { color: #b45309; background: #fef3c7; border-radius: 6px; padding: 6px 10px; font-size: 12px; }
+    #analysis-body .note { color: #9ca3af; font-size: 11px; line-height: 1.45; border-top: 1px solid #f0f2f5; padding-top: 8px; }
+    #analysis-body table.dwell { width: 100%; border-collapse: collapse; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+    #analysis-body table.dwell td { padding: 3px 6px 3px 0; border-bottom: 1px solid #f0f2f5; vertical-align: top; }
+    #analysis-body table.dwell td.k { color: #6b7280; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -154,6 +171,13 @@
         <ul id="timeline-list"><li class="empty">Clicks, triggers, idle gaps and navigations appear here.</li></ul>
         <h2>URL &amp; params</h2>
         <div id="url-params"><div class="empty">Page URLs and their query params appear here.</div></div>
+        <div id="analysis-panel" hidden>
+          <div class="analysis-head">
+            <h2>AI analysis</h2>
+            <button id="analyze-btn" disabled>Analyze with AI</button>
+          </div>
+          <div id="analysis-body"><p class="empty">Analyze this session to see where attention went.</p></div>
+        </div>
       </section>
     </main>
   </div>

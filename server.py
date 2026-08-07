@@ -611,7 +611,11 @@ def list_projects(request: Request):
     if allowed is None and projects and any(entry.is_dir() for entry in DATA_DIR.iterdir()):
         projects.append({"token": "", "name": "(no project)"})
     email = (getattr(request.state, "auth", None) or {}).get("email")
-    return {"projects": projects, **({"email": email} if email else {})}
+    return {
+        "projects": projects,
+        "analysis_enabled": analyze.ANALYSIS_ENABLED,
+        **({"email": email} if email else {}),
+    }
 
 @app.get("/api/sessions")
 def list_sessions(request: Request, project: Optional[str] = Query(None)):

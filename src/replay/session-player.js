@@ -12,6 +12,7 @@ import {
   updateScrubber,
 } from './scrubber.js';
 import { clearTimeline, renderTimeline, setSyncStart, syncTimeline } from './timeline.js';
+import { resetAnalysis, showCachedAnalysis } from './analysis.js';
 
 const stageEl = document.getElementById('stage');
 const controlsEl = document.getElementById('controls');
@@ -33,6 +34,7 @@ export function clearPlayer() {
   destroyPlayer();
   windowTabsEl.innerHTML = '';
   clearTimeline();
+  resetAnalysis();
   loadProgressEl.textContent = '';
   sessionTitleEl.textContent = 'Select a session';
   sessionTitleEl.title = '';
@@ -49,6 +51,7 @@ export async function loadSession(sessionId) {
   loadedSessionId = sessionId;
   sessionTitleEl.textContent = `Session ${sessionId}`;
   sessionTitleEl.title = '';
+  showCachedAnalysis(sessionId);
 
   let manifest;
   try {
