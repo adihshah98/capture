@@ -624,33 +624,101 @@ def split_rows_by_cut(rows: list, slice_a: Optional[dict], slice_b: Optional[dic
     return rows_a, rows_b, spec_a, spec_b
 
 
-CUT_PROMPT = """You compare two groups of recorded web sessions for a product team.
+CUT_PROMPT = """You compare two groups of recorded web sessions for a product team
+that is trying to decide what to change on the site.
 
 You receive per-session write-ups, each already grounded in that session's
-replay. Group A and Group B are labelled. Work only from what the write-ups
-say — never invent a page, a click, or an outcome that is not written there.
+replay. Work only from what the write-ups say — never invent a page, a click,
+a number, or an outcome that is not written there.
 
-Your job is to find patterns ACROSS sessions, not to re-summarise each one.
+## The single most important rule
+
+Each group was SELECTED by a filter, stated below as "Group A is" / "Group B
+is". Everything entailed by that filter is already known and is NOT a finding.
+
+Before you write any item, apply this test:
+
+  "Could I have predicted this from the group's definition alone,
+   without reading a single write-up?"
+
+If yes, DELETE IT. It is not an observation, it is the filter talking.
+
+Worked example. If Group A is "purchased", every one of these is banned:
+  BANNED  "clicked 'Buy now' or 'Add to cart' (6 of 7)"
+  BANNED  "proceeded to checkout"
+  BANNED  "completed a purchase"
+  BANNED  "actively interacted with purchase options"
+  BANNED  "showed strong purchase intent"
+Buyers buy. That is what makes them buyers. Reporting it tells the team nothing.
+
+The same test kills "Group B did not click any CTA" when B is defined as not
+converting, and "sessions came from campaign X" when X is the filter.
+
+What IS a finding, for the same group:
+  KEEP  "Switched from the default '90-Night Supply' to '30-Night Supply'
+         before buying (4 of 7) — the default may be the wrong anchor."
+  KEEP  "Reached 'Choose your supply' only after the sticky CTA scrolled them
+         there; none reached it by scrolling alone (4 of 7)."
+  KEEP  "Clicked the cart icon at [00:17] and nothing happened (1 of 5)."
+
+The difference: a finding names something specific and CHANGEABLE about the
+page — an element, a default, a position, a broken interaction. If your item
+does not point at something a designer or developer could go change tomorrow,
+it is not worth writing.
+
+Route unavoidable outcome differences into how they happened, never that they
+happened.
+
+## Be concrete, not abstract
+
+The write-ups are specific. Your output must stay at that same resolution.
+You are not summarising them — you are pulling the specific, checkable
+evidence out of them and grouping it.
+
+Bad (abstract, unusable):  "Visitors engaged extensively with detailed
+                            product information."
+Good (concrete, actionable): "Scrolled past the ingredient breakdown without
+                            stopping, then stalled 40s on the '30 nights or
+                            every penny back' guarantee (3 of 5)."
+
+In every item, wherever the write-ups give it, include:
+- what was actually on screen — quote section headings, button labels,
+  product names, and price or offer wording verbatim from the write-up
+- where in the page it happened — scroll depth in px, or "near the FAQ",
+  "above the fold", "the third testimonial"
+- how long it took — timestamps [MM:SS] or durations
+- what the click did, especially when it did nothing or did the wrong thing
+
+Numbers and quoted labels are what makes an item worth reading. An item with
+none of them is almost certainly too vague to keep.
+
+## Output
 
 Return a single JSON object with this exact shape:
 {
-  "headline": "one sentence on the sharpest difference between the groups",
-  "shared": ["behaviour both groups show, with session counts"],
-  "a_distinctive": ["what shows up in A and not (or far less) in B"],
-  "b_distinctive": ["what shows up in B and not (or far less) in A"],
-  "caveats": ["what these sessions cannot tell you"]
+  "headline": "one sentence naming the sharpest behavioural difference, with the specific evidence for it",
+  "shared": ["behaviour both groups show, with the concrete detail and counts"],
+  "a_distinctive": ["how A behaved differently on the page — never that A matched its own filter"],
+  "b_distinctive": ["how B behaved differently on the page — never that B matched its own filter"],
+  "caveats": ["what these sessions cannot tell you, and any single-session oddity worth a look"]
 }
 
-Rules that matter:
-- Cite how many sessions back each observation, e.g. "3 of 5 A sessions".
-  Count only sessions whose write-up actually supports the point.
+Rules:
+- Cite how many sessions back each item, e.g. "3 of 5 A sessions". Count only
+  sessions whose write-up actually supports the point.
 - With fewer than 3 sessions on a side, say the evidence is thin rather than
   asserting a pattern. Small samples are the normal case here.
-- A difference you can see in 1 session is an anecdote — put it in caveats,
-  not in a_distinctive or b_distinctive.
-- The write-ups describe what was on screen, not where anyone looked. Keep
-  that distinction: say "reached" or "was shown", never "read" or "noticed".
-- Prefer 2-4 items per list. Empty lists are fine when there is nothing solid.
+- A difference visible in only 1 session is an anecdote — put it in caveats,
+  not in a_distinctive or b_distinctive. A specific, surprising anecdote is
+  worth more there than a vague pattern would be anywhere else.
+- Friction is the most valuable thing you can find: rage clicks, dead clicks,
+  unexpected redirects, modals, long stalls, repeated attempts. Report these
+  with the exact element and timestamp whenever a write-up mentions one.
+- The write-ups describe what was on screen, not where anyone looked. Say
+  "reached", "was shown", "scrolled past" — never "read", "noticed", "focused
+  on", or "was interested in".
+- 2-5 items per list. Empty lists are fine when there is nothing solid; a
+  short list of specific items beats a long list of vague ones.
 - No preamble, no markdown — JSON only."""
 
 
@@ -660,9 +728,11 @@ def _cut_side_text(rows: list, label: str) -> str:
         return f"### {label}\n(no sessions in this group)\n"
     parts = [f"### {label} — {len(rows)} session(s)\n"]
     for i, row in enumerate(rows, 1):
-        outcome = "purchased" if row.get("outcome") == "purchased" else "did not purchase"
         attrs = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
-        bits = [f"outcome: {outcome}"]
+        # Three-way, so a checkout session is not lumped in with bounces.
+        bits = [f"outcome: {OUTCOME_LABELS.get(row.get('outcome'), 'unknown')}"]
+        if row.get("device"):
+            bits.append(f"device: {row['device']}")
         for key in ("utm_source", "utm_campaign"):
             if attrs.get(key):
                 bits.append(f"{key}: {attrs[key]}")
@@ -671,6 +741,45 @@ def _cut_side_text(rows: list, label: str) -> str:
         text = (row.get("text") or "").strip() or "(no write-up)"
         parts.append(f"--- {label} session {i} ({'; '.join(bits)}) ---\n{text}\n")
     return "\n".join(parts)
+
+
+def _given_facts(spec_a: dict, spec_b: dict, complement: bool) -> str:
+    """Spell out what each filter already guarantees, so it is not 'found'."""
+    lines = []
+
+    def _facts(spec, side):
+        if spec.get("outcome"):
+            joined = " or ".join(
+                OUTCOME_LABELS.get(v, v) for v in spec["outcome"]
+            )
+            lines.append(
+                f"- Every {side} session {joined}. Do not report this, or any "
+                f"step it entails (clicking buy, reaching checkout, converting), "
+                f"as a finding about {side}."
+            )
+        if spec.get("device"):
+            lines.append(
+                f"- Every {side} session was on {' or '.join(spec['device'])}. "
+                f"Do not report the device itself as a finding."
+            )
+        for key in ("utm_source", "utm_medium", "utm_campaign", "utm_content"):
+            if spec.get(key):
+                lines.append(
+                    f"- Every {side} session came from {key}={spec[key]}. Do not "
+                    f"report the traffic source as a finding about {side}."
+                )
+
+    _facts(spec_a, "Group A")
+    if complement:
+        lines.append(
+            "- Group B is simply every other analyzed session in this cohort. "
+            "It has no defining trait of its own — do not invent one."
+        )
+    else:
+        _facts(spec_b, "Group B")
+    if not lines:
+        return ""
+    return "## Already known — never report these as findings\n\n" + "\n".join(lines)
 
 
 def empty_cut_analysis(error: Optional[str] = None) -> dict:
@@ -692,34 +801,41 @@ def normalize_cut_analysis(raw) -> dict:
     out = empty_cut_analysis()
     headline = data.get("headline")
     if isinstance(headline, str):
-        out["headline"] = headline.strip()[:400]
+        out["headline"] = headline.strip()[:600]
     for key in ("shared", "a_distinctive", "b_distinctive", "caveats"):
         items = data.get(key)
         if not isinstance(items, list):
             continue
         clean = []
         for item in items:
+            # Generous: a good item quotes labels and cites timestamps, so it
+            # runs long. Truncating it would strip exactly the useful part.
             if isinstance(item, str) and item.strip():
-                clean.append(item.strip()[:500])
+                clean.append(item.strip()[:900])
             if len(clean) >= 8:
                 break
         out[key] = clean
     return out
 
 
-async def call_gemini_cut(rows_a: list, rows_b: list, label_a: str, label_b: str) -> dict:
+async def call_gemini_cut(
+    rows_a: list,
+    rows_b: list,
+    label_a: str,
+    label_b: str,
+    given: str = "",
+) -> dict:
     """One text-only pass over both sides' write-ups."""
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=GEMINI_API_KEY)
+    header = f"Group A is: {label_a}\nGroup B is: {label_b}\n"
+    if given:
+        header += "\n" + given + "\n"
+    header += "\nThe write-ups for both groups follow."
     parts = [
-        types.Part.from_text(
-            text=(
-                f"Group A is: {label_a}\nGroup B is: {label_b}\n\n"
-                "The write-ups for both groups follow."
-            )
-        ),
+        types.Part.from_text(text=header),
         types.Part.from_text(text=_cut_side_text(rows_a, "GROUP A")),
         types.Part.from_text(text=_cut_side_text(rows_b, "GROUP B")),
     ]
@@ -728,8 +844,10 @@ async def call_gemini_cut(rows_a: list, rows_b: list, label_a: str, label_b: str
         contents=[types.Content(role="user", parts=parts)],
         config=types.GenerateContentConfig(
             system_instruction=CUT_PROMPT,
-            max_output_tokens=2048,
-            thinking_config=types.ThinkingConfig(thinking_budget=512),
+            # Concrete items carry timestamps, px depths and quoted labels, so
+            # they run far longer than the abstracted one-liners this replaced.
+            max_output_tokens=4096,
+            thinking_config=types.ThinkingConfig(thinking_budget=2048),
             temperature=0.2,
             response_mime_type="application/json",
         ),
@@ -767,9 +885,10 @@ async def build_cut_analysis(
         empty["headline"] = f"No analyzed sessions in {which} for this cohort."
         return {**base, "analysis": empty}
 
+    given = _given_facts(spec_a, spec_b, complement=not spec_b)
     _, model_gate = _gates()
     async with model_gate:
-        analysis = await call_gemini_cut(rows_a, rows_b, label_a, label_b)
+        analysis = await call_gemini_cut(rows_a, rows_b, label_a, label_b, given)
     return {**base, "analysis": analysis}
 
 

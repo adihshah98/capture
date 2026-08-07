@@ -227,7 +227,7 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
             {"shared": [f"item {i}" for i in range(50)], "headline": "x" * 900}
         )
         self.assertEqual(len(out["shared"]), 8)
-        self.assertEqual(len(out["headline"]), 400)
+        self.assertEqual(len(out["headline"]), 600)
 
 
 class TestBuildCutAnalysis(unittest.TestCase):
@@ -261,10 +261,11 @@ class TestBuildCutAnalysis(unittest.TestCase):
     def test_two_sided_cut_calls_the_model_and_records_membership(self):
         seen = {}
 
-        async def fake(rows_a, rows_b, label_a, label_b):
+        async def fake(rows_a, rows_b, label_a, label_b, given=""):
             seen["a"] = [r["session_id"] for r in rows_a]
             seen["b"] = [r["session_id"] for r in rows_b]
             seen["labels"] = (label_a, label_b)
+            seen["given"] = given
             return analyze.normalize_cut_analysis({"headline": "they differ"})
 
         analyze.call_gemini_cut = fake
@@ -282,14 +283,86 @@ class TestBuildCutAnalysis(unittest.TestCase):
 
     def test_side_text_labels_every_session_for_counting(self):
         text = analyze._cut_side_text(
-            [row("s1", "purchased", utm_source="meta"), row("s2")], "GROUP A"
+            [row("s1", "purchased", "mobile", utm_source="meta"), row("s2", "checkout")],
+            "GROUP A",
         )
         self.assertIn("GROUP A — 2 session(s)", text)
         self.assertIn("GROUP A session 1", text)
         self.assertIn("GROUP A session 2", text)
         self.assertIn("outcome: purchased", text)
-        self.assertIn("did not purchase", text)
+        self.assertIn("reached checkout", text)
+        self.assertIn("device: mobile", text)
         self.assertIn("write-up for s1", text)
+
+
+class TestGivenFacts(unittest.TestCase):
+    """The filter that selected a group must never come back as a finding."""
+
+    def given(self, a, b=None):
+        spec_a = analyze.normalize_slice(a)
+        spec_b = analyze.normalize_slice(b)
+        return analyze._given_facts(spec_a, spec_b, complement=not spec_b)
+
+    def test_outcome_filter_bans_the_obvious_restatement(self):
+        text = self.given({"outcome": ["purchased"]}, {"outcome": ["rest"]})
+        self.assertIn("Every Group A session purchased", text)
+        # The exact tautology the first version of this prompt produced.
+        self.assertIn("clicking buy", text)
+        self.assertIn("Every Group B session did not reach checkout", text)
+
+    def test_complement_side_is_named_as_having_no_trait(self):
+        text = self.given({"outcome": ["purchased"]}, None)
+        self.assertIn("no defining trait of its own", text)
+        self.assertNotIn("Every Group B session came from", text)
+
+    def test_campaign_and_device_filters_are_declared(self):
+        text = self.given(
+            {"utm_campaign": "spring", "device": ["mobile"]}, {"utm_campaign": "fall"}
+        )
+        self.assertIn("utm_campaign=spring", text)
+        self.assertIn("was on mobile", text)
+        self.assertIn("utm_campaign=fall", text)
+
+    def test_an_unconstrained_cut_has_nothing_to_declare(self):
+        self.assertEqual(analyze._given_facts({}, {}, complement=False), "")
+
+    def test_build_passes_the_given_facts_to_the_model(self):
+        seen = {}
+
+        async def fake(rows_a, rows_b, label_a, label_b, given=""):
+            seen["given"] = given
+            return analyze.empty_cut_analysis()
+
+        saved_enabled, saved_call = analyze.ANALYSIS_ENABLED, analyze.call_gemini_cut
+        analyze.ANALYSIS_ENABLED = True
+        analyze.call_gemini_cut = fake
+        analyze._gate_loop = None
+        try:
+            rows = [row("a", "purchased"), row("b", "rest")]
+            asyncio.run(
+                analyze.build_cut_analysis(rows, {"outcome": ["purchased"]}, None)
+            )
+        finally:
+            analyze.ANALYSIS_ENABLED = saved_enabled
+            analyze.call_gemini_cut = saved_call
+            analyze._gate_loop = None
+        self.assertIn("Every Group A session purchased", seen["given"])
+
+
+class TestCutPromptContent(unittest.TestCase):
+    """The prompt has to keep asking for the things the first version lost."""
+
+    def test_demands_concrete_evidence(self):
+        prompt = analyze.CUT_PROMPT
+        for phrase in ("timestamps", "scroll depth", "verbatim", "quote"):
+            self.assertIn(phrase, prompt.lower(), f"prompt lost: {phrase}")
+
+    def test_keeps_the_on_screen_versus_looked_at_distinction(self):
+        self.assertIn("never", analyze.CUT_PROMPT.lower())
+        self.assertIn("was shown", analyze.CUT_PROMPT)
+
+    def test_names_friction_as_the_priority(self):
+        self.assertIn("rage click", analyze.CUT_PROMPT.lower())
 
 
 class TestCutCache(unittest.TestCase):
