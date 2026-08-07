@@ -2,15 +2,24 @@ import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 
-const SECTION_SELECTOR = 'h1,h2,h3,section,article';
-const TRUST_HINT = /review|rating|verified|guarantee|certified|doctor|clinical|study|award|money.?back|refund|secure/i;
 const SCROLL_SOURCE = 3;
-const MIN_REGION_DWELL_MS = 2000;
-const MAX_SHOTS = 6;
 const NAV_TIMEOUT_MS = 30000;
 const SETTLE_MS = 1200;
 
-const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+// Mirrors ACTIVE_SOURCES in src/player.js: the incremental sources that mean a
+// human was doing something, as opposed to the page mutating on its own.
+const ACTIVE_SOURCES = new Set([1, 2, 3, 4, 5, 6, 7, 12]);
+
+// A gap longer than this between active events is dead air. Same threshold the
+// replay UI uses to offer skip-ahead, so "active" means the same thing in both.
+const ACTIVITY_THRESHOLD_MS = 5000;
+
+// Seeking before the first full snapshot renders nothing, and the player
+// clamps to it anyway; give the rebuild a moment to settle before sampling.
+const FIRST_FRAME_LEAD_MS = 500;
+
+// Stay off the very end: seekTo within 50ms of duration routes to finish().
+const END_MARGIN_MS = 100;
 
 function readChunks(sessionDir, names) {
   const chunks = [];
@@ -94,6 +103,93 @@ export function clicksOf(events) {
     });
   }
   return out;
+}
+
+/**
+ * Stretches where something was actually happening, as offsets from the first
+ * event. Derived from gaps between active events rather than from the
+ * capture-idle markers: those are only emitted when a non-interactive event
+ * happens to arrive after the idle threshold, so a tab left parked with
+ * nothing firing produces no marker at all. Real recordings frequently have
+ * none. Marker-derived windows are subtracted on top when they do exist.
+ */
+export function activeSpans(events, idle = []) {
+  if (!events.length) return [];
+  const t0 = events[0].timestamp;
+  const spans = [];
+  let span = null;
+  for (const e of events) {
+    const active =
+      e.type === 2 ||
+      e.type === 4 ||
+      (e.type === 3 && e.data && ACTIVE_SOURCES.has(e.data.source));
+    if (!active) continue;
+    const t = e.timestamp - t0;
+    if (span && t - span.end <= ACTIVITY_THRESHOLD_MS) span.end = t;
+    else {
+      if (span) spans.push(span);
+      span = { start: t, end: t };
+    }
+  }
+  if (span) spans.push(span);
+
+  if (!idle.length) return spans;
+
+  // Carve marker-reported idle out of the spans; a span can split in two.
+  let out = spans;
+  for (const [s, e] of idle) {
+    const from = s - t0;
+    const to = (e === Infinity ? events[events.length - 1].timestamp : e) - t0;
+    const next = [];
+    for (const sp of out) {
+      if (to <= sp.start || from >= sp.end) next.push(sp);
+      else {
+        if (from > sp.start) next.push({ start: sp.start, end: from });
+        if (to < sp.end) next.push({ start: to, end: sp.end });
+      }
+    }
+    out = next;
+  }
+  return out;
+}
+
+/**
+ * Timestamps to screenshot, ascending. One frame per second of active time —
+ * dead air is skipped, since those frames would be pixel-identical to their
+ * neighbours. Pure and deterministic so the choice of frames is unit-testable
+ * without a browser.
+ */
+export function pickFrameTimes(events, { fps = 1, maxFrames = 0 } = {}) {
+  if (!events || events.length < 2) return events && events.length ? [0] : [];
+
+  const t0 = events[0].timestamp;
+  const duration = events[events.length - 1].timestamp - t0;
+  const last = Math.max(0, duration - END_MARGIN_MS);
+  const step = Math.max(1, Math.round(1000 / (fps > 0 ? fps : 1)));
+
+  const firstSnapshot = events.find((e) => e.type === 2);
+  const earliest = firstSnapshot
+    ? Math.min(firstSnapshot.timestamp - t0 + FIRST_FRAME_LEAD_MS, last)
+    : 0;
+
+  const times = new Set([earliest]);
+  for (const span of activeSpans(events, idleWindows(events))) {
+    for (let t = Math.max(span.start, earliest); t < span.end; t += step) {
+      times.add(Math.min(t, last));
+    }
+    // The tail of a span is where a scroll or click came to rest; a span
+    // shorter than one step would otherwise contribute nothing.
+    times.add(Math.min(Math.max(span.end, earliest), last));
+  }
+
+  const sorted = [...times].filter((t) => t >= 0 && t <= last).sort((a, b) => a - b);
+  if (maxFrames > 0 && sorted.length > maxFrames) {
+    const stride = sorted.length / maxFrames;
+    const thinned = [];
+    for (let i = 0; i < maxFrames; i++) thinned.push(sorted[Math.floor(i * stride)]);
+    return [...new Set(thinned)];
+  }
+  return sorted;
 }
 
 export function dwellBySection(scroll, sections, viewport, idle, endTs) {
