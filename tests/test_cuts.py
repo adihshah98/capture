@@ -324,6 +324,23 @@ class TestBuildCutAnalysis(unittest.TestCase):
         self.assertIn("device: mobile", text)
         self.assertIn("write-up for s1", text)
 
+    def test_every_clusterable_field_is_stated_on_every_session(self):
+        """A missing label would read as a difference and skew the clusters."""
+        text = analyze._cut_side_text([row("bare", "rest")], "SESSIONS")
+        self.assertIn("device: unknown", text)
+        self.assertIn("utm_source: none", text)
+        self.assertIn("utm_campaign: none", text)
+
+    def test_known_values_still_win_over_the_placeholders(self):
+        text = analyze._cut_side_text(
+            [row("s1", "purchased", "desktop", utm_source="google", utm_campaign="spring")],
+            "SESSIONS",
+        )
+        self.assertIn("device: desktop", text)
+        self.assertIn("utm_source: google", text)
+        self.assertIn("utm_campaign: spring", text)
+        self.assertNotIn("unknown", text)
+
 
 class TestGivenFacts(unittest.TestCase):
     """The filter that selected a group must never come back as a finding."""
@@ -344,6 +361,31 @@ class TestGivenFacts(unittest.TestCase):
 
     def test_an_unconstrained_cut_has_nothing_to_declare(self):
         self.assertEqual(analyze._given_facts({}), "")
+
+    def test_points_clustering_at_the_dimensions_still_free(self):
+        """A filtered field is constant, so it cannot separate two clusters."""
+        text = self.given({"outcome": ["purchased"]})
+        self.assertIn("cannot separate", text)
+        self.assertIn("device", text)
+        self.assertIn("traffic source", text)
+        self.assertIn("campaign", text)
+
+    def test_a_filtered_dimension_is_not_offered_for_clustering(self):
+        text = self.given({"device": ["mobile"]})
+        cluster_line = [ln for ln in text.splitlines() if "cannot separate" in ln][0]
+        self.assertNotIn("device", cluster_line)
+        self.assertIn("outcome", cluster_line)
+
+    def test_a_fully_constrained_cut_offers_no_free_dimensions(self):
+        text = self.given(
+            {
+                "outcome": ["purchased"],
+                "device": ["mobile"],
+                "utm_source": "google",
+                "utm_campaign": "spring",
+            }
+        )
+        self.assertNotIn("cannot separate", text)
 
     def test_build_passes_the_given_facts_to_the_model(self):
         seen = {}
@@ -399,6 +441,25 @@ class TestCutPromptContent(unittest.TestCase):
 
     def test_names_friction_as_the_priority(self):
         self.assertIn("rage click", analyze.CUT_PROMPT.lower())
+
+    def test_asks_for_clusters_rather_than_an_average_session(self):
+        """A mixed group must split, not come back as 'nothing was similar'."""
+        prompt = analyze.CUT_PROMPT
+        self.assertIn("clusters", prompt.lower())
+        # The specific non-answer this is meant to prevent.
+        self.assertIn('Never report "no common behaviour"', prompt)
+        self.assertIn("say HOW they split", prompt)
+
+    def test_names_the_metadata_dimensions_to_cluster_on(self):
+        prompt = analyze.CUT_PROMPT
+        for dimension in ("outcome", "device", "utm_source", "utm_campaign"):
+            self.assertIn(dimension, prompt, dimension)
+        # Naming the split must not become a way to restate the filter.
+        self.assertIn("State the behavioural difference, never the label", prompt)
+
+    def test_a_minority_cluster_is_not_demoted_to_an_anecdote(self):
+        prompt = analyze.CUT_PROMPT
+        self.assertIn("is a real pattern, not an anecdote", prompt)
 
     def test_demands_evidence_in_every_item(self):
         """Depth regression guard: vague items must be explicitly disallowed."""

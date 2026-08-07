@@ -95,6 +95,10 @@ the visitor's eyes went. Say "on screen" or "reached", not "looked at" or
 
 Write four short markdown sections:
 
+## What stands out
+Two or three observations a marketing team could act on. If the evidence is thin,
+say so instead of padding. Keep this insights actionable for a marketing team. Make inferences of customer behavior based on the frames and the digest.
+
 ## What they did
 The path through the session in order, citing [MM:SS]. What the page showed,
 what they scrolled past, what opened or changed.
@@ -107,11 +111,7 @@ timestamps. Note long jumps between frames as time the page was left untouched.
 What they clicked, in order, with timestamps. Call out rage clicks and repeated
 interactions. Use the frames to say what the click did — or failed to do.
 
-## What stands out
-Two or three observations a product team could act on. If the evidence is thin,
-say so instead of padding.
-
-Keep it under 300 words. No preamble."""
+Keep it under 300 words"""
 
 def runtime_present() -> bool:
     """Whether the headless reconstruction can run: node, the extractor, the bundle."""
@@ -667,28 +667,92 @@ same abandoned step. Name those specifically. Resist the pull toward a tidy
 summary — the team already knows the shape of their funnel, and a sentence
 that would be true of any e-commerce site tells them nothing.
 
+## Look for clusters, not a single average session
+
+A group is rarely uniform. The sessions in it usually fall into two or three
+distinct behaviours, and those splits are the most useful thing you can find.
+Look for them deliberately before you write anything.
+
+Never report "no common behaviour" or "the sessions varied" and stop there.
+That is the finding — keep going and say HOW they split, and what separates
+the groups. A split you can name beats a similarity you had to stretch for.
+
+Typical splits worth naming:
+- Some reached a section and others never got there
+- Some used one route in (sticky CTA, nav, search) and others another
+- Some stalled where others moved straight through
+- Some hit a broken interaction and others never touched it
+- Some moved fast and decisively, others looped back repeatedly
+
+Write a split as ONE item that names both sides with counts and evidence:
+
+  GOOD  "Split on how they reached 'Choose your supply': 4 arrived via the
+         sticky CTA at [00:31]-[00:44] and bought; the other 5 scrolled past
+         it entirely and none reached checkout."
+  GOOD  "3 sessions rage-clicked the cart icon at ~[00:17] and abandoned; the
+         other 6 never touched it and moved to checkout in under 90s."
+  BAD   "Behaviour varied across sessions."
+  BAD   "Some users engaged more than others."
+
+A cluster of 3 in a group of 9 is a real pattern, not an anecdote — report it
+as a split with its count, not as a caveat. The one-session rule below applies
+to genuinely isolated sessions, not to a minority that behaves consistently.
+
+### Split on the session labels too
+
+Every session below is labelled with its outcome, device, traffic source and
+campaign. Test each as a candidate split — these are the ones the team can act
+on directly. (Any dimension named under "Already known" is the same for every
+session here and cannot split anything — skip it and use the rest.)
+- outcome (purchased / reached checkout / did not reach checkout): what did
+  the sessions that converted do differently on the page from those that did
+  not? This is the most valuable split in the set.
+- device (mobile / desktop): a stall or a dead click on one and not the other
+  usually means a layout or hit-target problem.
+- utm_source and utm_campaign: visitors from different sources often land with
+  different expectations and behave differently on the same page.
+
+State the behavioural difference, never the label itself. The labels are given
+to you — that the purchasers purchased, or that the mobile sessions were on
+mobile, is not a finding (see the rule above). What they DID differently is.
+
+  GOOD  "The 4 purchasers all switched off the default '90-Night Supply' at
+         [01:12]-[01:40]; the 5 non-purchasers left the default untouched."
+  BAD   "Purchased sessions completed a purchase, unlike the others."
+  GOOD  "All 3 mobile sessions rage-clicked the cart icon at ~[00:17]; the 6
+         desktop sessions opened the drawer first time."
+  BAD   "Mobile and desktop sessions behaved differently."
+
+When a metadata split shows no behavioural difference, say that plainly — "the
+mobile and desktop sessions did the same things" is a real, useful result.
+
+When the group really is uniform, say so plainly and move on — but only after
+looking. "They all did X (9 of 9)" is a strong finding when it is true.
+
 ## Output
 
 Return a single JSON object with this exact shape. Each list is a section with
 its own job — do not blur them together:
 {
-  "headline": "one sentence naming the sharpest thing these sessions have in common, with the specific evidence for it",
-  "path": ["the route through the site these sessions took, in order, with [MM:SS] and the pages and sections they reached"],
-  "stalls": ["where sessions sat on one view — what was on screen at the time, and for how long"],
-  "clicks": ["what they clicked, quoting the label, and what the click did — or failed to do"],
+  "headline": "one sentence naming the sharpest finding — the clearest split between clusters, or the strongest shared behaviour when the group is uniform — with the specific evidence for it",
+  "path": ["the route through the site, in order, with [MM:SS] and the sections reached — naming where the group splits into different routes"],
+  "stalls": ["where sessions sat on one view — what was on screen at the time, and for how long — noting who stalled and who did not"],
+  "clicks": ["what they clicked, quoting the label, and what the click did — or failed to do — including clicks only one cluster made"],
   "friction": ["what went wrong: dead clicks, rage clicks, unexpected redirects, modals, repeated attempts — with the element and timestamp"],
   "caveats": ["what these sessions cannot tell you, and any single-session oddity worth a look"]
 }
 
 What each section is for:
 - "path" is the shape of the journey. Where did they enter, what did they
-  reach, in what order, and where did most of them stop? Cite [MM:SS].
+  reach, in what order, and where did each cluster stop? Cite [MM:SS]. If the
+  group took two different routes, that split belongs here first.
 - "stalls" is attention held or lost. Name the section or element on screen
   and how long the page sat there. A stall on a guarantee means something
-  different from a stall on a form.
+  different from a stall on a form. Say which sessions stalled — a stall that
+  only half the group had is more informative than an average dwell time.
 - "clicks" is intent meeting the interface. Quote the button or link label
   verbatim, then say what happened next. A click that did nothing belongs
-  here AND in friction.
+  here AND in friction. A control only one cluster ever touched is a finding.
 - "friction" is where the site failed them. This is the most valuable section:
   every rage click, dead click, unexpected redirect, modal and repeated
   attempt a write-up mentions belongs here with its element and timestamp. An
@@ -704,7 +768,9 @@ Rules:
   rather than stating it as a group pattern. A specific, surprising anecdote
   is worth more there than a vague pattern would be anywhere else. Friction is
   the exception: a single dead click or rage click is worth reporting in
-  friction on its own.
+  friction on its own. This rule is about isolated sessions only — 2 or more
+  sessions behaving the same way is a cluster and belongs in its section with
+  a count, however small a share of the group it is.
 - The write-ups describe what was on screen, not where anyone looked. Say
   "reached", "was shown", "scrolled past" — never "read", "noticed", "focused
   on", or "was interested in".
@@ -727,13 +793,13 @@ def _cut_side_text(rows: list, label: str) -> str:
     parts = [f"### {label} — {len(rows)} session(s)\n"]
     for i, row in enumerate(rows, 1):
         attrs = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
-        # Three-way, so a checkout session is not lumped in with bounces.
+        # Every clusterable field is stated on every session, "unknown"
+        # included: a missing label reads as a difference the model would
+        # otherwise cluster on by accident.
         bits = [f"outcome: {OUTCOME_LABELS.get(row.get('outcome'), 'unknown')}"]
-        if row.get("device"):
-            bits.append(f"device: {row['device']}")
+        bits.append(f"device: {row.get('device') or 'unknown'}")
         for key in ("utm_source", "utm_campaign"):
-            if attrs.get(key):
-                bits.append(f"{key}: {attrs[key]}")
+            bits.append(f"{key}: {attrs.get(key) or 'none'}")
         if attrs.get("fbclid"):
             bits.append("meta click id present")
         text = (row.get("text") or "").strip() or "(no write-up)"
@@ -764,6 +830,26 @@ def _given_facts(spec: dict) -> str:
                 f"- Every session in this group came from {key}={spec[key]}. "
                 f"Do not report the traffic source as a finding."
             )
+
+    # A filtered field is constant here, so it cannot split the group. Point
+    # the clustering at the dimensions that still vary.
+    free = [
+        name
+        for name, key in (
+            ("outcome", "outcome"),
+            ("device", "device"),
+            ("traffic source", "utm_source"),
+            ("campaign", "utm_campaign"),
+        )
+        if not spec.get(key)
+    ]
+    if lines and free:
+        lines.append(
+            "- These are fixed for every session here, so they cannot separate "
+            "one cluster from another. Cluster on " + ", ".join(free) + " and "
+            "on what the sessions actually did on the page."
+        )
+
     if not lines:
         return ""
     return "## Already known — never report these as findings\n\n" + "\n".join(lines)
