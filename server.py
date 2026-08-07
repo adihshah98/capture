@@ -1455,10 +1455,10 @@ def _cut_task_key(pool: Path, cohort_id: str, key: str) -> str:
     return f"{pool.resolve()}::{cohort_id}::{key}"
 
 
-async def _run_cut_job(pool: Path, cohort_id: str, rows: list, slice_a, slice_b, key: str) -> None:
+async def _run_cut_job(pool: Path, cohort_id: str, rows: list, slice_spec, key: str) -> None:
     task_key = _cut_task_key(pool, cohort_id, key)
     try:
-        cut = await analyze.build_cut_analysis(rows, slice_a, slice_b)
+        cut = await analyze.build_cut_analysis(rows, slice_spec)
         analyze.write_cut(pool, cohort_id, key, cut)
         _cut_errors.pop(task_key, None)
     except Exception as exc:
@@ -1478,11 +1478,7 @@ def get_cohort_facets(
     pool = resolve_pool(project)
     cohort = _resolve_cohort_or_404(pool, cohort_id)
     live = analyze.enrich_cohort_status(pool, cohort)
-    return {
-        "cohort_id": cohort["id"],
-        "presets": sorted(analyze.CUT_PRESETS),
-        **cohort_facets(pool, live),
-    }
+    return {"cohort_id": cohort["id"], **cohort_facets(pool, live)}
 
 
 @app.get("/api/cohorts/{cohort_id}/cut")
@@ -1490,23 +1486,15 @@ async def get_cut(
     request: Request,
     cohort_id: str,
     project: Optional[str] = Query(None),
-    contrast: Optional[str] = Query(None),
-    # Each side is an intersection of these; outcome and device take repeats
+    # The group is an intersection of these; outcome and device take repeats
     # or a comma list, so "purchased+checkout on mobile" is expressible.
-    a_outcome: Optional[list] = Query(None),
-    a_device: Optional[list] = Query(None),
-    a_utm_source: Optional[str] = Query(None),
-    a_utm_medium: Optional[str] = Query(None),
-    a_utm_campaign: Optional[str] = Query(None),
-    a_utm_content: Optional[str] = Query(None),
-    a_fbclid: Optional[str] = Query(None),
-    b_outcome: Optional[list] = Query(None),
-    b_device: Optional[list] = Query(None),
-    b_utm_source: Optional[str] = Query(None),
-    b_utm_medium: Optional[str] = Query(None),
-    b_utm_campaign: Optional[str] = Query(None),
-    b_utm_content: Optional[str] = Query(None),
-    b_fbclid: Optional[str] = Query(None),
+    outcome: Optional[list] = Query(None),
+    device: Optional[list] = Query(None),
+    utm_source: Optional[str] = Query(None),
+    utm_medium: Optional[str] = Query(None),
+    utm_campaign: Optional[str] = Query(None),
+    utm_content: Optional[str] = Query(None),
+    fbclid: Optional[str] = Query(None),
     run: bool = Query(False),
 ):
     """A cut's analysis: cached when we have it, queued when `run=1`.
@@ -1519,12 +1507,13 @@ async def get_cut(
     cohort = _resolve_cohort_or_404(pool, cohort_id)
     cohort_id = cohort["id"]
 
-    slice_a, slice_b = _parse_contrast_slices(
-        contrast,
-        a_outcome, a_device, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid,
-        b_outcome, b_device, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid,
+    slice_spec = (
+        _slice_from_params(
+            outcome, device, utm_source, utm_medium, utm_campaign, utm_content, fbclid
+        )
+        or None
     )
-    key = analyze.cut_key(slice_a, slice_b)
+    key = analyze.cut_key(slice_spec)
 
     cached = analyze.read_cut(pool, cohort_id, key)
     if cached:
@@ -1557,9 +1546,7 @@ async def get_cut(
     if not rows:
         raise ApiError(400, "no analyzed sessions in this cohort yet")
 
-    task = asyncio.create_task(
-        _run_cut_job(pool, cohort_id, rows, slice_a, slice_b, key)
-    )
+    task = asyncio.create_task(_run_cut_job(pool, cohort_id, rows, slice_spec, key))
     _cut_tasks[task_key] = task
     return JSONResponse(
         {"status": "running", "cut": key, "cohort_id": cohort_id}, status_code=202
@@ -1666,7 +1653,7 @@ def _cut_rows(pool: Path, cohort: dict) -> list:
 
 
 def cohort_facets(pool: Path, cohort: dict) -> dict:
-    """The slice values actually present in this cohort, for the A/B picker.
+    """The slice values actually present in this cohort, for the group picker.
 
     Counts come from analyzed sessions only, since those are the ones a cut
     can reason over — offering a filter that would select zero write-ups is
@@ -1769,29 +1756,6 @@ def _slice_from_params(
     if flag is not None:
         spec["fbclid"] = flag
     return spec
-
-
-def _parse_contrast_slices(
-    contrast,
-    a_outcome, a_device, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid,
-    b_outcome, b_device, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid,
-) -> tuple:
-    """Preset name, or explicit per-side params. Presets are just a shorthand."""
-    if contrast:
-        if contrast not in analyze.CUT_PRESETS:
-            raise ApiError(
-                400,
-                "contrast must be one of: " + ", ".join(sorted(analyze.CUT_PRESETS)),
-            )
-        return analyze.CUT_PRESETS[contrast]
-
-    slice_a = _slice_from_params(
-        a_outcome, a_device, a_utm_source, a_utm_medium, a_utm_campaign, a_utm_content, a_fbclid
-    )
-    slice_b = _slice_from_params(
-        b_outcome, b_device, b_utm_source, b_utm_medium, b_utm_campaign, b_utm_content, b_fbclid
-    )
-    return slice_a or None, slice_b or None
 
 
 def sweep_expired_sessions() -> int:

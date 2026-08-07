@@ -16,7 +16,6 @@ const cutProgressEl = document.getElementById('cut-progress');
 const cutRunBtn = document.getElementById('cut-run');
 const cutBodyEl = document.getElementById('cut-body');
 const tableWrapEl = document.getElementById('cohort-table-wrap');
-const splitEl = document.getElementById('compare-split');
 const pickerEl = document.getElementById('cut-picker');
 const queuePanelEl = document.getElementById('insights-queue');
 const cutPanelEl = document.getElementById('insights-cut');
@@ -29,8 +28,7 @@ let cohortId = null;
 let activeTab = 'cut';
 let autoSwitchedForRun = false;
 let facets = null;
-let sliceA = emptySlice();
-let sliceB = emptySlice();
+let slice = emptySlice();
 
 export function setInsightsAnalysisEnabled(on) {
   analysisEnabled = !!on;
@@ -63,8 +61,8 @@ function syncCutRunButton() {
     cutRunBtn.title = 'Analysis is not configured on this server';
   } else if (!analyzedCount()) {
     cutRunBtn.title = 'Analyze a cohort first';
-  } else if (!splitEl.value && sliceIsEmpty(sliceA) && sliceIsEmpty(sliceB)) {
-    cutRunBtn.title = 'No filters set — this compares purchased against everyone else';
+  } else if (sliceIsEmpty(slice)) {
+    cutRunBtn.title = 'No filters set — this reads every analyzed session in the cohort';
   } else {
     cutRunBtn.title = '';
   }
@@ -104,35 +102,21 @@ function facetsUrl(id) {
   return `/api/cohorts/${encodeURIComponent(id)}/facets${qs ? `?${qs}` : ''}`;
 }
 
-/** Per-side slice state: {outcome:[], device:[], utm_source:'', utm_campaign:''} */
+/** One group's filter. Every field is a single value; '' means "any". */
+const SLICE_FIELDS = ['outcome', 'device', 'utm_source', 'utm_campaign'];
+
 function emptySlice() {
-  return { outcome: [], device: [], utm_source: '', utm_campaign: '' };
+  return { outcome: '', device: '', utm_source: '', utm_campaign: '' };
 }
 
-function sliceIsEmpty(slice) {
-  return (
-    !slice.outcome.length &&
-    !slice.device.length &&
-    !slice.utm_source &&
-    !slice.utm_campaign
-  );
-}
-
-function appendSlice(params, side, slice) {
-  for (const value of slice.outcome) params.append(`${side}_outcome`, value);
-  for (const value of slice.device) params.append(`${side}_device`, value);
-  if (slice.utm_source) params.set(`${side}_utm_source`, slice.utm_source);
-  if (slice.utm_campaign) params.set(`${side}_utm_campaign`, slice.utm_campaign);
+function sliceIsEmpty(spec) {
+  return SLICE_FIELDS.every((field) => !spec[field]);
 }
 
 function cutUrl(id, { run = false } = {}) {
   const params = withProject(new URLSearchParams());
-  const preset = splitEl && splitEl.value;
-  if (preset) {
-    params.set('contrast', preset);
-  } else {
-    appendSlice(params, 'a', sliceA);
-    appendSlice(params, 'b', sliceB);
+  for (const field of SLICE_FIELDS) {
+    if (slice[field]) params.set(field, slice[field]);
   }
   if (run) params.set('run', '1');
   return `/api/cohorts/${encodeURIComponent(id)}/cut?${params.toString()}`;
@@ -321,60 +305,27 @@ function cutList(title, items, extraClass = '') {
   </div>`;
 }
 
-const PRESET_LABELS = {
-  purchased_vs_all: 'Purchased vs not',
-  purchased_vs_checkout: 'Purchased vs abandoned checkout',
-  checkout_vs_rest: 'Reached checkout vs not',
-  mobile_vs_desktop: 'Mobile vs desktop',
-  meta_vs_rest: 'Meta vs not Meta',
-  meta_purchased_vs_rest: 'Meta buyers vs everyone else',
-  google_vs_meta: 'Google vs Meta',
-  google_purchased_vs_rest: 'Google buyers vs everyone else',
+const HINT_TEXT = 'Leave every filter on "any" to read the whole cohort.';
+
+const FACET_LABELS = {
+  outcome: 'outcome',
+  device: 'device',
+  utm_source: 'source',
+  utm_campaign: 'campaign',
 };
 
-function renderPresetOptions(names) {
-  const current = splitEl.value;
-  splitEl.innerHTML =
-    '<option value="">Custom</option>' +
-    (names || [])
-      .map(
-        (n) =>
-          `<option value="${escapeAttr(n)}">${escapeHtml(PRESET_LABELS[n] || n)}</option>`
-      )
-      .join('');
-  splitEl.value = current;
-}
-
-function chipRow(field, side, slice, items) {
-  if (!items || !items.length) return '';
-  const chosen = slice[field] || [];
-  return `<label class="facet">
-    <span>${escapeHtml(field === 'outcome' ? 'outcome' : field)}</span>
-    <span class="opts">${items
-      .map(
-        (i) =>
-          `<button type="button" class="opt${
-            chosen.includes(i.value) ? ' on' : ''
-          }" data-side="${side}" data-field="${field}" data-value="${escapeAttr(
-            i.value
-          )}">${escapeHtml(i.label || i.value)}<span class="c">${i.count}</span></button>`
-      )
-      .join('')}</span>
-  </label>`;
-}
-
-function selectRow(field, side, slice, items) {
+function facetRow(field, items) {
   if (!items || !items.length) return '';
   return `<label class="facet">
-    <span>${escapeHtml(field.replace('utm_', ''))}</span>
-    <select data-side="${side}" data-field="${field}">
+    <span>${escapeHtml(FACET_LABELS[field] || field)}</span>
+    <select data-field="${field}">
       <option value="">any</option>
       ${items
         .map(
           (i) =>
             `<option value="${escapeAttr(i.value)}"${
               slice[field] === i.value ? ' selected' : ''
-            }>${escapeHtml(i.value)} (${i.count})</option>`
+            }>${escapeHtml(i.label || i.value)} (${i.count})</option>`
         )
         .join('')}
     </select>
@@ -383,34 +334,16 @@ function selectRow(field, side, slice, items) {
 
 function renderPicker() {
   if (!pickerEl) return;
-  const usingPreset = !!(splitEl && splitEl.value);
-  pickerEl.style.display = usingPreset ? 'none' : '';
-  if (usingPreset || !facets) return;
+  pickerEl.style.display = facets ? '' : 'none';
+  if (!facets) return;
 
-  for (const side of ['a', 'b']) {
-    const slice = side === 'a' ? sliceA : sliceB;
-    const host = pickerEl.querySelector(`.side[data-side="${side}"] .facets`);
-    if (!host) continue;
-    host.innerHTML =
-      chipRow('outcome', side, slice, facets.outcome) +
-      chipRow('device', side, slice, facets.device) +
-      selectRow('utm_source', side, slice, facets.utm_source) +
-      selectRow('utm_campaign', side, slice, facets.utm_campaign);
+  const host = pickerEl.querySelector('.facets');
+  if (host) {
+    host.innerHTML = SLICE_FIELDS.map((field) => facetRow(field, facets[field])).join('');
   }
 
-  pickerEl.querySelectorAll('.opt').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const slice = btn.dataset.side === 'a' ? sliceA : sliceB;
-      const list = slice[btn.dataset.field];
-      const at = list.indexOf(btn.dataset.value);
-      if (at >= 0) list.splice(at, 1);
-      else list.push(btn.dataset.value);
-      onSliceChanged();
-    });
-  });
   pickerEl.querySelectorAll('select[data-field]').forEach((sel) => {
     sel.addEventListener('change', () => {
-      const slice = sel.dataset.side === 'a' ? sliceA : sliceB;
       slice[sel.dataset.field] = sel.value;
       onSliceChanged();
     });
@@ -418,31 +351,29 @@ function renderPicker() {
   updatePickerCounts();
 }
 
-/** Live n= per side, so an empty slice is obvious before spending a call. */
+/** Live n=, so an empty group is obvious before spending a call. */
 function updatePickerCounts() {
   if (!pickerEl || !cohort) return;
   const rows = (cohort.sessions || []).filter((s) => s.status === 'done' && s.text);
-  const inA = rows.filter((r) => rowMatches(r, sliceA));
-  const inB = sliceIsEmpty(sliceB)
-    ? rows.filter((r) => !inA.includes(r))
-    : rows.filter((r) => rowMatches(r, sliceB) && !inA.includes(r));
-  const setCount = (side, n) => {
-    const el = pickerEl.querySelector(`[data-count="${side}"]`);
-    if (el) el.textContent = `(n=${n})`;
-  };
-  setCount('a', inA.length);
-  setCount('b', inB.length);
+  const n = rows.filter((r) => rowMatches(r, slice)).length;
+  const hintEl = pickerEl.querySelector('[data-hint-text]');
+  const countEl = pickerEl.querySelector('[data-count="n"]');
+  // The "leave it on any" nudge only helps before a filter is set.
+  if (hintEl) hintEl.textContent = sliceIsEmpty(slice) ? HINT_TEXT : '';
+  if (countEl) {
+    countEl.textContent = `${n} of ${rows.length} analyzed session(s) selected`;
+  }
 }
 
 /** Client-side mirror of row_matches_slice, for the live counts only. */
-function rowMatches(row, slice) {
-  if (sliceIsEmpty(slice)) return true;
-  if (slice.outcome.length && !slice.outcome.includes(row.outcome || 'rest')) return false;
-  if (slice.device.length && !slice.device.includes(row.device || '')) return false;
+function rowMatches(row, spec) {
+  if (sliceIsEmpty(spec)) return true;
+  if (spec.outcome && (row.outcome || 'rest') !== spec.outcome) return false;
+  if (spec.device && (row.device || '') !== spec.device) return false;
   const attrs = row.attribution || {};
   const norm = (v) => String(v || '').trim().toLowerCase();
-  if (slice.utm_source && norm(attrs.utm_source) !== slice.utm_source) return false;
-  if (slice.utm_campaign && norm(attrs.utm_campaign) !== slice.utm_campaign) return false;
+  if (spec.utm_source && norm(attrs.utm_source) !== spec.utm_source) return false;
+  if (spec.utm_campaign && norm(attrs.utm_campaign) !== spec.utm_campaign) return false;
   return true;
 }
 
@@ -456,7 +387,6 @@ async function loadFacets() {
   if (!cohortId) return;
   try {
     facets = await fetchJson(facetsUrl(cohortId));
-    renderPresetOptions(facets.presets);
     renderPicker();
   } catch {
     facets = null;
@@ -469,51 +399,35 @@ function renderCutPlaceholder(message) {
 
 function renderCut(body) {
   const analysis = body.analysis || {};
-  const nA = body.n_a || 0;
-  const nB = body.n_b || 0;
-  cutLabelEl.textContent = `${body.label_a || 'A'} vs ${body.label_b || 'B'}`;
+  const n = body.n || 0;
+  cutLabelEl.textContent = body.label || 'Sessions';
 
-  // Small sides are the norm here; say so rather than letting counts imply rigour.
-  const thin = (n) =>
-    n > 0 && n < 3 ? '<span class="cut-thin">thin evidence</span>' : '';
+  // Small groups are the norm here; say so rather than letting counts imply rigour.
+  const thin = n > 0 && n < 3 ? '<span class="cut-thin">thin evidence</span>' : '';
 
   const headline = analysis.headline
     ? `<div class="cut-headline">${escapeHtml(analysis.headline)}</div>`
     : '';
 
-  const sides = `<div class="cut-sides">
-    <div>
-      <div class="cut-block">
-        <h4>Only in ${escapeHtml(body.label_a || 'A')}<span class="n">(n=${nA})</span>${thin(nA)}</h4>
-        ${
-          (analysis.a_distinctive || []).length
-            ? `<ul>${analysis.a_distinctive.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
-            : '<p class="cut-empty">Nothing stood out as specific to this side.</p>'
-        }
-      </div>
-    </div>
-    <div>
-      <div class="cut-block">
-        <h4>Only in ${escapeHtml(body.label_b || 'B')}<span class="n">(n=${nB})</span>${thin(nB)}</h4>
-        ${
-          (analysis.b_distinctive || []).length
-            ? `<ul>${analysis.b_distinctive.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
-            : '<p class="cut-empty">Nothing stood out as specific to this side.</p>'
-        }
-      </div>
-    </div>
+  const patterns = `<div class="cut-block">
+    <h4>What these sessions did<span class="n">(n=${n})</span>${thin}</h4>
+    ${
+      (analysis.patterns || []).length
+        ? `<ul>${analysis.patterns.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`
+        : '<p class="cut-empty">No recurring behaviour stood out across these sessions.</p>'
+    }
   </div>`;
 
   const meta = `<p class="cut-meta">
-    Read from ${nA + nB} analyzed session write-up(s) in this cohort.
+    Read from ${n} analyzed session write-up(s) in this cohort.
     Written by ${escapeHtml(body.model || 'the model')}.
     Cohort membership is fixed, so this cut is cached and will not be recomputed.
   </p>`;
 
   cutBodyEl.innerHTML =
     headline +
-    sides +
-    cutList('Common to both', analysis.shared) +
+    patterns +
+    cutList('Friction', analysis.friction, 'friction') +
     cutList('Worth checking', analysis.caveats, 'caveats') +
     meta;
 }
@@ -549,8 +463,8 @@ function showCutOffer() {
   cutProgressEl.textContent = n ? 'Not analyzed yet' : 'No analyzed sessions';
   renderCutPlaceholder(
     n
-      ? 'This cut has not been analyzed yet. Click "Analyze this cut" to have the model read the write-ups on both sides.'
-      : 'Analyze a cohort first, then pick a cut.'
+      ? 'This group has not been analyzed yet. Click "Analyze this group" to have the model read these write-ups.'
+      : 'Analyze a cohort first, then pick a group.'
   );
 }
 
@@ -558,7 +472,7 @@ function showCutOffer() {
 async function loadCut() {
   stopCutPolling();
   if (!cohortId) {
-    renderCutPlaceholder('Analyze a cohort, then pick a cut.');
+    renderCutPlaceholder('Analyze a cohort, then pick a group.');
     return;
   }
   cutProgressEl.textContent = 'Checking…';
@@ -566,7 +480,7 @@ async function loadCut() {
     const body = await fetchCut(cohortId);
     if (body.status === 'running') {
       cutProgressEl.textContent = 'Analyzing…';
-      renderCutPlaceholder('Reading both sides of this cut. This takes a few seconds.');
+      renderCutPlaceholder('Reading the write-ups in this group. This takes a few seconds.');
       cutPollTimer = setTimeout(pollCut, POLL_MS);
       return;
     }
@@ -594,7 +508,7 @@ async function runCut() {
   stopCutPolling();
   cutRunBtn.disabled = true;
   cutProgressEl.textContent = 'Analyzing…';
-  renderCutPlaceholder('Reading both sides of this cut. This takes a few seconds.');
+  renderCutPlaceholder('Reading the write-ups in this group. This takes a few seconds.');
   try {
     const body = await fetchCut(cohortId, { run: true });
     if (body.status === 'running') {
@@ -658,16 +572,15 @@ function resetEmptyState() {
   cohortId = null;
   autoSwitchedForRun = false;
   facets = null;
-  sliceA = emptySlice();
-  sliceB = emptySlice();
+  slice = emptySlice();
   if (pickerEl) pickerEl.style.display = 'none';
   labelEl.textContent = 'Sessions';
-  cutLabelEl.textContent = 'Compare';
+  cutLabelEl.textContent = 'Sessions';
   progressEl.textContent = 'No cohort yet';
   cutProgressEl.textContent = 'No cohort yet';
   syncRunButtons();
   renderCutPlaceholder(
-    'Analyze a cohort, then pick a cut to see what the sessions have in common and where the two groups differ.'
+    'Analyze a cohort, then pick a group to see what those sessions have in common.'
   );
   renderEmpty(
     'Run analysis on 5 purchased and 5 other sessions. Open any row to watch it in Replay.'
@@ -765,20 +678,12 @@ export function initInsights() {
     cohortId = cohortSelectEl.value || null;
     stopCutPolling();
     // A different cohort has different facet values, so reset the picker.
-    sliceA = emptySlice();
-    sliceB = emptySlice();
+    slice = emptySlice();
     refreshCohort()
       .then(loadFacets)
       .then(loadCut)
       .catch(() => {});
   });
-  if (splitEl) {
-    splitEl.addEventListener('change', () => {
-      stopCutPolling();
-      renderPicker();
-      loadCut().catch(() => {});
-    });
-  }
   setTab('cut');
 
   const projectSelect = document.getElementById('project-select');

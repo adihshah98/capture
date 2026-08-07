@@ -1042,7 +1042,7 @@ class TestCutEndpoint(ServerCase):
     def test_uncached_cut_is_absent_rather_than_a_silent_model_call(self):
         cohort_id = self.a_cohort()
         status, body = request(
-            f"{self.base}/api/cohorts/{cohort_id}/cut?contrast=purchased_vs_all"
+            f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased"
         )
         self.assertEqual(status, 404)
         data = json.loads(body)
@@ -1055,49 +1055,44 @@ class TestCutEndpoint(ServerCase):
         import analyze
 
         cohort_id = self.a_cohort()
-        key = analyze.cut_key({"outcome": "purchased"}, {"outcome": "all"})
+        key = analyze.cut_key({"outcome": "purchased"})
         analyze.write_cut(
             self.data_dir / "sessions",
             cohort_id,
             key,
             {
                 "cut": key,
-                "label_a": "purchased",
-                "label_b": "non-purchase",
-                "n_a": 1,
-                "n_b": 1,
-                "analysis": {"headline": "cached headline", "shared": [], "caveats": []},
+                "label": "purchased",
+                "n": 1,
+                "analysis": {
+                    "headline": "cached headline",
+                    "patterns": [],
+                    "friction": [],
+                    "caveats": [],
+                },
             },
         )
         status, body = request(
-            f"{self.base}/api/cohorts/{cohort_id}/cut?contrast=purchased_vs_all"
+            f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased"
         )
         self.assertEqual(status, 200, body)
         data = json.loads(body)
         self.assertTrue(data["cached"])
         self.assertEqual(data["analysis"]["headline"], "cached headline")
 
-    def test_each_preset_is_cached_separately(self):
+    def test_each_filter_is_cached_separately(self):
         import analyze
 
         cohort_id = self.a_cohort()
-        key = analyze.cut_key({"outcome": "purchased"}, {"outcome": "all"})
+        key = analyze.cut_key({"outcome": "purchased"})
         analyze.write_cut(
             self.data_dir / "sessions", cohort_id, key, {"cut": key, "analysis": {}}
         )
-        # A different preset is a different key, so it is still a miss.
+        # A different filter is a different key, so it is still a miss.
         status, _ = request(
-            f"{self.base}/api/cohorts/{cohort_id}/cut?contrast=google_vs_meta"
+            f"{self.base}/api/cohorts/{cohort_id}/cut?utm_source=google"
         )
         self.assertEqual(status, 404)
-
-    def test_unknown_preset_is_rejected(self):
-        cohort_id = self.a_cohort()
-        status, body = request(
-            f"{self.base}/api/cohorts/{cohort_id}/cut?contrast=not_a_preset"
-        )
-        self.assertEqual(status, 400)
-        self.assertIn("contrast must be", json.loads(body)["error"])
 
     def test_cut_on_a_missing_cohort_is_404(self):
         status, body = request(f"{self.base}/api/cohorts/cohort-nope/cut")
@@ -1106,7 +1101,7 @@ class TestCutEndpoint(ServerCase):
 
 
 class TestCutSlices(ServerCase):
-    """Facets and free-form A/B slicing over a cohort with a known shape."""
+    """Facets and free-form group slicing over a cohort with a known shape."""
 
     env = {"GEMINI_API_KEY": "test-key-not-used-when-cached"}
 
@@ -1194,7 +1189,8 @@ class TestCutSlices(ServerCase):
             {f["value"] for f in facets["utm_source"]}, {"google", "facebook"}
         )
         self.assertEqual([f["value"] for f in facets["utm_campaign"]], ["spring"])
-        self.assertIn("mobile_vs_desktop", facets["presets"])
+        # Presets are gone; the picker builds a group from these facets alone.
+        self.assertNotIn("presets", facets)
 
     def test_outcome_facet_is_labelled_for_humans(self):
         _, body = request(f"{self.base}/api/cohorts/{self.cohort_id}/facets")
@@ -1206,43 +1202,47 @@ class TestCutSlices(ServerCase):
 
     def test_every_slice_combination_is_accepted(self):
         for query in (
-            "contrast=mobile_vs_desktop",
-            "contrast=purchased_vs_checkout",
-            "contrast=checkout_vs_rest",
-            "a_outcome=purchased&a_device=mobile",
-            "a_device=mobile&b_device=desktop",
-            "a_utm_source=google&b_utm_source=facebook",
-            "a_utm_campaign=spring",
-            "a_outcome=checkout&a_outcome=rest",
-            "a_outcome=checkout,rest",
-            "a_outcome=purchased&a_device=mobile&a_utm_source=google&b_device=desktop",
+            "",
+            "outcome=purchased",
+            "device=mobile",
+            "outcome=purchased&device=mobile",
+            "utm_source=google",
+            "utm_campaign=spring",
+            "outcome=checkout&outcome=rest",
+            "outcome=checkout,rest",
+            "outcome=purchased&device=mobile&utm_source=google",
         ):
             status, body = self.cut(query)
-            # Uncached, but a 404/absent proves the slice parsed and split.
+            # Uncached, but a 404/absent proves the slice parsed and selected.
             self.assertEqual(status, 404, f"{query} -> {body}")
             self.assertEqual(json.loads(body)["status"], "absent")
 
     def test_repeated_and_comma_forms_are_the_same_cut(self):
-        _, one = self.cut("a_outcome=checkout&a_outcome=rest")
-        _, two = self.cut("a_outcome=checkout,rest")
+        _, one = self.cut("outcome=checkout&outcome=rest")
+        _, two = self.cut("outcome=checkout,rest")
         self.assertEqual(json.loads(one)["cut"], json.loads(two)["cut"])
 
     def test_value_order_does_not_change_the_cut_key(self):
-        _, one = self.cut("a_outcome=checkout,rest")
-        _, two = self.cut("a_outcome=rest,checkout")
+        _, one = self.cut("outcome=checkout,rest")
+        _, two = self.cut("outcome=rest,checkout")
         self.assertEqual(json.loads(one)["cut"], json.loads(two)["cut"])
 
     def test_different_slices_are_different_cuts(self):
-        _, one = self.cut("a_device=mobile")
-        _, two = self.cut("a_device=desktop")
+        _, one = self.cut("device=mobile")
+        _, two = self.cut("device=desktop")
         self.assertNotEqual(json.loads(one)["cut"], json.loads(two)["cut"])
+
+    def test_an_empty_filter_is_the_whole_cohort_cut(self):
+        import analyze
+
+        _, body = self.cut("")
+        self.assertEqual(json.loads(body)["cut"], analyze.cut_key(None))
 
     def test_bad_slice_values_are_rejected(self):
         for query, word in (
-            ("a_outcome=nonsense", "outcome must be"),
-            ("a_device=tablet", "device must be"),
-            ("b_outcome=maybe", "outcome must be"),
-            ("contrast=not_a_preset", "contrast must be"),
+            ("outcome=nonsense", "outcome must be"),
+            ("device=tablet", "device must be"),
+            ("outcome=maybe", "outcome must be"),
         ):
             status, body = self.cut(query)
             self.assertEqual(status, 400, query)

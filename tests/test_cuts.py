@@ -137,96 +137,93 @@ class TestSliceLabel(unittest.TestCase):
         self.assertEqual(self.label({}), "everyone else")
 
 
-class TestSplitRowsByCut(unittest.TestCase):
-    def test_default_split_is_purchased_vs_rest(self):
+class TestSelectRowsByCut(unittest.TestCase):
+    def test_an_empty_filter_selects_the_whole_cohort(self):
         rows = [row("a", "purchased"), row("b"), row("c", "purchased")]
-        a, b, spec_a, spec_b = analyze.split_rows_by_cut(rows, None, None)
-        self.assertEqual([r["session_id"] for r in a], ["a", "c"])
-        self.assertEqual([r["session_id"] for r in b], ["b"])
-        self.assertEqual(spec_a, {"outcome": ["purchased"]})
-        self.assertEqual(spec_b, {"outcome": ["checkout", "rest"]})
+        selected, spec = analyze.select_rows_by_cut(rows, None)
+        self.assertEqual([r["session_id"] for r in selected], ["a", "b", "c"])
+        self.assertEqual(spec, {})
 
-    def test_empty_b_means_everyone_not_in_a(self):
+    def test_outcome_filter_selects_its_bucket(self):
+        rows = [row("a", "purchased"), row("b"), row("c", "purchased")]
+        selected, spec = analyze.select_rows_by_cut(rows, {"outcome": "purchased"})
+        self.assertEqual([r["session_id"] for r in selected], ["a", "c"])
+        self.assertEqual(spec, {"outcome": ["purchased"]})
+
+    def test_meta_source_matches_fbclid_and_known_sources(self):
         rows = [
             row("meta1", utm_source="facebook"),
             row("goog", utm_source="google"),
             row("meta2", fbclid=True),
         ]
-        a, b, _, _ = analyze.split_rows_by_cut(rows, {"utm_source": "meta"}, None)
-        self.assertEqual({r["session_id"] for r in a}, {"meta1", "meta2"})
-        self.assertEqual([r["session_id"] for r in b], ["goog"])
+        selected, _ = analyze.select_rows_by_cut(rows, {"utm_source": "meta"})
+        self.assertEqual({r["session_id"] for r in selected}, {"meta1", "meta2"})
 
-    def test_a_wins_when_a_session_matches_both_sides(self):
-        rows = [row("both", "purchased", utm_source="google")]
-        a, b, _, _ = analyze.split_rows_by_cut(
-            rows, {"outcome": "purchased"}, {"utm_source": "google"}
-        )
-        self.assertEqual([r["session_id"] for r in a], ["both"])
-        self.assertEqual(b, [])
-
-    def test_campaign_a_vs_campaign_b(self):
+    def test_filters_across_fields_are_anded(self):
         rows = [
-            row("x", utm_campaign="spring"),
-            row("y", utm_campaign="fall"),
-            row("z", utm_campaign="spring"),
+            row("hit", "purchased", "mobile", utm_campaign="spring"),
+            row("wrong_outcome", "rest", "mobile", utm_campaign="spring"),
+            row("wrong_campaign", "purchased", "mobile", utm_campaign="fall"),
         ]
-        a, b, _, _ = analyze.split_rows_by_cut(
-            rows, {"utm_campaign": "spring"}, {"utm_campaign": "fall"}
+        selected, _ = analyze.select_rows_by_cut(
+            rows, {"outcome": "purchased", "utm_campaign": "spring"}
         )
-        self.assertEqual({r["session_id"] for r in a}, {"x", "z"})
-        self.assertEqual([r["session_id"] for r in b], ["y"])
+        self.assertEqual([r["session_id"] for r in selected], ["hit"])
+
+    def test_a_filter_matching_nothing_selects_nothing(self):
+        rows = [row("a", "purchased"), row("b", "rest")]
+        selected, _ = analyze.select_rows_by_cut(rows, {"utm_campaign": "absent"})
+        self.assertEqual(selected, [])
 
 
 class TestCutKey(unittest.TestCase):
     def test_same_cut_hashes_the_same_regardless_of_key_order(self):
-        one = analyze.cut_key(
-            {"outcome": "purchased", "utm_source": "meta"}, {"utm_source": "google"}
-        )
-        two = analyze.cut_key(
-            {"utm_source": "META", "outcome": "purchased"}, {"utm_source": "google"}
-        )
+        one = analyze.cut_key({"outcome": "purchased", "utm_source": "meta"})
+        two = analyze.cut_key({"utm_source": "META", "outcome": "purchased"})
         self.assertEqual(one, two)
 
-    def test_swapping_the_sides_is_a_different_cut(self):
-        a = analyze.cut_key({"utm_source": "meta"}, {"utm_source": "google"})
-        b = analyze.cut_key({"utm_source": "google"}, {"utm_source": "meta"})
+    def test_different_filters_are_different_cuts(self):
+        a = analyze.cut_key({"utm_source": "meta"})
+        b = analyze.cut_key({"utm_source": "google"})
         self.assertNotEqual(a, b)
 
     def test_key_survives_a_json_round_trip(self):
-        key = analyze.cut_key({"outcome": "purchased"}, None)
-        self.assertEqual(json.loads(key)["a"], {"outcome": ["purchased"]})
+        key = analyze.cut_key({"outcome": "purchased"})
+        self.assertEqual(json.loads(key)["filter"], {"outcome": ["purchased"]})
 
 
 class TestNormalizeCutAnalysis(unittest.TestCase):
     def test_keeps_the_documented_shape_and_drops_junk(self):
         out = analyze.normalize_cut_analysis(
             {
-                "headline": "  Meta buyers reach checkout faster.  ",
-                "shared": ["both browse PDPs", "", 12, None],
-                "a_distinctive": ["3 of 5 use the size chart"],
-                "b_distinctive": [],
-                "caveats": ["only 2 sessions on side B"],
+                "headline": "  Buyers switch off the default supply size.  ",
+                "patterns": ["3 of 5 use the size chart", "", 12, None],
+                "friction": ["cart icon at [00:17] does nothing"],
+                "caveats": ["only 2 sessions"],
                 "extra_key": "ignored",
             }
         )
-        self.assertEqual(out["headline"], "Meta buyers reach checkout faster.")
-        self.assertEqual(out["shared"], ["both browse PDPs"])
-        self.assertEqual(out["a_distinctive"], ["3 of 5 use the size chart"])
-        self.assertEqual(out["b_distinctive"], [])
-        self.assertEqual(out["caveats"], ["only 2 sessions on side B"])
+        self.assertEqual(out["headline"], "Buyers switch off the default supply size.")
+        self.assertEqual(out["patterns"], ["3 of 5 use the size chart"])
+        self.assertEqual(out["friction"], ["cart icon at [00:17] does nothing"])
+        self.assertEqual(out["caveats"], ["only 2 sessions"])
         self.assertNotIn("extra_key", out)
+        # The two-sided fields are gone, not merely unused.
+        self.assertNotIn("a_distinctive", out)
+        self.assertNotIn("b_distinctive", out)
 
     def test_garbage_becomes_an_empty_analysis(self):
         for junk in (None, [], "text", {"headline": 42}):
             out = analyze.normalize_cut_analysis(junk)
             self.assertEqual(out["headline"], "")
-            self.assertEqual(out["shared"], [])
+            self.assertEqual(out["patterns"], [])
+            self.assertEqual(out["friction"], [])
 
     def test_long_lists_and_strings_are_capped(self):
         out = analyze.normalize_cut_analysis(
-            {"shared": [f"item {i}" for i in range(50)], "headline": "x" * 900}
+            {"patterns": [f"item {i}" for i in range(50)], "headline": "x" * 900}
         )
-        self.assertEqual(len(out["shared"]), 8)
+        self.assertEqual(len(out["patterns"]), 8)
         self.assertEqual(len(out["headline"]), 600)
 
 
@@ -243,7 +240,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
         analyze.call_gemini_cut = self._call
         analyze._gate_loop = None
 
-    def test_one_sided_cut_skips_the_model_call(self):
+    def test_an_empty_group_skips_the_model_call(self):
         calls = []
 
         async def fake(*args):
@@ -252,43 +249,59 @@ class TestBuildCutAnalysis(unittest.TestCase):
 
         analyze.call_gemini_cut = fake
         rows = [row("a", "purchased"), row("b", "purchased")]
-        out = asyncio.run(analyze.build_cut_analysis(rows, {"outcome": "purchased"}, None))
+        out = asyncio.run(analyze.build_cut_analysis(rows, {"outcome": "checkout"}))
 
-        self.assertEqual(calls, [], "no sessions on side B — nothing to contrast")
-        self.assertEqual(out["n_b"], 0)
+        self.assertEqual(calls, [], "no sessions match — nothing to read")
+        self.assertEqual(out["n"], 0)
         self.assertIn("No analyzed sessions", out["analysis"]["headline"])
 
-    def test_two_sided_cut_calls_the_model_and_records_membership(self):
+    def test_a_filtered_group_calls_the_model_and_records_membership(self):
         seen = {}
 
-        async def fake(rows_a, rows_b, label_a, label_b, given=""):
-            seen["a"] = [r["session_id"] for r in rows_a]
-            seen["b"] = [r["session_id"] for r in rows_b]
-            seen["labels"] = (label_a, label_b)
+        async def fake(rows, label, given=""):
+            seen["rows"] = [r["session_id"] for r in rows]
+            seen["label"] = label
             seen["given"] = given
-            return analyze.normalize_cut_analysis({"headline": "they differ"})
+            return analyze.normalize_cut_analysis({"headline": "they hesitate"})
 
         analyze.call_gemini_cut = fake
         rows = [row("p1", "purchased"), row("n1"), row("n2")]
-        out = asyncio.run(analyze.build_cut_analysis(rows, None, None))
+        out = asyncio.run(analyze.build_cut_analysis(rows, {"outcome": "purchased"}))
 
-        self.assertEqual(seen["a"], ["p1"])
-        self.assertEqual(seen["b"], ["n1", "n2"])
-        self.assertEqual(out["n_a"], 1)
-        self.assertEqual(out["n_b"], 2)
-        self.assertEqual(out["session_ids_a"], ["p1"])
-        self.assertEqual(out["session_ids_b"], ["n1", "n2"])
-        self.assertEqual(out["analysis"]["headline"], "they differ")
-        self.assertEqual(out["cut"], analyze.cut_key(None, None))
+        self.assertEqual(seen["rows"], ["p1"])
+        self.assertEqual(seen["label"], "purchased")
+        self.assertEqual(out["n"], 1)
+        self.assertEqual(out["session_ids"], ["p1"])
+        self.assertEqual(out["analysis"]["headline"], "they hesitate")
+        self.assertEqual(out["cut"], analyze.cut_key({"outcome": "purchased"}))
+
+    def test_an_unfiltered_group_reads_the_whole_cohort(self):
+        seen = {}
+
+        async def fake(rows, label, given=""):
+            seen["rows"] = [r["session_id"] for r in rows]
+            seen["label"] = label
+            seen["given"] = given
+            return analyze.empty_cut_analysis()
+
+        analyze.call_gemini_cut = fake
+        rows = [row("p1", "purchased"), row("n1"), row("n2")]
+        out = asyncio.run(analyze.build_cut_analysis(rows, None))
+
+        self.assertEqual(seen["rows"], ["p1", "n1", "n2"])
+        # No filter means nothing is already known, so nothing is banned.
+        self.assertEqual(seen["given"], "")
+        self.assertEqual(out["n"], 3)
+        self.assertEqual(out["label"], "all sessions")
 
     def test_side_text_labels_every_session_for_counting(self):
         text = analyze._cut_side_text(
             [row("s1", "purchased", "mobile", utm_source="meta"), row("s2", "checkout")],
-            "GROUP A",
+            "SESSIONS",
         )
-        self.assertIn("GROUP A — 2 session(s)", text)
-        self.assertIn("GROUP A session 1", text)
-        self.assertIn("GROUP A session 2", text)
+        self.assertIn("SESSIONS — 2 session(s)", text)
+        self.assertIn("SESSIONS session 1", text)
+        self.assertIn("SESSIONS session 2", text)
         self.assertIn("outcome: purchased", text)
         self.assertIn("reached checkout", text)
         self.assertIn("device: mobile", text)
@@ -298,38 +311,27 @@ class TestBuildCutAnalysis(unittest.TestCase):
 class TestGivenFacts(unittest.TestCase):
     """The filter that selected a group must never come back as a finding."""
 
-    def given(self, a, b=None):
-        spec_a = analyze.normalize_slice(a)
-        spec_b = analyze.normalize_slice(b)
-        return analyze._given_facts(spec_a, spec_b, complement=not spec_b)
+    def given(self, spec):
+        return analyze._given_facts(analyze.normalize_slice(spec))
 
     def test_outcome_filter_bans_the_obvious_restatement(self):
-        text = self.given({"outcome": ["purchased"]}, {"outcome": ["rest"]})
-        self.assertIn("Every Group A session purchased", text)
+        text = self.given({"outcome": ["purchased"]})
+        self.assertIn("Every session in this group purchased", text)
         # The exact tautology the first version of this prompt produced.
         self.assertIn("clicking buy", text)
-        self.assertIn("Every Group B session did not reach checkout", text)
-
-    def test_complement_side_is_named_as_having_no_trait(self):
-        text = self.given({"outcome": ["purchased"]}, None)
-        self.assertIn("no defining trait of its own", text)
-        self.assertNotIn("Every Group B session came from", text)
 
     def test_campaign_and_device_filters_are_declared(self):
-        text = self.given(
-            {"utm_campaign": "spring", "device": ["mobile"]}, {"utm_campaign": "fall"}
-        )
+        text = self.given({"utm_campaign": "spring", "device": ["mobile"]})
         self.assertIn("utm_campaign=spring", text)
         self.assertIn("was on mobile", text)
-        self.assertIn("utm_campaign=fall", text)
 
     def test_an_unconstrained_cut_has_nothing_to_declare(self):
-        self.assertEqual(analyze._given_facts({}, {}, complement=False), "")
+        self.assertEqual(analyze._given_facts({}), "")
 
     def test_build_passes_the_given_facts_to_the_model(self):
         seen = {}
 
-        async def fake(rows_a, rows_b, label_a, label_b, given=""):
+        async def fake(rows, label, given=""):
             seen["given"] = given
             return analyze.empty_cut_analysis()
 
@@ -339,14 +341,12 @@ class TestGivenFacts(unittest.TestCase):
         analyze._gate_loop = None
         try:
             rows = [row("a", "purchased"), row("b", "rest")]
-            asyncio.run(
-                analyze.build_cut_analysis(rows, {"outcome": ["purchased"]}, None)
-            )
+            asyncio.run(analyze.build_cut_analysis(rows, {"outcome": ["purchased"]}))
         finally:
             analyze.ANALYSIS_ENABLED = saved_enabled
             analyze.call_gemini_cut = saved_call
             analyze._gate_loop = None
-        self.assertIn("Every Group A session purchased", seen["given"])
+        self.assertIn("Every session in this group purchased", seen["given"])
 
 
 class TestCutPromptContent(unittest.TestCase):
@@ -364,6 +364,22 @@ class TestCutPromptContent(unittest.TestCase):
     def test_names_friction_as_the_priority(self):
         self.assertIn("rage click", analyze.CUT_PROMPT.lower())
 
+    def test_keeps_banning_the_filter_restatement(self):
+        """The tautology guard has to survive the move to a single group."""
+        prompt = analyze.CUT_PROMPT
+        self.assertIn("BANNED", prompt)
+        self.assertIn("Could I have predicted this from the group's definition", prompt)
+        self.assertIn("Buyers buy.", prompt)
+
+    def test_asks_for_the_single_group_schema(self):
+        prompt = analyze.CUT_PROMPT
+        for field in ('"headline"', '"patterns"', '"friction"', '"caveats"'):
+            self.assertIn(field, prompt)
+        # Nothing should still be asking the model to contrast two sides.
+        self.assertNotIn("a_distinctive", prompt)
+        self.assertNotIn("b_distinctive", prompt)
+        self.assertNotIn("Group B", prompt)
+
 
 class TestCutCache(unittest.TestCase):
     def setUp(self):
@@ -373,22 +389,22 @@ class TestCutCache(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def test_round_trips_a_cut_under_its_key(self):
-        key = analyze.cut_key({"outcome": "purchased"}, None)
+        key = analyze.cut_key({"outcome": "purchased"})
         self.assertIsNone(analyze.read_cut(self.pool, "cohort-1", key))
-        analyze.write_cut(self.pool, "cohort-1", key, {"cut": key, "n_a": 3})
-        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", key)["n_a"], 3)
+        analyze.write_cut(self.pool, "cohort-1", key, {"cut": key, "n": 3})
+        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", key)["n"], 3)
 
     def test_cuts_of_one_cohort_do_not_collide(self):
-        k1 = analyze.cut_key({"outcome": "purchased"}, None)
-        k2 = analyze.cut_key({"utm_source": "meta"}, None)
-        analyze.write_cut(self.pool, "cohort-1", k1, {"n_a": 1})
-        analyze.write_cut(self.pool, "cohort-1", k2, {"n_a": 2})
-        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", k1)["n_a"], 1)
-        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", k2)["n_a"], 2)
+        k1 = analyze.cut_key({"outcome": "purchased"})
+        k2 = analyze.cut_key({"utm_source": "meta"})
+        analyze.write_cut(self.pool, "cohort-1", k1, {"n": 1})
+        analyze.write_cut(self.pool, "cohort-1", k2, {"n": 2})
+        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", k1)["n"], 1)
+        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", k2)["n"], 2)
 
     def test_cohorts_do_not_share_a_cut_cache(self):
-        key = analyze.cut_key({"outcome": "purchased"}, None)
-        analyze.write_cut(self.pool, "cohort-1", key, {"n_a": 1})
+        key = analyze.cut_key({"outcome": "purchased"})
+        analyze.write_cut(self.pool, "cohort-1", key, {"n": 1})
         self.assertIsNone(analyze.read_cut(self.pool, "cohort-2", key))
 
     def test_a_bad_cohort_id_never_reaches_the_filesystem(self):

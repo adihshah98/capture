@@ -580,51 +580,20 @@ def slice_label(spec: dict) -> str:
     return " · ".join(parts)
 
 
-CUT_PRESETS = {
-    "purchased_vs_all": ({"outcome": ["purchased"]}, {"outcome": ["checkout", "rest"]}),
-    "purchased_vs_checkout": ({"outcome": ["purchased"]}, {"outcome": ["checkout"]}),
-    "checkout_vs_rest": ({"outcome": ["checkout"]}, {"outcome": ["rest"]}),
-    "mobile_vs_desktop": ({"device": ["mobile"]}, {"device": ["desktop"]}),
-    "meta_vs_rest": ({"utm_source": "meta"}, None),
-    "meta_purchased_vs_rest": ({"outcome": ["purchased"], "utm_source": "meta"}, None),
-    "google_vs_meta": ({"utm_source": "google"}, {"utm_source": "meta"}),
-    "google_purchased_vs_rest": ({"outcome": ["purchased"], "utm_source": "google"}, None),
-}
+def cut_key(slice_spec: Optional[dict]) -> str:
+    """Stable cache key for a cut. The same filter always hashes the same way."""
+    return json.dumps(
+        {"filter": normalize_slice(slice_spec)}, sort_keys=True, separators=(",", ":")
+    )
 
 
-def cut_key(slice_a: Optional[dict], slice_b: Optional[dict]) -> str:
-    """Stable cache key for a cut. Same two slices always hash the same way."""
-    spec = {
-        "a": normalize_slice(slice_a),
-        "b": normalize_slice(slice_b),
-    }
-    return json.dumps(spec, sort_keys=True, separators=(",", ":"))
+def select_rows_by_cut(rows: list, slice_spec: Optional[dict]) -> tuple:
+    """(matching_rows, spec). An empty filter selects the whole cohort."""
+    spec = normalize_slice(slice_spec)
+    return [row for row in rows if row_matches_slice(row, spec)], spec
 
 
-def split_rows_by_cut(rows: list, slice_a: Optional[dict], slice_b: Optional[dict]) -> tuple:
-    """(rows_a, rows_b, spec_a, spec_b). An empty B means 'everyone not in A'."""
-    spec_a = normalize_slice(slice_a)
-    spec_b = normalize_slice(slice_b)
-    if slice_is_empty(spec_a) and slice_is_empty(spec_b):
-        spec_a = {"outcome": ["purchased"]}
-        spec_b = {"outcome": ["checkout", "rest"]}
-        complement = False
-    else:
-        complement = slice_is_empty(spec_b)
-
-    rows_a, rows_b = [], []
-    for row in rows:
-        in_a = row_matches_slice(row, spec_a)
-        in_b = (not in_a) if complement else row_matches_slice(row, spec_b)
-        # A session matching both named slices counts in A only.
-        if in_a:
-            rows_a.append(row)
-        elif in_b:
-            rows_b.append(row)
-    return rows_a, rows_b, spec_a, spec_b
-
-
-CUT_PROMPT = """You compare two groups of recorded web sessions for a product team
+CUT_PROMPT = """You describe one group of recorded web sessions for a product team
 that is trying to decide what to change on the site.
 
 You receive per-session write-ups, each already grounded in that session's
@@ -633,8 +602,8 @@ a number, or an outcome that is not written there.
 
 ## The single most important rule
 
-Each group was SELECTED by a filter, stated below as "Group A is" / "Group B
-is". Everything entailed by that filter is already known and is NOT a finding.
+The group was SELECTED by a filter, stated below as "This group is".
+Everything entailed by that filter is already known and is NOT a finding.
 
 Before you write any item, apply this test:
 
@@ -643,7 +612,7 @@ Before you write any item, apply this test:
 
 If yes, DELETE IT. It is not an observation, it is the filter talking.
 
-Worked example. If Group A is "purchased", every one of these is banned:
+Worked example. If the group is "purchased", every one of these is banned:
   BANNED  "clicked 'Buy now' or 'Add to cart' (6 of 7)"
   BANNED  "proceeded to checkout"
   BANNED  "completed a purchase"
@@ -651,8 +620,8 @@ Worked example. If Group A is "purchased", every one of these is banned:
   BANNED  "showed strong purchase intent"
 Buyers buy. That is what makes them buyers. Reporting it tells the team nothing.
 
-The same test kills "Group B did not click any CTA" when B is defined as not
-converting, and "sessions came from campaign X" when X is the filter.
+The same test kills "none of them clicked a CTA" when the group is defined as
+not converting, and "sessions came from campaign X" when X is the filter.
 
 What IS a finding, for the same group:
   KEEP  "Switched from the default '90-Night Supply' to '30-Night Supply'
@@ -666,7 +635,7 @@ page — an element, a default, a position, a broken interaction. If your item
 does not point at something a designer or developer could go change tomorrow,
 it is not worth writing.
 
-Route unavoidable outcome differences into how they happened, never that they
+Route unavoidable outcome facts into how they happened, never that they
 happened.
 
 ## Be concrete, not abstract
@@ -696,24 +665,26 @@ none of them is almost certainly too vague to keep.
 
 Return a single JSON object with this exact shape:
 {
-  "headline": "one sentence naming the sharpest behavioural difference, with the specific evidence for it",
-  "shared": ["behaviour both groups show, with the concrete detail and counts"],
-  "a_distinctive": ["how A behaved differently on the page — never that A matched its own filter"],
-  "b_distinctive": ["how B behaved differently on the page — never that B matched its own filter"],
+  "headline": "one sentence naming the sharpest thing these sessions have in common, with the specific evidence for it",
+  "patterns": ["behaviour recurring across these sessions, with the concrete detail and counts"],
+  "friction": ["something that went wrong on the page — dead click, rage click, stall, unexpected redirect — with the element and timestamp"],
   "caveats": ["what these sessions cannot tell you, and any single-session oddity worth a look"]
 }
 
 Rules:
-- Cite how many sessions back each item, e.g. "3 of 5 A sessions". Count only
+- Cite how many sessions back each item, e.g. "3 of 5 sessions". Count only
   sessions whose write-up actually supports the point.
-- With fewer than 3 sessions on a side, say the evidence is thin rather than
-  asserting a pattern. Small samples are the normal case here.
-- A difference visible in only 1 session is an anecdote — put it in caveats,
-  not in a_distinctive or b_distinctive. A specific, surprising anecdote is
-  worth more there than a vague pattern would be anywhere else.
+- With fewer than 3 sessions, say the evidence is thin rather than asserting a
+  pattern. Small samples are the normal case here.
+- A behaviour visible in only 1 session is an anecdote — put it in caveats,
+  not in patterns. A specific, surprising anecdote is worth more there than a
+  vague pattern would be anywhere else. Friction is the exception: a single
+  dead click or rage click is worth reporting in friction on its own.
 - Friction is the most valuable thing you can find: rage clicks, dead clicks,
-  unexpected redirects, modals, long stalls, repeated attempts. Report these
-  with the exact element and timestamp whenever a write-up mentions one.
+  unexpected redirects, modals, long stalls, repeated attempts. Every one a
+  write-up mentions belongs in "friction", with the exact element and
+  timestamp. An empty friction list should mean the write-ups describe none,
+  not that you did not look.
 - The write-ups describe what was on screen, not where anyone looked. Say
   "reached", "was shown", "scrolled past" — never "read", "noticed", "focused
   on", or "was interested in".
@@ -723,7 +694,7 @@ Rules:
 
 
 def _cut_side_text(rows: list, label: str) -> str:
-    """One side's write-ups, labelled per session so the model can cite counts."""
+    """The group's write-ups, labelled per session so the model can cite counts."""
     if not rows:
         return f"### {label}\n(no sessions in this group)\n"
     parts = [f"### {label} — {len(rows)} session(s)\n"]
@@ -743,40 +714,29 @@ def _cut_side_text(rows: list, label: str) -> str:
     return "\n".join(parts)
 
 
-def _given_facts(spec_a: dict, spec_b: dict, complement: bool) -> str:
-    """Spell out what each filter already guarantees, so it is not 'found'."""
+def _given_facts(spec: dict) -> str:
+    """Spell out what the filter already guarantees, so it is not 'found'."""
     lines = []
 
-    def _facts(spec, side):
-        if spec.get("outcome"):
-            joined = " or ".join(
-                OUTCOME_LABELS.get(v, v) for v in spec["outcome"]
-            )
-            lines.append(
-                f"- Every {side} session {joined}. Do not report this, or any "
-                f"step it entails (clicking buy, reaching checkout, converting), "
-                f"as a finding about {side}."
-            )
-        if spec.get("device"):
-            lines.append(
-                f"- Every {side} session was on {' or '.join(spec['device'])}. "
-                f"Do not report the device itself as a finding."
-            )
-        for key in ("utm_source", "utm_medium", "utm_campaign", "utm_content"):
-            if spec.get(key):
-                lines.append(
-                    f"- Every {side} session came from {key}={spec[key]}. Do not "
-                    f"report the traffic source as a finding about {side}."
-                )
-
-    _facts(spec_a, "Group A")
-    if complement:
+    if spec.get("outcome"):
+        joined = " or ".join(OUTCOME_LABELS.get(v, v) for v in spec["outcome"])
         lines.append(
-            "- Group B is simply every other analyzed session in this cohort. "
-            "It has no defining trait of its own — do not invent one."
+            f"- Every session in this group {joined}. Do not report this, or "
+            f"any step it entails (clicking buy, reaching checkout, "
+            f"converting), as a finding."
         )
-    else:
-        _facts(spec_b, "Group B")
+    if spec.get("device"):
+        lines.append(
+            f"- Every session in this group was on "
+            f"{' or '.join(spec['device'])}. Do not report the device itself "
+            f"as a finding."
+        )
+    for key in ("utm_source", "utm_medium", "utm_campaign", "utm_content"):
+        if spec.get(key):
+            lines.append(
+                f"- Every session in this group came from {key}={spec[key]}. "
+                f"Do not report the traffic source as a finding."
+            )
     if not lines:
         return ""
     return "## Already known — never report these as findings\n\n" + "\n".join(lines)
@@ -785,9 +745,8 @@ def _given_facts(spec_a: dict, spec_b: dict, complement: bool) -> str:
 def empty_cut_analysis(error: Optional[str] = None) -> dict:
     out = {
         "headline": "",
-        "shared": [],
-        "a_distinctive": [],
-        "b_distinctive": [],
+        "patterns": [],
+        "friction": [],
         "caveats": [],
     }
     if error:
@@ -802,7 +761,7 @@ def normalize_cut_analysis(raw) -> dict:
     headline = data.get("headline")
     if isinstance(headline, str):
         out["headline"] = headline.strip()[:600]
-    for key in ("shared", "a_distinctive", "b_distinctive", "caveats"):
+    for key in ("patterns", "friction", "caveats"):
         items = data.get(key)
         if not isinstance(items, list):
             continue
@@ -819,25 +778,22 @@ def normalize_cut_analysis(raw) -> dict:
 
 
 async def call_gemini_cut(
-    rows_a: list,
-    rows_b: list,
-    label_a: str,
-    label_b: str,
+    rows: list,
+    label: str,
     given: str = "",
 ) -> dict:
-    """One text-only pass over both sides' write-ups."""
+    """One text-only pass over the group's write-ups."""
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    header = f"Group A is: {label_a}\nGroup B is: {label_b}\n"
+    header = f"This group is: {label}\n"
     if given:
         header += "\n" + given + "\n"
-    header += "\nThe write-ups for both groups follow."
+    header += "\nThe write-ups for this group follow."
     parts = [
         types.Part.from_text(text=header),
-        types.Part.from_text(text=_cut_side_text(rows_a, "GROUP A")),
-        types.Part.from_text(text=_cut_side_text(rows_b, "GROUP B")),
+        types.Part.from_text(text=_cut_side_text(rows, "SESSIONS")),
     ]
     response = await client.aio.models.generate_content(
         model=GEMINI_MODEL,
@@ -855,40 +811,33 @@ async def call_gemini_cut(
     return normalize_cut_analysis(_parse_json_object(response.text or ""))
 
 
-async def build_cut_analysis(
-    rows: list, slice_a: Optional[dict], slice_b: Optional[dict]
-) -> dict:
-    """Split the cohort by a cut and ask the model what differs across sides."""
+async def build_cut_analysis(rows: list, slice_spec: Optional[dict]) -> dict:
+    """Filter the cohort to one group and ask the model what it did."""
     if not ANALYSIS_ENABLED:
         raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
 
-    rows_a, rows_b, spec_a, spec_b = split_rows_by_cut(rows, slice_a, slice_b)
-    label_a = slice_label(spec_a)
-    label_b = slice_label(spec_b) if spec_b else f"everyone not in {label_a}"
+    selected, spec = select_rows_by_cut(rows, slice_spec)
+    label = slice_label(spec) if spec else "all sessions"
 
     base = {
-        "cut": cut_key(slice_a, slice_b),
-        "label_a": label_a,
-        "label_b": label_b,
-        "n_a": len(rows_a),
-        "n_b": len(rows_b),
-        "session_ids_a": [r.get("session_id") for r in rows_a],
-        "session_ids_b": [r.get("session_id") for r in rows_b],
+        "cut": cut_key(slice_spec),
+        "label": label,
+        "n": len(selected),
+        "session_ids": [r.get("session_id") for r in selected],
         "model": GEMINI_MODEL,
         "created_at": int(time.time() * 1000),
     }
 
-    # Nothing to contrast — say so rather than spending a call on one side.
-    if not rows_a or not rows_b:
+    # Nothing to read — say so rather than spending a call on an empty group.
+    if not selected:
         empty = empty_cut_analysis()
-        which = label_a if not rows_a else label_b
-        empty["headline"] = f"No analyzed sessions in {which} for this cohort."
+        empty["headline"] = f"No analyzed sessions match {label} in this cohort."
         return {**base, "analysis": empty}
 
-    given = _given_facts(spec_a, spec_b, complement=not spec_b)
+    given = _given_facts(spec)
     _, model_gate = _gates()
     async with model_gate:
-        analysis = await call_gemini_cut(rows_a, rows_b, label_a, label_b, given)
+        analysis = await call_gemini_cut(selected, label, given)
     return {**base, "analysis": analysis}
 
 
