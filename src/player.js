@@ -37,13 +37,22 @@ function buildSegments(events) {
   const rawDuration = Math.max(events[events.length - 1].timestamp - t0, 1);
   const active = [];
   let seg = null;
-  let lastMetaTs = -Infinity;
+  let lastHref = null;
+  let lastNavTs = -Infinity;
   for (const e of events) {
-    if (e.type === EventType.Meta) lastMetaTs = e.timestamp;
-    const isActive =
-      e.type === EventType.Meta ||
-      (e.type === EventType.FullSnapshot && e.timestamp - lastMetaTs <= SNAPSHOT_META_WINDOW_MS) ||
-      (e.type === EventType.IncrementalSnapshot && ACTIVE_SOURCES.has(e.data && e.data.source));
+    let isActive = false;
+    if (e.type === EventType.Meta) {
+      const href = e.data && e.data.href;
+      if (href !== lastHref) {
+        lastHref = href;
+        lastNavTs = e.timestamp;
+        isActive = true;
+      }
+    } else if (e.type === EventType.FullSnapshot) {
+      isActive = e.timestamp - lastNavTs <= SNAPSHOT_META_WINDOW_MS;
+    } else if (e.type === EventType.IncrementalSnapshot) {
+      isActive = ACTIVE_SOURCES.has(e.data && e.data.source);
+    }
     if (!isActive) continue;
     const t = e.timestamp - t0;
     if (seg && t - seg.end <= ACTIVITY_THRESHOLD_MS) {
