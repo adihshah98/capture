@@ -21,6 +21,29 @@ const FIRST_FRAME_LEAD_MS = 500;
 // Stay off the very end: seekTo within 50ms of duration routes to finish().
 const END_MARGIN_MS = 100;
 
+// The player re-applies recorded scroll at 400ms; shoot after that plus reflow.
+const SEEK_SETTLE_MS = 550;
+const IMAGE_SETTLE_CAP_MS = 600;
+const JPEG_QUALITY = 72;
+
+// Two rrweb rules the player depends on, inlined rather than loaded from the
+// emitted stylesheet: deploy.sh ships only extract.mjs and the JS bundle, so a
+// file dependency would work locally and break in production.
+const STAGE_CSS = `
+  html, body { margin: 0; padding: 0; }
+  #stage { position: relative; overflow: hidden; }
+  #stage iframe { border: 0; }
+  .replayer-wrapper { position: relative; }
+  .replayer-mouse-tail { position: absolute; pointer-events: none; }
+  /* rescale() writes an inline transform; it must not shift the screenshot. */
+  #stage .replayer-wrapper {
+    transform: none !important; position: relative !important;
+    top: 0 !important; left: 0 !important;
+  }
+  /* Replay-UI chrome that was never on the visitor's screen. */
+  .replayer-mouse, .replayer-mouse-tail, .click-pulse { display: none !important; }
+`;
+
 function readChunks(sessionDir, names) {
   const chunks = [];
   for (const name of names) {
@@ -192,172 +215,88 @@ export function pickFrameTimes(events, { fps = 1, maxFrames = 0 } = {}) {
   return sorted;
 }
 
-export function dwellBySection(scroll, sections, viewport, idle, endTs) {
-  if (!sections.length || !viewport) return [];
-  const totals = new Map();
-  for (let i = 0; i < scroll.length; i++) {
-    const from = scroll[i].t;
-    const to = i + 1 < scroll.length ? scroll[i + 1].t : endTs;
-    const ms = activeMs(from, to, idle);
-    if (ms <= 0) continue;
-    const top = scroll[i].y;
-    const bottom = top + viewport.height;
-    for (const s of sections) {
-      const visible = Math.min(bottom, s.bottom) - Math.max(top, s.top);
-      if (visible > 0) totals.set(s.id, (totals.get(s.id) || 0) + ms);
-    }
-  }
-  return sections
-    .map((s) => ({ ...s, dwellMs: Math.round(totals.get(s.id) || 0) }))
-    .filter((s) => s.dwellMs > 0)
-    .sort((a, b) => b.dwellMs - a.dwellMs);
+/** Page-side bootstrap: build the real replay player and hold it at time 0. */
+async function startPlayer(page, events) {
+  await page.evaluate(({ events }) => {
+    const player = new window.captureAnalyze.CapturePlayer({
+      events,
+      mount: document.getElementById('stage'),
+      speed: 1,
+      skipInactive: false,
+    });
+    // The constructor starts playing; stop it before the rAF loop can advance
+    // past a seek target or skip ahead on its own.
+    player.pause(0);
+    window.__player = player;
+  }, { events });
+  await page.waitForTimeout(SETTLE_MS);
 }
 
-function attributeClicks(clicks, sections, scroll, viewport) {
-  if (!viewport) return;
-  const scrollAt = (t) => {
-    let y = 0;
-    for (const p of scroll) {
-      if (p.t > t) break;
-      y = p.y;
-    }
-    return y;
-  };
-  for (const c of clicks) {
-    if (typeof c.y !== 'number') continue;
-    const pageY = scrollAt(c.t) + c.y;
-    const hit = sections.find((s) => pageY >= s.top && pageY < s.bottom);
-    if (hit) c.section = hit.label;
-  }
-}
-
-async function measure(page, events) {
-  return page.evaluate(
-    ({ events, selector, trustSource }) =>
-      new Promise((resolve) => {
-        const trust = new RegExp(trustSource, 'i');
-        const mount = document.getElementById('stage');
-        const replayer = new window.rrweb.Replayer(events, {
-          root: mount,
-          speed: 1,
-          skipInactive: false,
-          useVirtualDom: false,
-          triggerFocus: false,
-          mouseTail: false,
-        });
-        replayer.pause(Math.max(0, events[events.length - 1].timestamp - events[0].timestamp));
-
-        setTimeout(() => {
-          const doc = replayer.iframe.contentDocument;
-          if (!doc || !doc.body) return resolve({ sections: [], assetErrors: 0, docHeight: 0 });
-
-          // Headings name a band; container elements (section/article) only
-          // contribute when no heading sits inside them, otherwise the
-          // container and its own heading both become bands covering the
-          // same pixels and dwell gets double counted.
-          const nodes = [...doc.querySelectorAll(selector)];
-          const raw = [];
-          for (const el of nodes) {
-            const tag = el.tagName.toLowerCase();
-            const isHeading = tag === 'h1' || tag === 'h2' || tag === 'h3';
-            if (!isHeading && el.querySelector('h1,h2,h3')) continue;
-            const r = el.getBoundingClientRect();
-            if (r.height <= 0) continue;
-            const top = r.top + (doc.documentElement.scrollTop || doc.body.scrollTop || 0);
-            const source = isHeading ? el : el.querySelector('h1,h2,h3,[class*=title],[class*=heading]') || el;
-            const label = (source.innerText || source.textContent || '')
-              .replace(/\s+/g, ' ')
-              // rrweb replaces masked input values with runs of asterisks;
-              // they carry no meaning and must not reach the model.
-              .replace(/\*{2,}/g, ' ')
-              .replace(/\s+/g, ' ')
-              .trim()
-              .slice(0, 90);
-            if (!label) continue;
-            raw.push({ top: Math.round(top), height: Math.round(r.height), label, tag });
-          }
-          raw.sort((a, b) => a.top - b.top);
-
-          const seen = new Set();
-          const sections = [];
-          for (const s of raw) {
-            if (seen.has(s.label)) continue;
-            seen.add(s.label);
-            sections.push(s);
-          }
-
-          const docHeight = Math.max(
-            doc.body.scrollHeight || 0,
-            doc.documentElement.scrollHeight || 0
-          );
-
-          const out = sections.map((s, i) => {
-            const next = sections[i + 1];
-            const bottom = next ? Math.max(next.top, s.top + s.height) : s.top + s.height;
-            const band = { top: s.top, bottom: Math.max(bottom, s.top + s.height) };
-            const images = [];
-            for (const img of doc.querySelectorAll('img')) {
-              const r = img.getBoundingClientRect();
-              const y = r.top + (doc.documentElement.scrollTop || doc.body.scrollTop || 0);
-              if (y >= band.top && y < band.bottom && r.width > 40 && r.height > 40) {
-                images.push({
-                  src: (img.currentSrc || img.src || '').slice(0, 300),
-                  alt: (img.getAttribute('alt') || '').slice(0, 120),
-                  loaded: img.complete && img.naturalWidth > 0,
-                });
-              }
+/** Wait for images to decode, but never let a dead origin stall the run. */
+async function settleImages(page, capMs = IMAGE_SETTLE_CAP_MS) {
+  try {
+    await page.evaluate(
+      (cap) =>
+        new Promise((resolve) => {
+          const done = setTimeout(resolve, cap);
+          const doc = document.querySelector('#stage iframe')?.contentDocument;
+          if (!doc) return resolve(clearTimeout(done));
+          const pending = [...doc.querySelectorAll('img')].filter((i) => !i.complete);
+          if (!pending.length) return resolve(clearTimeout(done));
+          let left = pending.length;
+          const tick = () => {
+            if (--left <= 0) {
+              clearTimeout(done);
+              resolve();
             }
-            return {
-              id: `s${i}`,
-              label: s.label,
-              tag: s.tag,
-              top: band.top,
-              bottom: band.bottom,
-              images: images.slice(0, 4),
-              trustSignal: trust.test(s.label),
-            };
-          });
-
-          let assetErrors = 0;
-          for (const img of doc.querySelectorAll('img')) {
-            if (img.complete && img.naturalWidth === 0) assetErrors += 1;
+          };
+          for (const img of pending) {
+            img.addEventListener('load', tick, { once: true });
+            img.addEventListener('error', tick, { once: true });
           }
-          resolve({ sections: out, assetErrors, docHeight });
-        }, 1200);
-      }),
-    { events, selector: SECTION_SELECTOR, trustSource: TRUST_HINT.source }
-  );
+        }),
+      capMs
+    );
+  } catch {}
 }
 
-async function shootRegions(page, regions, viewport, outDir) {
-  const shots = [];
-  for (const region of regions) {
-    const height = clamp(region.bottom - region.top, 80, viewport.height * 2);
+/**
+ * Screenshot the replay at each timestamp. Seeks strictly forward: rrweb
+ * applies incremental mutations from the nearest preceding snapshot, so going
+ * backwards would force a full DOM rebuild every frame.
+ */
+async function captureFrames(page, times, outDir) {
+  const frames = [];
+  for (let i = 0; i < times.length; i++) {
+    const atMs = times[i];
     try {
+      await page.evaluate((t) => window.__player.seekTo(t, { play: false }), atMs);
+      // CapturePlayer re-applies the recorded scroll at 90ms and 400ms; a shot
+      // taken before that lands shows the wrong offset.
+      await page.waitForTimeout(SEEK_SETTLE_MS);
       await page.evaluate(
-        ({ top }) => {
-          const f = document.querySelector('#stage iframe');
-          if (f && f.contentWindow) f.contentWindow.scrollTo({ top, behavior: 'auto' });
-        },
-        { top: region.top }
+        () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
       );
-      await page.waitForTimeout(350);
+      await settleImages(page);
+
       const frame = await page.$('#stage iframe');
       if (!frame) continue;
-      const file = join(outDir, `${region.id}.jpg`);
-      await frame.screenshot({
-        path: file,
-        type: 'jpeg',
-        quality: 72,
-        clip: { x: 0, y: 0, width: viewport.width, height: Math.min(height, viewport.height) },
-      });
-      shots.push({ id: region.id, label: region.label, file });
+      const file = join(outDir, `f${String(i).padStart(3, '0')}.jpg`);
+      await frame.screenshot({ path: file, type: 'jpeg', quality: JPEG_QUALITY });
+      frames.push({ atMs, file });
     } catch {}
   }
-  return shots;
+  return frames;
 }
 
-export async function extractSession({ sessionDir, chunkNames, outDir, bundlePath }) {
+export async function extractSession({
+  sessionDir,
+  chunkNames,
+  outDir,
+  bundlePath,
+  fps = 1,
+  maxFrames = 0,
+}) {
   const chunks = readChunks(sessionDir, chunkNames);
   const events = collectEvents(chunks);
   if (events.length < 2) {
@@ -378,9 +317,12 @@ export async function extractSession({ sessionDir, chunkNames, outDir, bundlePat
 
   mkdirSync(outDir, { recursive: true });
 
+  const times = pickFrameTimes(events, { fps, maxFrames });
+
   const browser = await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage'] });
-  let measured = { sections: [], assetErrors: 0, docHeight: 0 };
-  let shots = [];
+  let frames = [];
+  let pageHeight = 0;
+  let failedAssets = 0;
   try {
     const page = await browser.newPage({
       viewport: { width: viewport.width, height: viewport.height },
@@ -388,31 +330,36 @@ export async function extractSession({ sessionDir, chunkNames, outDir, bundlePat
     });
     page.setDefaultTimeout(NAV_TIMEOUT_MS);
     await page.setContent(
-      `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;padding:0}
-       #stage{position:relative;width:${viewport.width}px;height:${viewport.height}px;overflow:hidden}
-       #stage iframe{border:0;width:${viewport.width}px;height:${viewport.height}px}
-       .replayer-wrapper{position:static!important;transform:none!important}
-       .replayer-mouse,.replayer-mouse-tail{display:none!important}</style><div id="stage"></div>`
+      `<!doctype html><meta charset="utf-8"><style>${STAGE_CSS}
+       #stage{width:${viewport.width}px;height:${viewport.height}px}
+       #stage iframe{width:${viewport.width}px;height:${viewport.height}px}
+       </style><div id="stage"></div>`
     );
     await page.addScriptTag({ path: bundlePath });
-    await page.waitForTimeout(SETTLE_MS);
-    measured = await measure(page, events);
+    await startPlayer(page, events);
 
-    const dwell = dwellBySection(scroll, measured.sections, viewport, idle, endTs);
-    const top = dwell.filter((s) => s.dwellMs >= MIN_REGION_DWELL_MS).slice(0, MAX_SHOTS);
-    if (top.length) shots = await shootRegions(page, top, viewport, outDir);
+    frames = await captureFrames(page, times, outDir);
+
+    pageHeight = await page
+      .evaluate(() => {
+        const doc = document.querySelector('#stage iframe')?.contentDocument;
+        if (!doc) return 0;
+        return Math.max(doc.body?.scrollHeight || 0, doc.documentElement?.scrollHeight || 0);
+      })
+      .catch(() => 0);
+    failedAssets = await page
+      .evaluate(() => window.__player?.failedAssets?.size || 0)
+      .catch(() => 0);
   } finally {
     await browser.close();
   }
-
-  const sections = dwellBySection(scroll, measured.sections, viewport, idle, endTs);
-  attributeClicks(clicks, measured.sections, scroll, viewport);
 
   const totalMs = endTs - startTs;
   const idleMs = idle.reduce(
     (n, [s, e]) => n + Math.max(0, Math.min(e === Infinity ? endTs : e, endTs) - s),
     0
   );
+  const maxScrollPx = scroll.reduce((n, p) => Math.max(n, p.y || 0), 0);
 
   const digest = {
     session: {
@@ -420,36 +367,28 @@ export async function extractSession({ sessionDir, chunkNames, outDir, bundlePat
       activeMs: Math.max(0, totalMs - idleMs),
       idleMs,
       viewport,
-      pageHeight: measured.docHeight,
+      pageHeight,
+      maxScrollPx,
       urls,
       eventCount: events.length,
+      frameCount: frames.length,
+      fps,
     },
-    sections: sections.map((s) => ({
-      label: s.label,
-      dwellMs: s.dwellMs,
-      top: s.top,
-      bottom: s.bottom,
-      trustSignal: s.trustSignal,
-      images: s.images,
-    })),
     clicks: clicks.map((c) => ({
       atMs: c.t - startTs,
       text: c.text,
       selector: c.selector,
       tag: c.tag,
-      section: c.section || null,
       image: c.image,
       rage: c.rage,
     })),
     warnings: [
-      ...(measured.assetErrors
-        ? [`${measured.assetErrors} image(s) failed to load during reconstruction — visual descriptions for those regions are unreliable`]
+      ...(failedAssets
+        ? [`${failedAssets} asset(s) failed to load during replay — parts of the frames may be missing`]
         : []),
-      ...(measured.sections.length === 0
-        ? ['no headings/sections were found in the reconstructed DOM — dwell could not be attributed to named sections']
-        : []),
+      ...(frames.length === 0 ? ['no frames could be captured from the replay'] : []),
     ],
-    screenshots: shots,
+    frames,
   };
 
   const digestPath = join(outDir, 'digest.json');
@@ -458,8 +397,15 @@ export async function extractSession({ sessionDir, chunkNames, outDir, bundlePat
 }
 
 if (process.argv[1] && process.argv[1].endsWith('extract.mjs')) {
-  const [, , sessionDir, outDir, bundlePath, ...chunkNames] = process.argv;
-  extractSession({ sessionDir, outDir, bundlePath, chunkNames })
+  const [, , sessionDir, outDir, bundlePath, fps, maxFrames, ...chunkNames] = process.argv;
+  extractSession({
+    sessionDir,
+    outDir,
+    bundlePath,
+    fps: Number(fps) || 1,
+    maxFrames: Number(maxFrames) || 0,
+    chunkNames,
+  })
     .then((d) => {
       process.stdout.write(JSON.stringify(d));
     })
