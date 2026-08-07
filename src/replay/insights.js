@@ -17,6 +17,7 @@ const tableWrapEl = document.getElementById('cohort-table-wrap');
 const compareBodyEl = document.getElementById('compare-body');
 const compareSummaryEl = document.getElementById('compare-summary');
 const groupByEl = document.getElementById('compare-group-by');
+const contrastEl = document.getElementById('compare-contrast');
 const queuePanelEl = document.getElementById('insights-queue');
 const comparePanelEl = document.getElementById('insights-compare');
 
@@ -68,6 +69,8 @@ function summaryUrl() {
   if (currentProject) params.set('project', currentProject);
   const groupBy = groupByEl.value || 'none';
   params.set('group_by', groupBy);
+  const contrast = (contrastEl && contrastEl.value) || 'purchased_vs_all';
+  params.set('contrast', contrast);
   return `/api/insights/summary?${params.toString()}`;
 }
 
@@ -267,26 +270,52 @@ function renderSummary(body) {
     compareSummaryEl.innerHTML = '';
     return;
   }
-  const purchased = body.by_outcome?.purchased || { n: 0, themes: {} };
-  const all = body.by_outcome?.all || { n: 0, themes: {} };
-  const enrichedPurchased = (body.enriched?.purchased || [])
-    .map(
-      (e) =>
-        `<li><span class="delta">+${e.purchased - e.all}</span> ${escapeHtml(e.theme)} ` +
-        `<span class="meta">(${e.purchased} vs ${e.all})</span></li>`
-    )
+
+  const contrast = body.contrast || {};
+  const sideA = contrast.a || { n: 0, themes: {}, label: 'A' };
+  const sideB = contrast.b || { n: 0, themes: {}, label: 'B' };
+  const narrative = body.narrative || contrast.narrative || [];
+  const narrativeHtml = narrative.length
+    ? `<div class="summary-narrative"><h4>What stands out</h4><ul>${narrative
+        .map((line) => `<li>${escapeHtml(line)}</li>`)
+        .join('')}</ul></div>`
+    : '';
+
+  const enrichedA = (contrast.enriched_a || [])
+    .slice(0, 5)
+    .map((e) => {
+      const delta = e.ratio
+        ? `${e.ratio}×`
+        : `+${Math.round((e.a_rate - e.b_rate) * 100)}pp`;
+      return (
+        `<li><span class="delta">${escapeHtml(String(delta))}</span> ${escapeHtml(e.theme)} ` +
+        `<span class="meta">(${e.a_count}/${sideA.n} vs ${e.b_count}/${sideB.n})</span></li>`
+      );
+    })
     .join('');
-  const enrichedAll = (body.enriched?.all || [])
-    .map(
-      (e) =>
-        `<li><span class="delta">+${e.all - e.purchased}</span> ${escapeHtml(e.theme)} ` +
-        `<span class="meta">(${e.all} vs ${e.purchased})</span></li>`
-    )
+  const enrichedB = (contrast.enriched_b || [])
+    .slice(0, 5)
+    .map((e) => {
+      const delta = e.ratio
+        ? `${e.ratio}×`
+        : `+${Math.round((e.b_rate - e.a_rate) * 100)}pp`;
+      return (
+        `<li><span class="delta">${escapeHtml(String(delta))}</span> ${escapeHtml(e.theme)} ` +
+        `<span class="meta">(${e.b_count}/${sideB.n} vs ${e.a_count}/${sideA.n})</span></li>`
+      );
+    })
     .join('');
 
   let table = '';
   const matrix = body.theme_x_segment;
-  if (matrix && matrix.cols && matrix.cols.length && matrix.rows && matrix.rows.length && body.group_by !== 'none') {
+  if (
+    matrix &&
+    matrix.cols &&
+    matrix.cols.length &&
+    matrix.rows &&
+    matrix.rows.length &&
+    body.group_by !== 'none'
+  ) {
     const head = matrix.cols.map((c) => `<th>${escapeHtml(c)}</th>`).join('');
     const rows = matrix.rows
       .map((theme, i) => {
@@ -301,16 +330,17 @@ function renderSummary(body) {
 
   compareSummaryEl.hidden = false;
   compareSummaryEl.innerHTML = `
+    ${narrativeHtml}
     <div class="summary-grid">
       <div class="summary-col">
-        <h4>Purchased themes <span class="n">(n=${purchased.n})</span></h4>
-        ${themeCountChips(purchased.themes)}
-        ${enrichedPurchased ? `<ul class="enriched"><li><strong>Enriched here</strong></li>${enrichedPurchased}</ul>` : ''}
+        <h4>${escapeHtml(sideA.label)} <span class="n">(n=${sideA.n})</span></h4>
+        ${themeCountChips(sideA.themes)}
+        ${enrichedA ? `<ul class="enriched"><li><strong>Enriched here</strong></li>${enrichedA}</ul>` : ''}
       </div>
       <div class="summary-col">
-        <h4>All / non-purchase themes <span class="n">(n=${all.n})</span></h4>
-        ${themeCountChips(all.themes)}
-        ${enrichedAll ? `<ul class="enriched"><li><strong>Enriched here</strong></li>${enrichedAll}</ul>` : ''}
+        <h4>${escapeHtml(sideB.label)} <span class="n">(n=${sideB.n})</span></h4>
+        ${themeCountChips(sideB.themes)}
+        ${enrichedB ? `<ul class="enriched"><li><strong>Enriched here</strong></li>${enrichedB}</ul>` : ''}
       </div>
     </div>
     ${table}`;
@@ -476,6 +506,11 @@ export function initInsights() {
   groupByEl.addEventListener('change', () => {
     if (cohort) refreshSummary().catch(() => {});
   });
+  if (contrastEl) {
+    contrastEl.addEventListener('change', () => {
+      if (cohort) refreshSummary().catch(() => {});
+    });
+  }
   setTab('compare');
 
   const projectSelect = document.getElementById('project-select');
