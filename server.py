@@ -541,6 +541,41 @@ INDEX_PATH = DATA_ROOT / "index.db"
 _index_lock = threading.Lock()
 _index_conn: Optional[sqlite3.Connection] = None
 
+ATTRIBUTION_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid")
+SUMMARY_GROUP_BY = frozenset({"utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid", "none"})
+
+def parse_attribution(url: Optional[str]) -> Optional[dict]:
+    """Pull utm_* / fbclid from an entry URL for indexing and segment rollups."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return None
+    params: dict = {}
+    for key, values in urllib.parse.parse_qs(parsed.query, keep_blank_values=False).items():
+        if values and values[0]:
+            params[key] = values[0]
+    fragment = parsed.fragment or ""
+    if fragment and re.match(r"^[^/]+=", fragment):
+        for key, values in urllib.parse.parse_qs(fragment, keep_blank_values=False).items():
+            if key not in params and values and values[0]:
+                params[key] = values[0]
+    out = {}
+    for key in ATTRIBUTION_KEYS:
+        if key not in params:
+            continue
+        if key == "fbclid":
+            out["fbclid"] = True
+        else:
+            out[key] = str(params[key])[:256]
+    return out or None
+
+def ensure_index_schema(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    if "attribution" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN attribution TEXT")
+
 def index_conn() -> sqlite3.Connection:
     global _index_conn
     if _index_conn is None:
@@ -561,12 +596,15 @@ def index_conn() -> sqlite3.Connection:
                 "order" TEXT,
                 interactions TEXT,
                 device TEXT,
+                attribution TEXT,
                 PRIMARY KEY (pool, session_id)
             );
             CREATE INDEX IF NOT EXISTS sessions_recency
                 ON sessions (pool, last_seen DESC, session_id DESC);
             """
         )
+        ensure_index_schema(conn)
+        conn.commit()
         _index_conn = conn
     return _index_conn
 
@@ -574,14 +612,15 @@ def pool_key(pool: Path) -> str:
     return "" if pool == DATA_DIR else pool.parent.name
 
 def index_ingest(pool, session_id, ts, size, meta, interactions, device) -> None:
+    attribution = parse_attribution(meta.get("url"))
     with _index_lock:
         conn = index_conn()
         conn.execute(
             """
             INSERT INTO sessions
                 (pool, session_id, first_seen, last_seen, chunk_count, bytes,
-                 visitor_id, url, interactions, device)
-            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                 visitor_id, url, interactions, device, attribution)
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (pool, session_id) DO UPDATE SET
                 first_seen = min(first_seen, excluded.first_seen),
                 last_seen = max(last_seen, excluded.last_seen),
@@ -590,13 +629,15 @@ def index_ingest(pool, session_id, ts, size, meta, interactions, device) -> None
                 visitor_id = coalesce(visitor_id, excluded.visitor_id),
                 url = coalesce(url, excluded.url),
                 interactions = coalesce(excluded.interactions, interactions),
-                device = coalesce(device, excluded.device)
+                device = coalesce(device, excluded.device),
+                attribution = coalesce(attribution, excluded.attribution)
             """,
             (
                 pool_key(pool), session_id, ts, ts, size,
                 meta.get("visitor_id"), meta.get("url"),
                 json.dumps(interactions) if interactions else None,
                 json.dumps(device) if device else None,
+                json.dumps(attribution) if attribution else None,
             ),
         )
         conn.commit()
@@ -653,6 +694,9 @@ def session_info(entry: Path) -> Optional[dict]:
             info.update({k: meta[k] for k in ("visitor_id", "url") if isinstance(meta.get(k), str)})
         except Exception:
             pass
+    attribution = parse_attribution(info.get("url"))
+    if attribution:
+        info["attribution"] = attribution
     return info
 
 def rebuild_index(pool: Path) -> int:
@@ -668,7 +712,12 @@ def rebuild_index(pool: Path) -> int:
         conn = index_conn()
         conn.execute("DELETE FROM sessions WHERE pool = ?", (key,))
         conn.executemany(
-            "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO sessions
+                (pool, session_id, first_seen, last_seen, chunk_count, bytes,
+                 visitor_id, url, "order", interactions, device, attribution)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             [
                 (
                     key, i["session_id"], i["first_seen"], i["last_seen"],
@@ -676,6 +725,7 @@ def rebuild_index(pool: Path) -> int:
                     json.dumps(i["order"]) if "order" in i else None,
                     json.dumps(i["interactions"]) if "interactions" in i else None,
                     json.dumps(i["device"]) if "device" in i else None,
+                    json.dumps(i["attribution"]) if "attribution" in i else None,
                 )
                 for i in infos
             ],
@@ -692,6 +742,29 @@ def reconcile_index() -> None:
             ).fetchone()
         if count == 0 and any(entry.is_dir() for entry in pool.iterdir()):
             print(f"index: rebuilt '{key or '(no project)'}' — {rebuild_index(pool)} session(s)")
+    backfill_attribution()
+
+def backfill_attribution() -> int:
+    """Fill attribution from stored entry URLs for rows indexed before this column existed."""
+    updated = 0
+    with _index_lock:
+        conn = index_conn()
+        rows = conn.execute(
+            "SELECT pool, session_id, url FROM sessions "
+            "WHERE attribution IS NULL AND url IS NOT NULL AND url != ''"
+        ).fetchall()
+        for key, sid, url in rows:
+            attr = parse_attribution(url)
+            if not attr:
+                continue
+            conn.execute(
+                "UPDATE sessions SET attribution = ? WHERE pool = ? AND session_id = ?",
+                (json.dumps(attr), key, sid),
+            )
+            updated += 1
+        if updated:
+            conn.commit()
+    return updated
 
 def workos_call(path: str, payload: Optional[dict] = None, bearer: bool = False) -> dict:
     req = urllib.request.Request(
@@ -859,7 +932,7 @@ def list_sessions(
         rows = conn.execute(
             f"""
             SELECT session_id, first_seen, last_seen, chunk_count, bytes,
-                   visitor_id, url, "order", interactions, device
+                   visitor_id, url, "order", interactions, device, attribution
             FROM sessions WHERE {' AND '.join(where)}
             ORDER BY last_seen DESC, session_id DESC LIMIT ?
             """,
@@ -867,7 +940,7 @@ def list_sessions(
         ).fetchall()
     more = len(rows) > limit
     sessions = []
-    for sid, first, last, count, size, visitor, url, order, interactions, device in rows[:limit]:
+    for sid, first, last, count, size, visitor, url, order, interactions, device, attribution in rows[:limit]:
         info = {
             "session_id": sid,
             "first_seen": first,
@@ -879,7 +952,12 @@ def list_sessions(
             info["visitor_id"] = visitor
         if url:
             info["url"] = url
-        for key, value in (("order", order), ("interactions", interactions), ("device", device)):
+        for key, value in (
+            ("order", order),
+            ("interactions", interactions),
+            ("device", device),
+            ("attribution", attribution),
+        ):
             if value:
                 info[key] = json.loads(value)
         sessions.append(info)
@@ -1133,6 +1211,120 @@ async def create_cohort(
         analyze.attach_cohort_insights(pool, analyze.enrich_cohort_status(pool, cohort)),
         status_code=202,
     )
+
+
+def _attribution_map(pool: Path) -> dict:
+    """session_id → attribution dict from the index."""
+    with _index_lock:
+        rows = index_conn().execute(
+            "SELECT session_id, attribution FROM sessions WHERE pool = ?",
+            (pool_key(pool),),
+        ).fetchall()
+    out = {}
+    for sid, raw in rows:
+        if not raw:
+            continue
+        try:
+            value = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(value, dict) and value:
+            out[sid] = value
+    return out
+
+
+def _summary_rows_from_cohort(pool: Path, cohort: dict, outcome_filter: Optional[str]) -> list:
+    attrs = _attribution_map(pool)
+    rows = []
+    for entry in cohort.get("sessions") or []:
+        outcome = "purchased" if entry.get("filter") == "purchased" else "all"
+        if outcome_filter == "purchased" and outcome != "purchased":
+            continue
+        insights = analyze.read_insights(pool / entry["session_id"])
+        if not insights:
+            continue
+        rows.append(
+            {
+                "session_id": entry["session_id"],
+                "outcome": outcome,
+                "attribution": attrs.get(entry["session_id"]),
+                "themes": list(insights.get("themes") or []),
+            }
+        )
+    return rows
+
+
+def _summary_rows_from_pool(pool: Path, outcome_filter: Optional[str]) -> list:
+    attrs = _attribution_map(pool)
+    where = ["pool = ?"]
+    params: list = [pool_key(pool)]
+    if outcome_filter == "purchased":
+        where.append("json_extract(\"order\", '$.purchased_at') IS NOT NULL")
+    elif outcome_filter == "checkout":
+        where.append('"order" IS NOT NULL')
+    with _index_lock:
+        rows = index_conn().execute(
+            f'SELECT session_id, "order" FROM sessions WHERE {" AND ".join(where)}',
+            params,
+        ).fetchall()
+    out = []
+    for sid, order_raw in rows:
+        insights = analyze.read_insights(pool / sid)
+        if not insights:
+            continue
+        purchased = False
+        if order_raw:
+            try:
+                order = json.loads(order_raw)
+                purchased = isinstance(order, dict) and order.get("purchased_at") is not None
+            except Exception:
+                purchased = False
+        out.append(
+            {
+                "session_id": sid,
+                "outcome": "purchased" if purchased else "all",
+                "attribution": attrs.get(sid),
+                "themes": list(insights.get("themes") or []),
+            }
+        )
+    return out
+
+
+@app.get("/api/insights/summary")
+def insights_summary(
+    request: Request,
+    project: Optional[str] = Query(None),
+    group_by: str = Query("none"),
+    filter: Optional[str] = Query(None),
+    scope: str = Query("cohort"),
+):
+    """Theme × segment rollup for the current cohort (default) or all analyzed sessions."""
+    require_read_access(request, project)
+    if group_by not in SUMMARY_GROUP_BY:
+        raise ApiError(400, f"group_by must be one of: {', '.join(sorted(SUMMARY_GROUP_BY))}")
+    if filter and filter not in SESSION_FILTERS and filter != "all":
+        raise ApiError(400, "unknown filter")
+    pool = resolve_pool(project)
+    outcome_filter = None if not filter or filter == "all" else filter
+
+    if scope == "all":
+        rows = _summary_rows_from_pool(pool, outcome_filter)
+        label = None
+    else:
+        cohort = analyze.read_cohort(pool)
+        if not cohort:
+            raise ApiError(404, "no cohort yet")
+        live = analyze.enrich_cohort_status(pool, cohort)
+        rows = _summary_rows_from_cohort(pool, live, outcome_filter)
+        label = live.get("label")
+
+    summary = analyze.build_insights_summary(rows, group_by=group_by)
+    return {
+        **summary,
+        "scope": "all" if scope == "all" else "cohort",
+        "filter": filter or None,
+        **({"label": label} if label else {}),
+    }
 
 
 def sweep_expired_sessions() -> int:
