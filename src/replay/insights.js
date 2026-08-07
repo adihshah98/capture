@@ -16,10 +16,15 @@ const compareProgressEl = document.getElementById('compare-progress');
 const tableWrapEl = document.getElementById('cohort-table-wrap');
 const compareBodyEl = document.getElementById('compare-body');
 const compareSummaryEl = document.getElementById('compare-summary');
+const compareExamplesEl = document.getElementById('compare-examples');
 const groupByEl = document.getElementById('compare-group-by');
 const contrastEl = document.getElementById('compare-contrast');
+const qaModeEl = document.getElementById('compare-qa-mode');
 const queuePanelEl = document.getElementById('insights-queue');
 const comparePanelEl = document.getElementById('insights-compare');
+const reviewPanelEl = document.getElementById('insights-review');
+const reviewBodyEl = document.getElementById('review-body');
+const reviewProgressEl = document.getElementById('review-progress');
 
 let analysisEnabled = false;
 let pollTimer = null;
@@ -27,6 +32,11 @@ let cohort = null;
 let summary = null;
 let activeTab = 'compare';
 let autoSwitchedForRun = false;
+let selectedTheme = null;
+let reviewIndex = 0;
+let reviewQueue = [];
+let reviewVocab = [];
+let reviewDraftThemes = [];
 
 export function setInsightsAnalysisEnabled(on) {
   analysisEnabled = !!on;
@@ -67,11 +77,17 @@ function cohortUrl({ start = false, force = false } = {}) {
 function summaryUrl() {
   const params = new URLSearchParams();
   if (currentProject) params.set('project', currentProject);
-  const groupBy = groupByEl.value || 'none';
-  params.set('group_by', groupBy);
-  const contrast = (contrastEl && contrastEl.value) || 'purchased_vs_all';
-  params.set('contrast', contrast);
+  params.set('group_by', groupByEl.value || 'none');
+  params.set('contrast', (contrastEl && contrastEl.value) || 'purchased_vs_all');
+  params.set('qa_mode', (qaModeEl && qaModeEl.value) || 'include_pending');
   return `/api/insights/summary?${params.toString()}`;
+}
+
+function qaUrl(sessionId) {
+  const params = new URLSearchParams();
+  if (currentProject) params.set('project', currentProject);
+  const qs = params.toString();
+  return `/api/sessions/${sessionId}/qa${qs ? `?${qs}` : ''}`;
 }
 
 function stopPolling() {
@@ -108,13 +124,16 @@ function setMode(mode) {
 }
 
 function setTab(tab) {
-  activeTab = tab === 'queue' ? 'queue' : 'compare';
+  const allowed = new Set(['compare', 'queue', 'review']);
+  activeTab = allowed.has(tab) ? tab : 'compare';
   tabButtons.forEach((btn) => {
     if (btn.disabled) return;
     btn.classList.toggle('active', btn.dataset.insightsTab === activeTab);
   });
   comparePanelEl.hidden = activeTab !== 'compare';
   queuePanelEl.hidden = activeTab !== 'queue';
+  reviewPanelEl.hidden = activeTab !== 'review';
+  if (activeTab === 'review') renderReview();
 }
 
 function openSession(sessionId) {
@@ -148,6 +167,11 @@ function renderEmpty(message) {
   tableWrapEl.innerHTML = `<div id="cohort-empty">${message}</div>`;
 }
 
+function qaBadge(status) {
+  const s = status || 'pending';
+  return `<span class="badge qa-${escapeAttr(s)}">${escapeHtml(s)}</span>`;
+}
+
 function renderQueue(body) {
   const sessions = body.sessions || [];
   if (!sessions.length) {
@@ -160,6 +184,10 @@ function renderQueue(body) {
       const filterClass = entry.filter === 'purchased' ? 'purchased' : 'all';
       const filterLabel = entry.filter === 'purchased' ? 'Purchased' : 'All';
       const status = entry.status || 'queued';
+      const campaign =
+        (entry.attribution && entry.attribution.utm_campaign) ||
+        (entry.attribution && entry.attribution.utm_source) ||
+        '—';
       const err = entry.error
         ? `<div style="color:#b91c1c;font-size:11px;margin-top:2px">${escapeHtml(entry.error)}</div>`
         : '';
@@ -167,18 +195,18 @@ function renderQueue(body) {
         <tr class="openable" data-sid="${escapeAttr(entry.session_id)}">
           <td class="sid">${escapeHtml(entry.session_id.slice(0, 8))}…</td>
           <td><span class="badge ${filterClass}">${filterLabel}</span></td>
+          <td>${escapeHtml(String(campaign))}</td>
           <td>
             <span class="badge ${escapeAttr(status)}">${escapeHtml(status)}</span>
             ${err}
           </td>
+          <td>${qaBadge(entry.qa_status)}</td>
           <td>${
             (entry.themes || []).length
               ? `<div class="theme-chips">${entry.themes
                   .map((t) => `<span class="theme-chip">${escapeHtml(String(t))}</span>`)
                   .join('')}</div>`
-              : entry.analysis
-                ? escapeHtml(entry.analysis)
-                : '—'
+              : '—'
           }</td>
         </tr>`;
     })
@@ -190,7 +218,9 @@ function renderQueue(body) {
         <tr>
           <th>Session</th>
           <th>Sample</th>
+          <th>Campaign</th>
           <th>Analysis</th>
+          <th>QA</th>
           <th>Themes</th>
         </tr>
       </thead>
@@ -215,6 +245,7 @@ function insightCard(entry) {
     <div class="insight-card-head">
       <span class="sid">${escapeHtml(entry.session_id.slice(0, 8))}…</span>
       ${attrBadge}
+      ${qaBadge(entry.qa_status)}
       <span class="badge ${escapeAttr(status)}">${escapeHtml(status)}</span>
       <button type="button" class="open" data-sid="${escapeAttr(entry.session_id)}">Open</button>
     </div>`;
@@ -252,15 +283,97 @@ function insightCard(entry) {
   </article>`;
 }
 
-function themeCountChips(themesMap) {
-  const entries = Object.entries(themesMap || {});
-  if (!entries.length) return '<p class="status-note">No themes yet.</p>';
-  return `<div class="theme-chips">${entries
-    .map(
-      ([theme, count]) =>
-        `<span class="theme-chip">${escapeHtml(theme)}<span class="n">×${count}</span></span>`
-    )
+function themeCountChips(detailsOrMap, side) {
+  const details = Array.isArray(detailsOrMap)
+    ? detailsOrMap
+    : Object.entries(detailsOrMap || {}).map(([theme, count]) => ({
+        theme,
+        count,
+        one_off: count === 1,
+      }));
+  if (!details.length) return '<p class="status-note">No themes yet.</p>';
+  return `<div class="theme-chips">${details
+    .map((d) => {
+      const active = selectedTheme === d.theme ? ' active' : '';
+      const oneOff = d.one_off ? ' one-off' : '';
+      return `<button type="button" class="theme-chip${active}${oneOff}" data-theme="${escapeAttr(
+        d.theme
+      )}" data-side="${escapeAttr(side || '')}">${escapeHtml(d.theme)}<span class="n">×${
+        d.count
+      }</span></button>`;
+    })
     .join('')}</div>`;
+}
+
+function findThemeExamples(theme) {
+  if (!summary) return [];
+  const fromDetails = (summary.theme_details || []).find((d) => d.theme === theme);
+  if (fromDetails && fromDetails.examples && fromDetails.examples.length) {
+    return fromDetails.examples;
+  }
+  const contrast = summary.contrast || {};
+  for (const list of [contrast.enriched_a, contrast.enriched_b, contrast.shared]) {
+    const hit = (list || []).find((e) => e.theme === theme);
+    if (hit && hit.examples && hit.examples.length) return hit.examples;
+  }
+  for (const side of [contrast.a, contrast.b]) {
+    const hit = ((side && side.theme_details) || []).find((d) => d.theme === theme);
+    if (hit && hit.examples && hit.examples.length) return hit.examples;
+  }
+  return [];
+}
+
+function renderThemeExamples(theme) {
+  if (!theme || !compareExamplesEl) {
+    if (compareExamplesEl) {
+      compareExamplesEl.hidden = true;
+      compareExamplesEl.innerHTML = '';
+    }
+    return;
+  }
+  const examples = findThemeExamples(theme);
+  if (!examples.length) {
+    compareExamplesEl.hidden = false;
+    compareExamplesEl.innerHTML = `<h4>Examples · ${escapeHtml(theme)}</h4><p class="status-note">No example sessions for this theme in the current rollup.</p>`;
+    return;
+  }
+  compareExamplesEl.hidden = false;
+  compareExamplesEl.innerHTML = `
+    <h4>Examples · ${escapeHtml(theme)}${
+      examples.length === 1 ? ' <span class="meta">(one-off)</span>' : ''
+    }</h4>
+    <div class="example-cards">
+      ${examples
+        .map((ex) => {
+          const badge = ex.campaign
+            ? `<span class="attr-badge">${escapeHtml(ex.campaign)}</span>`
+            : ex.meta
+              ? `<span class="attr-badge">Meta</span>`
+              : '';
+          return `<button type="button" class="example-card" data-sid="${escapeAttr(ex.session_id)}">
+            <span class="sid">${escapeHtml((ex.session_id || '').slice(0, 8))}…</span>
+            ${badge}
+            <span class="badge ${ex.outcome === 'purchased' ? 'purchased' : 'all'}">${
+              ex.outcome === 'purchased' ? 'Purchased' : 'All'
+            }</span>
+            ${ex.standout ? `<p class="standout">${escapeHtml(ex.standout)}</p>` : ''}
+          </button>`;
+        })
+        .join('')}
+    </div>`;
+  compareExamplesEl.querySelectorAll('.example-card').forEach((btn) => {
+    btn.addEventListener('click', () => openSession(btn.dataset.sid));
+  });
+}
+
+function bindThemeChipClicks(root) {
+  root.querySelectorAll('button.theme-chip[data-theme]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const theme = btn.dataset.theme;
+      selectedTheme = selectedTheme === theme ? null : theme;
+      renderSummary(summary);
+    });
+  });
 }
 
 function renderSummary(body) {
@@ -268,6 +381,7 @@ function renderSummary(body) {
   if (!body || !body.n) {
     compareSummaryEl.hidden = true;
     compareSummaryEl.innerHTML = '';
+    renderThemeExamples(null);
     return;
   }
 
@@ -275,6 +389,13 @@ function renderSummary(body) {
   const sideA = contrast.a || { n: 0, themes: {}, label: 'A' };
   const sideB = contrast.b || { n: 0, themes: {}, label: 'B' };
   const narrative = body.narrative || contrast.narrative || [];
+  const qaCounts = body.qa_counts || {};
+  const qaNote =
+    qaCounts.accepted || qaCounts.rejected || qaCounts.pending
+      ? `<p class="status-note">QA · ${qaCounts.accepted || 0} accepted · ${
+          qaCounts.pending || 0
+        } pending · ${qaCounts.rejected || 0} rejected</p>`
+      : '';
   const narrativeHtml = narrative.length
     ? `<div class="summary-narrative"><h4>What stands out</h4><ul>${narrative
         .map((line) => `<li>${escapeHtml(line)}</li>`)
@@ -287,9 +408,13 @@ function renderSummary(body) {
       const delta = e.ratio
         ? `${e.ratio}×`
         : `+${Math.round((e.a_rate - e.b_rate) * 100)}pp`;
+      const oneOff = e.one_off ? ' <span class="meta">one-off</span>' : '';
       return (
-        `<li><span class="delta">${escapeHtml(String(delta))}</span> ${escapeHtml(e.theme)} ` +
-        `<span class="meta">(${e.a_count}/${sideA.n} vs ${e.b_count}/${sideB.n})</span></li>`
+        `<li><button type="button" class="theme-chip${selectedTheme === e.theme ? ' active' : ''}${
+          e.one_off ? ' one-off' : ''
+        }" data-theme="${escapeAttr(e.theme)}">${escapeHtml(e.theme)}</button> ` +
+        `<span class="delta">${escapeHtml(String(delta))}</span> ` +
+        `<span class="meta">(${e.a_count}/${sideA.n} vs ${e.b_count}/${sideB.n})</span>${oneOff}</li>`
       );
     })
     .join('');
@@ -299,9 +424,13 @@ function renderSummary(body) {
       const delta = e.ratio
         ? `${e.ratio}×`
         : `+${Math.round((e.b_rate - e.a_rate) * 100)}pp`;
+      const oneOff = e.one_off ? ' <span class="meta">one-off</span>' : '';
       return (
-        `<li><span class="delta">${escapeHtml(String(delta))}</span> ${escapeHtml(e.theme)} ` +
-        `<span class="meta">(${e.b_count}/${sideB.n} vs ${e.a_count}/${sideA.n})</span></li>`
+        `<li><button type="button" class="theme-chip${selectedTheme === e.theme ? ' active' : ''}${
+          e.one_off ? ' one-off' : ''
+        }" data-theme="${escapeAttr(e.theme)}">${escapeHtml(e.theme)}</button> ` +
+        `<span class="delta">${escapeHtml(String(delta))}</span> ` +
+        `<span class="meta">(${e.b_count}/${sideB.n} vs ${e.a_count}/${sideA.n})</span>${oneOff}</li>`
       );
     })
     .join('');
@@ -322,28 +451,42 @@ function renderSummary(body) {
         const cells = (matrix.counts[i] || [])
           .map((n) => `<td class="num">${n || ''}</td>`)
           .join('');
-        return `<tr><td>${escapeHtml(theme)}</td>${cells}</tr>`;
+        return `<tr><td><button type="button" class="theme-chip${
+          selectedTheme === theme ? ' active' : ''
+        }" data-theme="${escapeAttr(theme)}">${escapeHtml(theme)}</button></td>${cells}</tr>`;
       })
       .join('');
     table = `<div class="theme-table-wrap"><table class="theme-table"><thead><tr><th>Theme</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
+  const co = (body.cooccurrence || [])
+    .slice(0, 5)
+    .map(
+      (c) =>
+        `<li>${escapeHtml(c.themes.join(' + '))} <span class="meta">×${c.count}</span></li>`
+    )
+    .join('');
+
   compareSummaryEl.hidden = false;
   compareSummaryEl.innerHTML = `
+    ${qaNote}
     ${narrativeHtml}
     <div class="summary-grid">
       <div class="summary-col">
         <h4>${escapeHtml(sideA.label)} <span class="n">(n=${sideA.n})</span></h4>
-        ${themeCountChips(sideA.themes)}
+        ${themeCountChips(sideA.theme_details || sideA.themes, 'a')}
         ${enrichedA ? `<ul class="enriched"><li><strong>Enriched here</strong></li>${enrichedA}</ul>` : ''}
       </div>
       <div class="summary-col">
         <h4>${escapeHtml(sideB.label)} <span class="n">(n=${sideB.n})</span></h4>
-        ${themeCountChips(sideB.themes)}
+        ${themeCountChips(sideB.theme_details || sideB.themes, 'b')}
         ${enrichedB ? `<ul class="enriched"><li><strong>Enriched here</strong></li>${enrichedB}</ul>` : ''}
       </div>
     </div>
+    ${co ? `<ul class="enriched" style="margin-top:10px"><li><strong>Co-occurring themes</strong></li>${co}</ul>` : ''}
     ${table}`;
+  bindThemeChipClicks(compareSummaryEl);
+  renderThemeExamples(selectedTheme);
 }
 
 async function refreshSummary() {
@@ -354,6 +497,7 @@ async function refreshSummary() {
     if (/no cohort/i.test(err.message || '')) {
       compareSummaryEl.hidden = true;
       compareSummaryEl.innerHTML = '';
+      renderThemeExamples(null);
       return;
     }
     compareSummaryEl.hidden = false;
@@ -395,6 +539,162 @@ function renderCompare(body) {
   });
 }
 
+function buildReviewQueue(body) {
+  return (body.sessions || []).filter(
+    (s) => s.status === 'done' && ((s.themes && s.themes.length) || s.text || s.insights)
+  );
+}
+
+function renderReview() {
+  reviewQueue = cohort ? buildReviewQueue(cohort) : [];
+  if (!reviewQueue.length) {
+    reviewProgressEl.textContent = 'No sessions to review';
+    reviewBodyEl.innerHTML =
+      '<div class="insights-placeholder">Analyze a cohort first, then accept or reject themes here.</div>';
+    return;
+  }
+  if (reviewIndex >= reviewQueue.length) reviewIndex = 0;
+  const entry = reviewQueue[reviewIndex];
+  reviewProgressEl.textContent = `${reviewIndex + 1} / ${reviewQueue.length} · ${
+    entry.qa_status || 'pending'
+  }`;
+  reviewDraftThemes = [...(entry.themes || [])];
+  const campaign = entry.attribution && entry.attribution.utm_campaign;
+  const source = entry.attribution && entry.attribution.utm_source;
+  const filterLabel = entry.filter === 'purchased' ? 'Purchased' : 'All';
+
+  const themeEdit = `
+    <div class="theme-edit" id="review-themes">
+      ${reviewDraftThemes
+        .map(
+          (t) =>
+            `<span class="theme-chip">${escapeHtml(t)}<button type="button" class="remove" data-theme="${escapeAttr(
+              t
+            )}" title="Remove">×</button></span>`
+        )
+        .join('')}
+      <select class="add-theme" id="review-add-theme">
+        <option value="">+ add theme</option>
+        ${(reviewVocab.length ? reviewVocab : reviewDraftThemes)
+          .filter((t) => !reviewDraftThemes.includes(t))
+          .map((t) => `<option value="${escapeAttr(t)}">${escapeHtml(t)}</option>`)
+          .join('')}
+      </select>
+    </div>`;
+
+  reviewBodyEl.innerHTML = `
+    <article class="review-card" data-sid="${escapeAttr(entry.session_id)}">
+      <div class="seg">
+        <span class="sid">${escapeHtml(entry.session_id.slice(0, 8))}…</span>
+        <span class="badge ${entry.filter === 'purchased' ? 'purchased' : 'all'}">${filterLabel}</span>
+        ${campaign ? `<span class="attr-badge">${escapeHtml(campaign)}</span>` : ''}
+        ${source ? `<span class="attr-badge">${escapeHtml(source)}</span>` : ''}
+        ${entry.attribution && entry.attribution.fbclid ? `<span class="attr-badge">Meta</span>` : ''}
+        ${qaBadge(entry.qa_status)}
+        <button type="button" class="open" data-sid="${escapeAttr(entry.session_id)}">Open in Replay</button>
+      </div>
+      <div><strong>Themes</strong></div>
+      ${themeEdit}
+      ${
+        entry.standout
+          ? `<p class="insight-standout">${escapeHtml(entry.standout)}</p>`
+          : ''
+      }
+      <details>
+        <summary>Full write-up</summary>
+        <div class="md">${renderMarkdown(entry.text || '')}</div>
+      </details>
+      <div class="qa-actions">
+        <button type="button" class="primary" data-qa="accepted">Accept into rollups (A)</button>
+        <button type="button" class="danger" data-qa="rejected">Reject (R)</button>
+        <button type="button" data-qa="skip">Skip (S / N)</button>
+      </div>
+    </article>`;
+
+  ensureReviewVocab(entry.session_id);
+
+  reviewBodyEl.querySelector('.open')?.addEventListener('click', () => openSession(entry.session_id));
+  reviewBodyEl.querySelectorAll('button.remove').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      reviewDraftThemes = reviewDraftThemes.filter((t) => t !== btn.dataset.theme);
+      entry.themes = [...reviewDraftThemes];
+      renderReview();
+    });
+  });
+  const addEl = reviewBodyEl.querySelector('#review-add-theme');
+  addEl?.addEventListener('change', () => {
+    if (!addEl.value) return;
+    if (!reviewDraftThemes.includes(addEl.value)) reviewDraftThemes.push(addEl.value);
+    entry.themes = [...reviewDraftThemes];
+    renderReview();
+  });
+  reviewBodyEl.querySelectorAll('[data-qa]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.qa;
+      if (action === 'skip') {
+        reviewIndex = (reviewIndex + 1) % reviewQueue.length;
+        renderReview();
+        return;
+      }
+      submitReview(entry.session_id, action, reviewDraftThemes);
+    });
+  });
+}
+
+async function ensureReviewVocab(sessionId) {
+  if (reviewVocab.length) return;
+  try {
+    const body = await fetchJson(qaUrl(sessionId));
+    reviewVocab = body.vocab || [];
+    if (reviewVocab.length) renderReview();
+  } catch {
+    /* leave draft themes only */
+  }
+}
+
+async function submitReview(sessionId, status, themes) {
+  try {
+    await fetchJson(qaUrl(sessionId), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, themes }),
+    });
+    const entry = (cohort.sessions || []).find((s) => s.session_id === sessionId);
+    if (entry) {
+      entry.qa_status = status;
+      entry.themes = [...themes];
+      entry.qa = { status, themes };
+    }
+    reviewIndex = (reviewIndex + 1) % Math.max(reviewQueue.length, 1);
+    renderQueue(cohort);
+    renderCompare(cohort);
+    renderReview();
+    refreshSummary().catch(() => {});
+  } catch (err) {
+    reviewProgressEl.textContent = err.message;
+  }
+}
+
+function onReviewKeydown(e) {
+  if (activeTab !== 'review' || !document.body.classList.contains('mode-insights')) return;
+  if (e.target.closest('input, select, textarea')) return;
+  const key = e.key.toLowerCase();
+  if (!reviewQueue.length) return;
+  const entry = reviewQueue[reviewIndex];
+  if (!entry) return;
+  if (key === 'a') {
+    e.preventDefault();
+    submitReview(entry.session_id, 'accepted', reviewDraftThemes);
+  } else if (key === 'r') {
+    e.preventDefault();
+    submitReview(entry.session_id, 'rejected', reviewDraftThemes);
+  } else if (key === 'n' || key === 's') {
+    e.preventDefault();
+    reviewIndex = (reviewIndex + 1) % reviewQueue.length;
+    renderReview();
+  }
+}
+
 function renderCohort(body) {
   const prevStatus = cohort && cohort.status;
   cohort = body;
@@ -405,6 +705,7 @@ function renderCohort(body) {
   syncRunButtons();
   renderQueue(body);
   renderCompare(body);
+  if (activeTab === 'review') renderReview();
   const hasInsights = (body.sessions || []).some(
     (s) => s.status === 'done' && ((s.themes && s.themes.length) || s.text)
   );
@@ -413,9 +714,9 @@ function renderCohort(body) {
   } else {
     compareSummaryEl.hidden = true;
     compareSummaryEl.innerHTML = '';
+    renderThemeExamples(null);
   }
 
-  // While a run is in flight, show Queue; once write-ups land, jump to Compare.
   const running = body.status === 'running' || body.status === 'queued';
   if (running && !autoSwitchedForRun) {
     setTab('queue');
@@ -430,7 +731,6 @@ function renderCohort(body) {
     setTab('compare');
     autoSwitchedForRun = false;
   } else if (hasInsights && !running && activeTab === 'queue' && !autoSwitchedForRun) {
-    // Fresh load with a finished cohort — Compare is the main answer.
     setTab('compare');
   }
 
@@ -440,19 +740,24 @@ function renderCohort(body) {
 function resetEmptyState() {
   cohort = null;
   summary = null;
+  selectedTheme = null;
   autoSwitchedForRun = false;
   labelEl.textContent = 'Sample cohort';
   compareLabelEl.textContent = 'Purchased vs all';
   progressEl.textContent = 'No cohort yet';
   compareProgressEl.textContent = 'No cohort yet';
+  reviewProgressEl.textContent = 'No sessions to review';
   syncRunButtons();
   compareSummaryEl.hidden = true;
   compareSummaryEl.innerHTML = '';
+  renderThemeExamples(null);
   renderEmpty(
     'Run a sample cohort to analyze 5 purchased and 5 other sessions. Open any row to watch it in Replay.'
   );
   compareBodyEl.innerHTML =
     '<div class="insights-placeholder">Run a sample cohort to compare write-ups for purchased vs other sessions side by side.</div>';
+  reviewBodyEl.innerHTML =
+    '<div class="insights-placeholder">Analyze a cohort first, then accept or reject themes here.</div>';
 }
 
 export async function refreshCohort() {
@@ -503,14 +808,13 @@ export function initInsights() {
   });
   runBtn.addEventListener('click', runCohort);
   runBtnCompare.addEventListener('click', runCohort);
-  groupByEl.addEventListener('change', () => {
+  const refreshSummaryIfReady = () => {
     if (cohort) refreshSummary().catch(() => {});
-  });
-  if (contrastEl) {
-    contrastEl.addEventListener('change', () => {
-      if (cohort) refreshSummary().catch(() => {});
-    });
-  }
+  };
+  groupByEl.addEventListener('change', refreshSummaryIfReady);
+  if (contrastEl) contrastEl.addEventListener('change', refreshSummaryIfReady);
+  if (qaModeEl) qaModeEl.addEventListener('change', refreshSummaryIfReady);
+  document.addEventListener('keydown', onReviewKeydown);
   setTab('compare');
 
   const projectSelect = document.getElementById('project-select');
