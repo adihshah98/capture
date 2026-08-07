@@ -91,7 +91,8 @@ export async function loadSession(sessionId) {
     return;
   }
   const bytesOf = (chunks) => chunks.reduce((n, c) => n + c.bytes, 0);
-  const checkoutAt = session && session.order && session.order.checkout_started_at;
+  const order = session && session.order;
+  const checkoutAt = order && (order.checkout_started_at || order.purchased_at);
   let checkoutWindow = null;
   if (checkoutAt) {
     let latest = -Infinity;
@@ -120,13 +121,13 @@ export async function loadSession(sessionId) {
         (key === checkoutWindow ? ' · reached checkout from this tab' : '');
       btn.dataset.window = key;
       btn.addEventListener('click', () => {
-        playWindow(sessionId, byWindow.get(key), key, ++loadSeq, session);
+        playWindow(sessionId, byWindow.get(key), key, ++loadSeq, session, key === defaultWindow);
       });
       windowTabsEl.appendChild(btn);
     }
   }
 
-  playWindow(sessionId, byWindow.get(defaultWindow), defaultWindow, seq, session);
+  playWindow(sessionId, byWindow.get(defaultWindow), defaultWindow, seq, session, true);
 }
 
 function destroyPlayer() {
@@ -141,7 +142,7 @@ function destroyPlayer() {
   assetErrorsEl.hidden = true;
 }
 
-async function playWindow(sessionId, chunks, windowKey, seq, session) {
+async function playWindow(sessionId, chunks, windowKey, seq, session, showOrder) {
   for (const btn of windowTabsEl.querySelectorAll('button')) {
     btn.classList.toggle('active', btn.dataset.window === windowKey);
   }
@@ -178,12 +179,12 @@ async function playWindow(sessionId, chunks, windowKey, seq, session) {
     showPlayerMessage(
       results.includes(null) ? 'Could not load this session.' : 'Not enough events to replay yet.'
     );
-    renderTimeline(allEvents, navigations, session);
+    renderTimeline(allEvents, navigations, session, showOrder);
     return;
   }
 
   setSyncStart(allEvents[0].timestamp);
-  renderTimeline(allEvents, navigations, session);
+  renderTimeline(allEvents, navigations, session, showOrder);
   let lastHashWrite = 0;
   player = new CapturePlayer({
     events: allEvents,

@@ -30,7 +30,14 @@ tar xzf /tmp/capture-deploy.tar.gz
 if command -v node >/dev/null 2>&1; then
   npm install --omit=dev --no-audit --no-fund --silent
   export PLAYWRIGHT_BROWSERS_PATH=/opt/capture/.playwright
-  npx --yes playwright install --with-deps chromium
+  if command -v apt-get >/dev/null 2>&1; then
+    npx --yes playwright install --with-deps chromium
+  else
+    sudo dnf install -y -q nss nspr atk at-spi2-atk at-spi2-core cups-libs \
+      libdrm libXcomposite libXdamage libXext libXfixes libXrandr \
+      mesa-libgbm libxkbcommon pango cairo alsa-lib
+    npx --yes playwright install chromium
+  fi
 
   # Boxes bootstrapped before AI analysis existed have a unit without the
   # browser path, so the service would not find the chromium we just installed.

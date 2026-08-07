@@ -36,7 +36,7 @@ export function syncTimeline(currentMs) {
   }
 }
 
-export function renderTimeline(events, navigations, session) {
+export function renderTimeline(events, navigations, session, showOrder = true) {
   const marker = (e) => e.type === 5 && e.data && e.data.tag;
   const entries = [];
 
@@ -66,7 +66,7 @@ export function renderTimeline(events, navigations, session) {
   }
   entries.sort((a, b) => a.t - b.t);
 
-  const order = session && session.order;
+  const order = showOrder && session && session.order;
   if (events.length && order && (order.purchased_at || order.checkout_started_at)) {
     const amount =
       typeof order.total === 'number'
