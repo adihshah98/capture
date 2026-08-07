@@ -1,6 +1,8 @@
 import { CapturePlayer } from '../player.js';
-import { fetchJson, projectQuery } from './api.js';
+import { currentProject, fetchJson, projectQuery } from './api.js';
+import { writeHash } from './deeplink.js';
 import { formatBytes, hostPath } from './format.js';
+import { clearSessionDetails, renderSessionDetails } from './session-details.js';
 import { allSessions } from './session-list.js';
 import {
   currentSpeed,
@@ -27,12 +29,18 @@ export let player = null;
 let loadSeq = 0;
 export let loadedSessionId = null;
 
+let pendingSeekMs = null;
+export function setPendingSeek(ms) {
+  pendingSeekMs = ms;
+}
+
 export function clearPlayer() {
   loadSeq += 1;
   loadedSessionId = null;
   destroyPlayer();
   windowTabsEl.innerHTML = '';
   clearTimeline();
+  clearSessionDetails();
   loadProgressEl.textContent = '';
   sessionTitleEl.textContent = 'Select a session';
   sessionTitleEl.title = '';
@@ -47,6 +55,8 @@ function showPlayerMessage(message) {
 export async function loadSession(sessionId) {
   const seq = ++loadSeq;
   loadedSessionId = sessionId;
+  writeHash({ p: currentProject, s: sessionId });
+  renderSessionDetails(allSessions.find((s) => s.session_id === sessionId));
   sessionTitleEl.textContent = `Session ${sessionId}`;
   sessionTitleEl.title = '';
 
@@ -170,6 +180,7 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
 
   setSyncStart(allEvents[0].timestamp);
   renderTimeline(allEvents, navigations, session);
+  let lastHashWrite = 0;
   player = new CapturePlayer({
     events: allEvents,
     mount: stageEl,
@@ -178,6 +189,11 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
     onTime: (ms) => {
       updateScrubber(ms);
       syncTimeline(ms);
+      const now = Date.now();
+      if (now - lastHashWrite > 2000) {
+        lastHashWrite = now;
+        writeHash({ p: currentProject, s: sessionId, t: Math.floor(ms / 1000) });
+      }
     },
     onState: updatePlayState,
     onSkip: showSkipNote,
@@ -186,4 +202,9 @@ async function playWindow(sessionId, chunks, windowKey, seq) {
   controlsEl.hidden = false;
   renderScrubberChrome(player);
   updateScrubber(0);
+  if (pendingSeekMs != null) {
+    const at = Math.min(pendingSeekMs, player.duration - 1);
+    pendingSeekMs = null;
+    player.seekTo(at);
+  }
 }

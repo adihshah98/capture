@@ -1,6 +1,9 @@
 import { currentProject, fetchJson, projectQuery, setProject } from './api.js';
+import { parseHash, writeHash } from './deeplink.js';
 import { formatBytes, formatDuration, formatTime, pagePath } from './format.js';
-import { clearPlayer, loadSession, loadedSessionId } from './session-player.js';
+import { clearPlayer, loadSession, loadedSessionId, setPendingSeek } from './session-player.js';
+
+const boot = parseHash();
 
 const projectSelectEl = document.getElementById('project-select');
 const sessionListEl = document.getElementById('session-list');
@@ -9,12 +12,19 @@ const accountEmailEl = document.getElementById('account-email');
 
 export let allSessions = [];
 let sessionFilter = 'all';
+let searchTerm = '';
 const FILTERS = {
   all: () => true,
   checkout: (s) => Boolean(s.order),
   purchased: (s) => Boolean(s.order && s.order.purchased_at),
   rage: (s) => Boolean(s.interactions && s.interactions.rage),
 };
+
+function matchesSearch(s) {
+  if (!searchTerm) return true;
+  return [s.url, s.visitor_id, s.session_id]
+    .some((v) => typeof v === 'string' && v.toLowerCase().includes(searchTerm));
+}
 
 function showListMessage(message) {
   sessionListEl.innerHTML = '';
@@ -56,6 +66,10 @@ async function loadProjects() {
     option.textContent = project.name;
     projectSelectEl.appendChild(option);
   }
+  if (boot.p) {
+    setProject(boot.p);
+    boot.p = '';
+  }
   if (!projects.some((p) => p.token === currentProject)) setProject(projects[0].token);
   projectSelectEl.value = currentProject;
   return true;
@@ -79,7 +93,7 @@ function renderSessionList() {
     showListMessage('No sessions yet. Open the demo page and click around.');
     return;
   }
-  const sessions = allSessions.filter(FILTERS[sessionFilter]);
+  const sessions = allSessions.filter((s) => FILTERS[sessionFilter](s) && matchesSearch(s));
   if (sessions.length === 0) {
     showListMessage('No sessions match this filter.');
     return;
@@ -87,6 +101,7 @@ function renderSessionList() {
 
   const appendSession = (session, grouped) => {
     const li = document.createElement('li');
+    li.dataset.sid = session.session_id;
     if (grouped) li.className = 'grouped';
     li.innerHTML = `
       <div class="info">
@@ -166,8 +181,14 @@ function renderSessionList() {
   }
 
   if (!loadedSessionId) {
-    const first = sessionListEl.querySelector('li:not(.visitor-header)');
-    if (first) first.click();
+    const target =
+      (boot.s && sessionListEl.querySelector(`li[data-sid="${CSS.escape(boot.s)}"]`)) ||
+      sessionListEl.querySelector('li:not(.visitor-header)');
+    if (target) {
+      if (boot.s && target.dataset.sid === boot.s && boot.t) setPendingSeek(boot.t * 1000);
+      boot.s = '';
+      target.click();
+    }
   }
 }
 
@@ -205,8 +226,15 @@ export async function refreshAll() {
 
 projectSelectEl.addEventListener('change', () => {
   setProject(projectSelectEl.value);
+  writeHash({ p: currentProject });
   clearPlayer();
   loadSessions();
+});
+
+const searchEl = document.getElementById('session-search');
+searchEl.addEventListener('input', () => {
+  searchTerm = searchEl.value.trim().toLowerCase();
+  renderSessionList();
 });
 
 const filterButtons = document.querySelectorAll('#session-filter button');

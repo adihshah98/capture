@@ -29,15 +29,18 @@
     #session-filter { display: flex; gap: 4px; padding: 8px 12px 0; }
     #session-filter button { font-size: 11px; padding: 3px 10px; border-radius: 999px; border: 1px solid #d0d3d8; background: #fff; color: #6b7280; cursor: pointer; }
     #session-filter button.active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+    #session-search { display: block; width: calc(100% - 24px); margin: 8px 12px 0; border: 1px solid #d0d3d8; border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+    #session-search:focus { outline: none; border-color: #4f46e5; }
     #session-list .order { align-self: flex-start; font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 999px; margin-top: 2px; }
     #session-list .order.purchased { background: #dcfce7; color: #15803d; }
     #session-list .order.started { background: #fef3c7; color: #92400e; }
     #session-list .order.rage { background: #fee2e2; color: #b91c1c; }
     #url-params { flex: none; max-height: 40%; overflow-y: auto; border-top: 1px solid #e3e5e8; padding-bottom: 8px; }
+    #session-details { flex: none; max-height: 30%; overflow-y: auto; border-top: 1px solid #e3e5e8; padding-bottom: 8px; }
     #url-params .url { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #4f46e5; padding: 8px 14px 2px; overflow-wrap: anywhere; }
-    #url-params table { width: calc(100% - 28px); margin: 0 14px; border-collapse: collapse; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
-    #url-params td { padding: 2px 6px 2px 0; border-bottom: 1px solid #f0f2f5; vertical-align: top; overflow-wrap: anywhere; }
-    #url-params td.k { color: #6b7280; white-space: nowrap; padding-right: 14px; }
+    #url-params table, #session-details table { width: calc(100% - 28px); margin: 0 14px; border-collapse: collapse; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    #url-params td, #session-details td { padding: 2px 6px 2px 0; border-bottom: 1px solid #f0f2f5; vertical-align: top; overflow-wrap: anywhere; }
+    #url-params td.k, #session-details td.k { color: #6b7280; white-space: nowrap; padding-right: 14px; }
     #session-list .del { flex: none; opacity: 0.45; border: 1px solid #d0d3d8; background: #fff; color: #6b7280; font-size: 11px; padding: 3px 8px; border-radius: 5px; cursor: pointer; }
     #session-list li:hover .del, #session-list .del:focus, #session-list .del.armed { opacity: 1; }
     #session-list .del.armed { border-color: #dc2626; color: #dc2626; font-weight: 600; }
@@ -115,6 +118,8 @@
         <button data-filter="purchased">Purchased</button>
         <button data-filter="rage">Rage</button>
       </div>
+      <input id="session-search" type="search" placeholder="Filter by path, UTM, visitor…" />
+
       <ul id="session-list"></ul>
     </aside>
     <main>
@@ -155,6 +160,8 @@
           <button id="tab-timeline" class="active">Timeline <span class="count" id="timeline-count"></span></button>
         </div>
         <ul id="timeline-list"><li class="empty">Clicks, triggers, idle gaps and navigations appear here.</li></ul>
+        <h2>Session</h2>
+        <div id="session-details"><div class="empty">Device, duration and visitor details appear here.</div></div>
         <h2>URL &amp; params</h2>
         <div id="url-params"><div class="empty">Page URLs and their query params appear here.</div></div>
       </section>
