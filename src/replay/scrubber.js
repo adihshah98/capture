@@ -65,7 +65,7 @@ export function renderScrubberChrome(p) {
 }
 
 export function updateScrubber(ms) {
-  if (!player) return;
+  if (!player || scrubbing) return;
   const pct = Math.min(100, (ms / player.duration) * 100);
   pcFillEl.style.width = `${pct}%`;
   pcDotEl.style.left = `${pct}%`;
@@ -92,19 +92,35 @@ export function showAssetErrors(count) {
   assetErrorsEl.hidden = false;
 }
 
-function barSeek(e) {
-  if (!player) return;
+let scrubbing = false;
+
+function barPct(e) {
   const rect = pcBarEl.getBoundingClientRect();
-  const pct = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-  player.seekTo(pct * player.duration);
+  return Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+}
+
+function previewAt(pct) {
+  pcFillEl.style.width = `${pct * 100}%`;
+  pcDotEl.style.left = `${pct * 100}%`;
+  pcCurEl.textContent = formatOffset(pct * player.duration);
 }
 
 pcBarEl.addEventListener('pointerdown', (e) => {
+  if (!player) return;
   pcBarEl.setPointerCapture(e.pointerId);
-  barSeek(e);
+  scrubbing = true;
+  previewAt(barPct(e));
 });
 pcBarEl.addEventListener('pointermove', (e) => {
-  if (pcBarEl.hasPointerCapture(e.pointerId) && e.buttons) barSeek(e);
+  if (scrubbing && player && e.buttons) previewAt(barPct(e));
+});
+pcBarEl.addEventListener('pointerup', (e) => {
+  if (!scrubbing) return;
+  scrubbing = false;
+  if (player) player.seekTo(barPct(e) * player.duration);
+});
+pcBarEl.addEventListener('pointercancel', () => {
+  scrubbing = false;
 });
 
 pcToggleEl.addEventListener('click', () => player && player.toggle());

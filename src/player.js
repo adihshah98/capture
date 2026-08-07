@@ -235,7 +235,20 @@ export class CapturePlayer {
   }
 
   seekTo(ms, opts = {}) {
-    const target = this.clampRenderable(Math.max(0, Math.min(ms, this.duration)));
+    let want = Math.max(0, Math.min(ms, this.duration));
+    if (this.skipInactive) {
+      const seg = this.segmentAt(want);
+      if (
+        seg &&
+        !seg.isActive &&
+        seg.end - seg.start >= MIN_SKIP_MS &&
+        seg.end < this.duration - END_EPSILON_MS
+      ) {
+        this.onSkip(seg.end - want);
+        want = seg.end;
+      }
+    }
+    const target = this.clampRenderable(want);
     const resume = opts.play != null ? opts.play : this.playing;
     if (target >= this.duration - END_EPSILON_MS && !resume) {
       this.finish();
