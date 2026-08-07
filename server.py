@@ -23,6 +23,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+# Load .env before importing anything that reads configuration at import time.
+# Real environment variables win, so a deployed box is unaffected by a stray file.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+except ImportError:
+    pass
+
 import analyze
 
 @asynccontextmanager
@@ -448,8 +457,13 @@ def healthz():
         for name in ("capture.js", "recorder.bundle.js", "replay.bundle.js")
     )
     checks["replay_auth_enabled"] = bool(REPLAY_PASSWORD or WORKOS_ENABLED) and not REPLAY_AUTH_DISABLED
+    # Reported, not health-gating: analysis is an optional extra, and a box
+    # without a key or a browser is still a perfectly healthy recorder.
+    checks["analysis_configured"] = analyze.ANALYSIS_ENABLED
+    checks["analysis_runtime_present"] = analyze.runtime_present()
 
-    healthy = all(v for k, v in checks.items() if k != "replay_auth_enabled")
+    informational = ("replay_auth_enabled", "analysis_configured", "analysis_runtime_present")
+    healthy = all(v for k, v in checks.items() if k not in informational)
     return JSONResponse(
         {"status": "ok" if healthy else "degraded", "checks": checks},
         status_code=200 if healthy else 503,
@@ -619,7 +633,7 @@ def list_projects(request: Request):
     email = (getattr(request.state, "auth", None) or {}).get("email")
     return {
         "projects": projects,
-        "analysis_enabled": analyze.ANALYSIS_ENABLED,
+        "analysis_enabled": analyze.ANALYSIS_ENABLED and analyze.runtime_present(),
         **({"email": email} if email else {}),
     }
 

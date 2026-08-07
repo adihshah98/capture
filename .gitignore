@@ -2,6 +2,7 @@ node_modules/
 .venv/
 __pycache__/
 data/
+.env
 public/*.bundle.js
 public/*.bundle.css
 public/capture.js

@@ -63,6 +63,13 @@ say so instead of padding.
 Keep it under 300 words. No preamble."""
 
 
+def runtime_present() -> bool:
+    """Whether the headless reconstruction can run: node, the extractor, the bundle."""
+    return bool(
+        shutil.which("node") and EXTRACTOR.is_file() and REPLAYER_BUNDLE.is_file()
+    )
+
+
 def analysis_paths(session_dir: Path) -> tuple:
     return session_dir / ANALYSIS_FILE, session_dir / ANALYSIS_DIR
 
@@ -79,6 +86,8 @@ def read_analysis(session_dir: Path) -> Optional[dict]:
 
 
 async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> dict:
+    if not shutil.which("node"):
+        raise RuntimeError("node is not installed on this server — analysis is unavailable")
     if not REPLAYER_BUNDLE.is_file():
         raise RuntimeError("replayer bundle missing — run `npm run build`")
 

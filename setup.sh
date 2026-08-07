@@ -54,6 +54,7 @@ After=network.target
 [Service]
 User=ec2-user
 WorkingDirectory=/opt/capture
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/capture/.playwright
 EnvironmentFile=/etc/capture.env
 EnvironmentFile=/etc/capture-cloudfront.env
 ExecStart=/opt/capture/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 80 --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS}
