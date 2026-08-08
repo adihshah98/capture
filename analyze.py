@@ -20,6 +20,7 @@ import re
 import shutil
 import sqlite3
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 
@@ -471,12 +472,38 @@ def is_meta_attribution(attribution: Optional[dict]) -> bool:
     return source in META_SOURCES
 
 
+def page_path(url: Optional[str]) -> Optional[str]:
+    """Landing-page path from an entry URL: pathname only, no query or hash.
+
+    Trailing slashes are stripped (except `/`) so `/p` and `/p/` share a facet.
+    Query strings stay on attribution — putting them here would explode the
+    picker with one option per UTM combo.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.startswith("/") and "://" not in raw:
+            path = urllib.parse.unquote(raw.split("?", 1)[0].split("#", 1)[0])
+        else:
+            parsed = urllib.parse.urlparse(
+                raw if "://" in raw else f"https://{raw}"
+            )
+            path = urllib.parse.unquote(parsed.path or "") or "/"
+    except Exception:
+        return None
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    return path or None
+
+
 def normalize_slice(spec: Optional[dict]) -> dict:
-    """Normalize a slice: any combination of outcome, device and attribution.
+    """Normalize a slice: any combination of outcome, device, page and attribution.
 
     Keys: outcome (list of purchased|checkout|rest), device (list of
-    mobile|desktop), utm_source, utm_medium, utm_campaign, utm_content, fbclid.
-    utm_source="meta" matches Meta traffic (fbclid or a known Meta source).
+    mobile|desktop), page (landing path), utm_source, utm_medium, utm_campaign,
+    utm_content, fbclid. utm_source="meta" matches Meta traffic (fbclid or a
+    known Meta source).
 
     Constraints are ANDed across keys and ORed within a key, so
     {"outcome": ["purchased", "checkout"], "device": ["mobile"]} reads as
@@ -509,6 +536,10 @@ def normalize_slice(spec: Optional[dict]) -> dict:
     _multi("outcome", OUTCOME_VALUES)
     _multi("device", DEVICE_VALUES)
 
+    page = page_path(spec.get("page")) if spec.get("page") not in (None, "") else None
+    if page:
+        out["page"] = page
+
     for key in ("utm_source", "utm_medium", "utm_campaign", "utm_content"):
         value = spec.get(key)
         if isinstance(value, str) and value.strip():
@@ -532,6 +563,11 @@ def row_matches_slice(row: dict, spec: dict) -> bool:
     if want_device:
         # Unknown device can't satisfy a device constraint.
         if (row.get("device") or "") not in want_device:
+            return False
+    want_page = spec.get("page")
+    if want_page:
+        # Unknown / missing landing page can't satisfy a page constraint.
+        if (row.get("page") or "") != want_page:
             return False
     attrs = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
     if "fbclid" in spec:
@@ -593,6 +629,9 @@ def slice_label(spec: dict) -> str:
     device = spec.get("device") or []
     if device:
         parts.append(" or ".join(device))
+
+    if spec.get("page"):
+        parts.append(spec["page"])
 
     if spec.get("utm_source") == "meta" or spec.get("fbclid") is True:
         parts.append("Meta")
@@ -769,15 +808,19 @@ to genuinely isolated sessions, not to a minority that behaves consistently.
 
 ### Split on the session labels too
 
-Every session below is labelled with its outcome, device, traffic source and
-campaign. Test each as a candidate split — these are the ones the team can act
-on directly. (Any dimension named under "Already known" is the same for every
-session here and cannot split anything — skip it and use the rest.)
+Every session below is labelled with its outcome, device, landing page, traffic
+source and campaign. Test each as a candidate split — these are the ones the
+team can act on directly. (Any dimension named under "Already known" is the
+same for every session here and cannot split anything — skip it and use the
+rest.)
 - outcome (purchased / reached checkout / did not reach checkout): what did
   the sessions that converted do differently on the page from those that did
   not? This is the most valuable split in the set.
 - device (mobile / desktop): the same page often works very differently on
   each, and mobile and desktop usually deserve different creative.
+- page (landing path, e.g. /products/cream): visitors who landed on different
+  URLs arrived with different context. A page whose visitors behave differently
+  is a landing-page or merchandising decision.
 - utm_source and utm_campaign: visitors from different sources land with
   different expectations. A source whose visitors behave differently is a
   targeting or creative decision, and one of the most actionable splits here.
@@ -911,6 +954,7 @@ def _cut_side_text(rows: list, label: str) -> str:
         # otherwise cluster on by accident.
         bits = [f"outcome: {OUTCOME_LABELS.get(row.get('outcome'), 'unknown')}"]
         bits.append(f"device: {row.get('device') or 'unknown'}")
+        bits.append(f"page: {row.get('page') or 'unknown'}")
         for key in ("utm_source", "utm_campaign"):
             bits.append(f"{key}: {attrs.get(key) or 'none'}")
         if attrs.get("fbclid"):
@@ -937,6 +981,11 @@ def _given_facts(spec: dict) -> str:
             f"{' or '.join(spec['device'])}. Do not report the device itself "
             f"as a finding."
         )
+    if spec.get("page"):
+        lines.append(
+            f"- Every session in this group landed on {spec['page']}. Do not "
+            f"report the landing page itself as a finding."
+        )
     for key in ("utm_source", "utm_medium", "utm_campaign", "utm_content"):
         if spec.get(key):
             lines.append(
@@ -951,6 +1000,7 @@ def _given_facts(spec: dict) -> str:
         for name, key in (
             ("outcome", "outcome"),
             ("device", "device"),
+            ("landing page", "page"),
             ("traffic source", "utm_source"),
             ("campaign", "utm_campaign"),
         )

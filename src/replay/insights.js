@@ -115,10 +115,10 @@ function facetsUrl(id) {
 }
 
 /** One group's filter. Every field is a single value; '' means "any". */
-const SLICE_FIELDS = ['outcome', 'device', 'utm_source', 'utm_campaign'];
+const SLICE_FIELDS = ['outcome', 'device', 'page', 'utm_source', 'utm_campaign'];
 
 function emptySlice() {
-  return { outcome: '', device: '', utm_source: '', utm_campaign: '' };
+  return { outcome: '', device: '', page: '', utm_source: '', utm_campaign: '' };
 }
 
 function sliceIsEmpty(spec) {
@@ -316,6 +316,7 @@ const HINT_TEXT = 'Leave every filter on "any" to read the whole cohort.';
 const FACET_LABELS = {
   outcome: 'outcome',
   device: 'device',
+  page: 'page',
   utm_source: 'source',
   utm_campaign: 'campaign',
 };
@@ -376,6 +377,7 @@ function rowMatches(row, spec) {
   if (sliceIsEmpty(spec)) return true;
   if (spec.outcome && (row.outcome || 'rest') !== spec.outcome) return false;
   if (spec.device && (row.device || '') !== spec.device) return false;
+  if (spec.page && (row.page || '') !== spec.page) return false;
   const attrs = row.attribution || {};
   const norm = (v) => String(v || '').trim().toLowerCase();
   if (spec.utm_source && norm(attrs.utm_source) !== spec.utm_source) return false;

@@ -14,11 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import analyze
 
 
-def row(sid, outcome="rest", device=None, **attrs):
+def row(sid, outcome="rest", device=None, page=None, **attrs):
     return {
         "session_id": sid,
         "outcome": outcome,
         "device": device,
+        "page": page,
         "attribution": attrs or None,
         "text": f"write-up for {sid}",
     }
@@ -42,6 +43,23 @@ class TestOutcomeAndDeviceClass(unittest.TestCase):
         self.assertEqual(analyze.device_class({"width": edge}), "desktop")
         self.assertIsNone(analyze.device_class({"width": 0}))
         self.assertIsNone(analyze.device_class(None))
+
+
+class TestPagePath(unittest.TestCase):
+    def test_strips_query_hash_and_trailing_slash(self):
+        self.assertEqual(
+            analyze.page_path("https://shop.test/products/cream/?utm_source=meta#x"),
+            "/products/cream",
+        )
+        self.assertEqual(analyze.page_path("/p/"), "/p")
+        self.assertEqual(analyze.page_path("/"), "/")
+
+    def test_accepts_a_bare_path(self):
+        self.assertEqual(analyze.page_path("/collections/sale"), "/collections/sale")
+
+    def test_empty_is_none(self):
+        self.assertIsNone(analyze.page_path(""))
+        self.assertIsNone(analyze.page_path(None))
 
 
 class TestNormalizeSlice(unittest.TestCase):
@@ -69,20 +87,37 @@ class TestNormalizeSlice(unittest.TestCase):
 
     def test_combined_constraints_are_kept_together(self):
         spec = analyze.normalize_slice(
-            {"outcome": ["checkout"], "device": ["mobile"], "utm_campaign": "Spring"}
+            {
+                "outcome": ["checkout"],
+                "device": ["mobile"],
+                "page": "https://shop.test/p/?x=1",
+                "utm_campaign": "Spring",
+            }
         )
         self.assertEqual(
-            spec, {"outcome": ["checkout"], "device": ["mobile"], "utm_campaign": "spring"}
+            spec,
+            {
+                "outcome": ["checkout"],
+                "device": ["mobile"],
+                "page": "/p",
+                "utm_campaign": "spring",
+            },
+        )
+
+    def test_page_filter_normalizes_to_the_path(self):
+        self.assertEqual(
+            analyze.normalize_slice({"page": "/products/cream/"})["page"],
+            "/products/cream",
         )
 
 
 class TestMatchOutcomeAndDevice(unittest.TestCase):
     def setUp(self):
         self.rows = [
-            row("pm", "purchased", "mobile", utm_source="google"),
-            row("cm", "checkout", "mobile", utm_source="facebook"),
-            row("rd", "rest", "desktop", utm_campaign="spring"),
-            row("pd", "purchased", "desktop"),
+            row("pm", "purchased", "mobile", page="/p", utm_source="google"),
+            row("cm", "checkout", "mobile", page="/collections/sale", utm_source="facebook"),
+            row("rd", "rest", "desktop", page="/p", utm_campaign="spring"),
+            row("pd", "purchased", "desktop", page="/products/cream"),
         ]
 
     def match(self, spec):
@@ -106,6 +141,10 @@ class TestMatchOutcomeAndDevice(unittest.TestCase):
         self.assertEqual(self.match({"device": ["mobile"]}), ["pm", "cm"])
         self.assertEqual(self.match({"device": ["desktop"]}), ["rd", "pd"])
 
+    def test_page_slices(self):
+        self.assertEqual(self.match({"page": "/p"}), ["pm", "rd"])
+        self.assertEqual(self.match({"page": "/products/cream"}), ["pd"])
+
     def test_constraints_intersect(self):
         self.assertEqual(self.match({"outcome": ["purchased"], "device": ["mobile"]}), ["pm"])
         self.assertEqual(
@@ -114,10 +153,18 @@ class TestMatchOutcomeAndDevice(unittest.TestCase):
         self.assertEqual(
             self.match({"outcome": ["purchased"], "utm_campaign": "spring"}), []
         )
+        self.assertEqual(
+            self.match({"page": "/p", "device": ["desktop"]}), ["rd"]
+        )
 
     def test_unknown_device_cannot_satisfy_a_device_constraint(self):
         rows = [row("unknown", "purchased", None)]
         spec = analyze.normalize_slice({"device": ["mobile"]})
+        self.assertFalse(analyze.row_matches_slice(rows[0], spec))
+
+    def test_unknown_page_cannot_satisfy_a_page_constraint(self):
+        rows = [row("unknown", "purchased", "mobile", page=None)]
+        spec = analyze.normalize_slice({"page": "/p"})
         self.assertFalse(analyze.row_matches_slice(rows[0], spec))
 
 
@@ -132,9 +179,10 @@ class TestSliceLabel(unittest.TestCase):
     def test_single_buckets_and_combinations(self):
         self.assertEqual(self.label({"outcome": ["purchased"]}), "purchased")
         self.assertEqual(self.label({"device": ["mobile"]}), "mobile")
+        self.assertEqual(self.label({"page": "/p"}), "/p")
         self.assertEqual(
-            self.label({"outcome": ["checkout"], "device": ["mobile"]}),
-            "reached checkout · mobile",
+            self.label({"outcome": ["checkout"], "device": ["mobile"], "page": "/p"}),
+            "reached checkout · mobile · /p",
         )
         self.assertEqual(self.label({}), "everyone else")
 
@@ -188,6 +236,10 @@ class TestCutKey(unittest.TestCase):
         a = analyze.cut_key({"utm_source": "meta"})
         b = analyze.cut_key({"utm_source": "google"})
         self.assertNotEqual(a, b)
+        self.assertNotEqual(
+            analyze.cut_key({"page": "/p"}),
+            analyze.cut_key({"page": "/products/cream"}),
+        )
 
     def test_key_survives_a_json_round_trip(self):
         key = analyze.cut_key({"outcome": "purchased"})
@@ -447,15 +499,26 @@ class TestBuildCutAnalysis(unittest.TestCase):
         """A missing label would read as a difference and skew the clusters."""
         text = analyze._cut_side_text([row("bare", "rest")], "SESSIONS")
         self.assertIn("device: unknown", text)
+        self.assertIn("page: unknown", text)
         self.assertIn("utm_source: none", text)
         self.assertIn("utm_campaign: none", text)
 
     def test_known_values_still_win_over_the_placeholders(self):
         text = analyze._cut_side_text(
-            [row("s1", "purchased", "desktop", utm_source="google", utm_campaign="spring")],
+            [
+                row(
+                    "s1",
+                    "purchased",
+                    "desktop",
+                    page="/p",
+                    utm_source="google",
+                    utm_campaign="spring",
+                )
+            ],
             "SESSIONS",
         )
         self.assertIn("device: desktop", text)
+        self.assertIn("page: /p", text)
         self.assertIn("utm_source: google", text)
         self.assertIn("utm_campaign: spring", text)
         self.assertNotIn("unknown", text)
@@ -478,6 +541,10 @@ class TestGivenFacts(unittest.TestCase):
         self.assertIn("utm_campaign=spring", text)
         self.assertIn("was on mobile", text)
 
+    def test_page_filter_is_declared(self):
+        text = self.given({"page": "/products/cream"})
+        self.assertIn("landed on /products/cream", text)
+
     def test_an_unconstrained_cut_has_nothing_to_declare(self):
         self.assertEqual(analyze._given_facts({}), "")
 
@@ -486,6 +553,7 @@ class TestGivenFacts(unittest.TestCase):
         text = self.given({"outcome": ["purchased"]})
         self.assertIn("cannot separate", text)
         self.assertIn("device", text)
+        self.assertIn("landing page", text)
         self.assertIn("traffic source", text)
         self.assertIn("campaign", text)
 
@@ -494,12 +562,14 @@ class TestGivenFacts(unittest.TestCase):
         cluster_line = [ln for ln in text.splitlines() if "cannot separate" in ln][0]
         self.assertNotIn("device", cluster_line)
         self.assertIn("outcome", cluster_line)
+        self.assertIn("landing page", cluster_line)
 
     def test_a_fully_constrained_cut_offers_no_free_dimensions(self):
         text = self.given(
             {
                 "outcome": ["purchased"],
                 "device": ["mobile"],
+                "page": "/p",
                 "utm_source": "google",
                 "utm_campaign": "spring",
             }
@@ -571,7 +641,7 @@ class TestCutPromptContent(unittest.TestCase):
 
     def test_names_the_metadata_dimensions_to_cluster_on(self):
         prompt = analyze.CUT_PROMPT
-        for dimension in ("outcome", "device", "utm_source", "utm_campaign"):
+        for dimension in ("outcome", "device", "page", "utm_source", "utm_campaign"):
             self.assertIn(dimension, prompt, dimension)
         # Naming the split must not become a way to restate the filter.
         self.assertIn("State the behavioural difference, never the label", prompt)

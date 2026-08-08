@@ -1527,6 +1527,7 @@ async def get_cut(
     # or a comma list, so "purchased+checkout on mobile" is expressible.
     outcome: Optional[list] = Query(None),
     device: Optional[list] = Query(None),
+    page: Optional[str] = Query(None),
     utm_source: Optional[str] = Query(None),
     utm_medium: Optional[str] = Query(None),
     utm_campaign: Optional[str] = Query(None),
@@ -1549,7 +1550,14 @@ async def get_cut(
 
     slice_spec = (
         _slice_from_params(
-            outcome, device, utm_source, utm_medium, utm_campaign, utm_content, fbclid
+            outcome,
+            device,
+            page,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_content,
+            fbclid,
         )
         or None
     )
@@ -1623,7 +1631,7 @@ def _attribution_map(pool: Path) -> dict:
 
 
 def stamp_cohort_attribution(pool: Path, cohort: dict) -> dict:
-    """Attach attribution, device and outcome so the UI can slice client-side."""
+    """Attach attribution, device, outcome and page so the UI can slice client-side."""
     facts = _session_facts(pool)
     sessions = []
     for entry in cohort.get("sessions") or []:
@@ -1635,6 +1643,10 @@ def stamp_cohort_attribution(pool: Path, cohort: dict) -> dict:
             row.pop("attribution", None)
         if fact.get("device"):
             row["device"] = fact["device"]
+        if fact.get("page"):
+            row["page"] = fact["page"]
+        else:
+            row.pop("page", None)
         row["outcome"] = fact.get("outcome") or (
             "purchased" if row.get("filter") == "purchased" else "rest"
         )
@@ -1649,10 +1661,11 @@ def cohort_response(pool: Path, cohort: dict) -> dict:
 
 
 def _session_facts(pool: Path) -> dict:
-    """session_id → {attribution, device, outcome} straight from the index."""
+    """session_id → {attribution, device, outcome, page} straight from the index."""
     with _index_lock:
         rows = index_conn().execute(
-            'SELECT session_id, attribution, device, "order" FROM sessions WHERE pool = ?',
+            'SELECT session_id, attribution, device, "order", url '
+            "FROM sessions WHERE pool = ?",
             (pool_key(pool),),
         ).fetchall()
 
@@ -1666,11 +1679,12 @@ def _session_facts(pool: Path) -> dict:
         return value if isinstance(value, dict) else None
 
     out = {}
-    for sid, attribution, device, order in rows:
+    for sid, attribution, device, order, url in rows:
         out[sid] = {
             "attribution": _json(attribution),
             "device": analyze.device_class(_json(device)),
             "outcome": analyze.outcome_class(_json(order)),
+            "page": analyze.page_path(url),
         }
     return out
 
@@ -1694,6 +1708,7 @@ def _cut_rows(pool: Path, cohort: dict) -> list:
                 "outcome": fact.get("outcome")
                 or ("purchased" if entry.get("filter") == "purchased" else "rest"),
                 "device": fact.get("device"),
+                "page": fact.get("page"),
                 "attribution": fact.get("attribution"),
                 "text": text,
             }
@@ -1709,13 +1724,21 @@ def cohort_facets(pool: Path, cohort: dict) -> dict:
     worse than not offering it.
     """
     rows = _cut_rows(pool, cohort)
-    counts = {"outcome": {}, "device": {}, "utm_source": {}, "utm_campaign": {}}
+    counts = {
+        "outcome": {},
+        "device": {},
+        "page": {},
+        "utm_source": {},
+        "utm_campaign": {},
+    }
     for row in rows:
         counts["outcome"][row.get("outcome") or "rest"] = (
             counts["outcome"].get(row.get("outcome") or "rest", 0) + 1
         )
         if row.get("device"):
             counts["device"][row["device"]] = counts["device"].get(row["device"], 0) + 1
+        if row.get("page"):
+            counts["page"][row["page"]] = counts["page"].get(row["page"], 0) + 1
         attrs = row.get("attribution") or {}
         for key in ("utm_source", "utm_campaign"):
             value = str(attrs.get(key) or "").strip().lower()
@@ -1735,6 +1758,7 @@ def cohort_facets(pool: Path, cohort: dict) -> dict:
         "n": len(rows),
         "outcome": _listed("outcome", order=analyze.OUTCOME_VALUES),
         "device": _listed("device", order=analyze.DEVICE_VALUES),
+        "page": _listed("page"),
         "utm_source": _listed("utm_source"),
         "utm_campaign": _listed("utm_campaign"),
     }
@@ -1784,7 +1808,14 @@ def _multi_param(raw, allowed, field) -> list:
 
 
 def _slice_from_params(
-    outcome, device, utm_source, utm_medium, utm_campaign, utm_content, fbclid
+    outcome,
+    device,
+    page,
+    utm_source,
+    utm_medium,
+    utm_campaign,
+    utm_content,
+    fbclid,
 ) -> dict:
     spec = {}
     outcomes = _multi_param(outcome, analyze.OUTCOME_VALUES, "outcome")
@@ -1793,6 +1824,8 @@ def _slice_from_params(
     devices = _multi_param(device, analyze.DEVICE_VALUES, "device")
     if devices:
         spec["device"] = devices
+    if isinstance(page, str) and page.strip():
+        spec["page"] = page.strip()
     for key, value in (
         ("utm_source", utm_source),
         ("utm_medium", utm_medium),

@@ -1151,10 +1151,10 @@ class TestCutSlices(ServerCase):
     env = {"GEMINI_API_KEY": "test-key-not-used-when-cached"}
 
     SPECS = [
-        ("p" * 32, "purchased", 360, "utm_source=google"),
-        ("c" * 32, "checkout", 390, "utm_source=facebook"),
-        ("r" * 32, "rest", 1440, "utm_campaign=spring"),
-        ("q" * 32, "purchased", 1280, ""),
+        ("p" * 32, "purchased", 360, "https://shop.test/p?utm_source=google"),
+        ("c" * 32, "checkout", 390, "https://shop.test/collections/sale?utm_source=facebook"),
+        ("r" * 32, "rest", 1440, "https://shop.test/p?utm_campaign=spring"),
+        ("q" * 32, "purchased", 1280, "https://shop.test/products/cream"),
     ]
 
     def order(self, session_id, payload):
@@ -1168,8 +1168,7 @@ class TestCutSlices(ServerCase):
     def setUp(self):
         if getattr(self.__class__, "_seeded", None):
             return
-        for sid, outcome, width, query in self.SPECS:
-            url = f"https://shop.test/p?{query}" if query else "https://shop.test/p"
+        for sid, outcome, width, url in self.SPECS:
             events = [{"type": 4, "data": {"width": width, "height": 800}}]
             self.assertEqual(
                 self.ingest(sid, {"events": events, "url": url}), 200
@@ -1198,15 +1197,18 @@ class TestCutSlices(ServerCase):
     def cohort_id(self):
         return self.__class__._seeded
 
-    def test_cohort_rows_carry_device_and_three_way_outcome(self):
+    def test_cohort_rows_carry_device_outcome_and_page(self):
         _, body = request(f"{self.base}/api/cohorts/{self.cohort_id}")
         rows = {s["session_id"][0]: s for s in json.loads(body)["sessions"]}
         self.assertEqual(rows["p"]["outcome"], "purchased")
         self.assertEqual(rows["p"]["device"], "mobile")
+        self.assertEqual(rows["p"]["page"], "/p")
         self.assertEqual(rows["c"]["outcome"], "checkout")
         self.assertEqual(rows["c"]["device"], "mobile")
+        self.assertEqual(rows["c"]["page"], "/collections/sale")
         self.assertEqual(rows["r"]["outcome"], "rest")
         self.assertEqual(rows["r"]["device"], "desktop")
+        self.assertEqual(rows["q"]["page"], "/products/cream")
 
     def test_derived_fields_are_not_frozen_into_the_cohort_file(self):
         saved = json.loads(
@@ -1215,6 +1217,7 @@ class TestCutSlices(ServerCase):
         for entry in saved["sessions"]:
             self.assertNotIn("device", entry)
             self.assertNotIn("outcome", entry)
+            self.assertNotIn("page", entry)
             self.assertNotIn("attribution", entry)
 
     def test_facets_report_only_values_present_in_the_cohort(self):
@@ -1229,6 +1232,10 @@ class TestCutSlices(ServerCase):
         self.assertEqual(
             {f["value"]: f["count"] for f in facets["device"]},
             {"mobile": 2, "desktop": 2},
+        )
+        self.assertEqual(
+            {f["value"]: f["count"] for f in facets["page"]},
+            {"/p": 2, "/collections/sale": 1, "/products/cream": 1},
         )
         self.assertEqual(
             {f["value"] for f in facets["utm_source"]}, {"google", "facebook"}
@@ -1250,9 +1257,11 @@ class TestCutSlices(ServerCase):
             "",
             "outcome=purchased",
             "device=mobile",
+            "page=/p",
             "outcome=purchased&device=mobile",
             "utm_source=google",
             "utm_campaign=spring",
+            "page=/products/cream&outcome=purchased",
             "outcome=checkout&outcome=rest",
             "outcome=checkout,rest",
             "outcome=purchased&device=mobile&utm_source=google",
@@ -1276,6 +1285,9 @@ class TestCutSlices(ServerCase):
         _, one = self.cut("device=mobile")
         _, two = self.cut("device=desktop")
         self.assertNotEqual(json.loads(one)["cut"], json.loads(two)["cut"])
+        _, page_a = self.cut("page=/p")
+        _, page_b = self.cut("page=/products/cream")
+        self.assertNotEqual(json.loads(page_a)["cut"], json.loads(page_b)["cut"])
 
     def test_an_empty_filter_is_the_whole_cohort_cut(self):
         import analyze
