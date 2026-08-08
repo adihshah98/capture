@@ -1,6 +1,6 @@
 import { currentProject, fetchJson, projectQuery, setProject } from './api.js';
 import { parseHash, writeHash } from './deeplink.js';
-import { formatBytes, formatDuration, formatTime, pagePath } from './format.js';
+import { formatBytes, formatDuration, formatTime, isLive, pagePath } from './format.js';
 import { clearPlayer, loadSession, loadedSessionId, setPendingSeek } from './session-player.js';
 import { setAnalysisEnabled } from './analysis.js';
 import { setInsightsAnalysisEnabled } from './insights.js';
@@ -29,16 +29,27 @@ function sessionsUrl(cursor) {
   return `/api/sessions?${params}`;
 }
 
+function sessionMeta(session) {
+  const tail = isLive(session)
+    ? '<span class="live">live</span>'
+    : formatDuration(session.last_seen - session.first_seen);
+  return `${formatTime(session.first_seen)} · ${tail}`;
+}
+
+function updateSessionCard(session) {
+  const li = sessionListEl.querySelector(`li[data-sid="${session.session_id}"]`);
+  if (!li) return;
+  li.querySelector('.meta').innerHTML = sessionMeta(session);
+  li.title = `${session.chunk_count} chunks · ${formatBytes(session.bytes)}`;
+}
+
 export async function findSession(sessionId) {
   const cached = allSessions.find((s) => s.session_id === sessionId);
   try {
     const fresh = await fetchJson(`/api/sessions/${sessionId}${projectQuery()}`);
     if (!cached) return fresh;
     Object.assign(cached, fresh);
-    const meta = sessionListEl.querySelector(`li[data-sid="${sessionId}"] .meta`);
-    if (meta) {
-      meta.textContent = `${formatTime(cached.first_seen)} · ${formatDuration(cached.last_seen - cached.first_seen)}`;
-    }
+    updateSessionCard(cached);
     return cached;
   } catch {
     return cached;
@@ -118,6 +129,29 @@ async function loadSessions({ append = false } = {}) {
   renderSessionList();
 }
 
+async function refreshLiveSessions() {
+  if (document.hidden || loadingMore) return;
+  const seq = loadSeq;
+  let body;
+  try {
+    body = await fetchJson(sessionsUrl(null));
+  } catch {
+    return;
+  }
+  if (seq !== loadSeq) return;
+  for (const fresh of body.sessions || []) {
+    const row = allSessions.find((s) => s.session_id === fresh.session_id);
+    if (!row) continue;
+    Object.assign(row, fresh);
+    updateSessionCard(row);
+  }
+  for (const row of allSessions) {
+    if (!body.sessions.some((s) => s.session_id === row.session_id)) updateSessionCard(row);
+  }
+}
+
+setInterval(refreshLiveSessions, 10000);
+
 const loadMoreObserver = new IntersectionObserver((entries) => {
   if (entries.some((e) => e.isIntersecting)) loadMore();
 });
@@ -149,7 +183,7 @@ function renderSessionList() {
     li.innerHTML = `
       <div class="info">
         <span class="sid">${session.session_id.slice(0, 8)}…</span>
-        <span class="meta">${formatTime(session.first_seen)} · ${formatDuration(session.last_seen - session.first_seen)}</span>
+        <span class="meta">${sessionMeta(session)}</span>
         <span class="page"></span>
       </div>
       <button class="del" title="Delete this recording">Delete</button>

@@ -8,6 +8,10 @@ export function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+export function isLive(session) {
+  return Date.now() - session.last_seen < 30000;
+}
+
 export function formatDuration(ms) {
   const s = Math.round(ms / 1000);
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
