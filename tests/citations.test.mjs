@@ -103,6 +103,43 @@ test('a bare ordinal links at a clause end', () => {
   }
 });
 
+// The clause fence assumes the citation trails its claim, but the model also
+// writes the session as the sentence's subject, where a verb follows the
+// ordinal. These rendered dead next to linking neighbours — the second round
+// of "some have a link and some don't".
+const LEADING = [
+  ['a verb follows the ordinal', "S3 attempted to cancel an order via chat"],
+  ['a stamp sits downstream', "S3 clicked 'BUY NOW' twice [00:33, 01:54]"],
+  ['several stamps sit downstream', 'S3 clicked the CTA at [01:55], but it scrolled [01:56]'],
+  ['after a sentence end', 'Users hesitated. S2 scrolled past the price.'],
+  ['as a bullet', '- S2 abandoned at checkout'],
+];
+
+for (const [name, text] of LEADING) {
+  test(`links a leading citation when ${name}`, () => {
+    const out = linkCitations(text, IDS, escapeAttr);
+    assert.match(out, /class="cut-cite"/, text);
+    // A downstream stamp belongs to the event, not the ordinal: S43's line has
+    // one each for the click, the scroll and the recovery, so choosing among
+    // them would seek to a moment the sentence is not about. Open at the start.
+    assert.match(out, /data-cite-t="0"/, text);
+  });
+}
+
+test('a leading citation still resolves through the map', () => {
+  const out = linkCitations('S1 clicked BUY NOW twice', IDS, escapeAttr, { 1: 'mapped' });
+  assert.match(out, /data-cite-sid="mapped"/);
+});
+
+test('a leading ordinal past the group stays plain text', () => {
+  assert.doesNotMatch(linkCitations('S44 attempted to cancel', IDS, escapeAttr), /cut-cite/);
+});
+
+test('a leading citation links only the ordinal, not the sentence', () => {
+  const out = linkCitations('S2 clicked BUY NOW twice', IDS, escapeAttr);
+  assert.match(out, />S2<\/button> clicked BUY NOW twice$/);
+});
+
 // A bare S<n> is loose enough to hit ordinary prose, so it is fenced.
 test('prose that merely looks like a citation is not linked', () => {
   for (const text of [

@@ -36,10 +36,41 @@ const STAMP =
   String.raw`)(?:\s*[-–—]\s*` +
   TIME +
   String.raw`)?[\])]`;
+
+// The clause fence above assumes a citation trails its claim. It also leads:
+// the model writes whole observations in the third person, with the session as
+// the grammatical subject —
+//
+//   "S39 clicked 'BUY NOW' twice [00:33, 01:54] for Ashwagandha"
+//
+// Here S39 is followed by a verb, so the fence rejected it and the observation
+// rendered dead while list-style cites in neighbouring rows linked. There is no
+// prose reading of a line that opens on "S39 " — "the S3 model" and "size S4
+// shirt" both need a word in front — so at a sentence start the ordinal is a
+// citation whatever follows it, and no trailing fence is required.
+//
+// Sentence start means: start of string, or after .!? or a newline or a bullet.
+// Deliberately not after a comma or a colon, which is mid-sentence and where
+// prose like "in size S4 shirts" lives.
+//
+// This does trade away one case: a sentence that genuinely opens on a size or
+// model name ("S4 shirts arrived late") now links. Accepted — these strings are
+// observations about sessions in a cut, so a leading ordinal is a citation
+// essentially always, and the alternative leaves whole observations dead.
+const SENTENCE_START = String.raw`(?<=^|[.!?]\s|[\n\r]\s*|^\s*[-•*]\s)`;
+
+// Stamps in these leading citations belong to the event being described, not
+// to the ordinal — S43's line carries three of them, for the click, the scroll
+// and the recovery. Picking one would seek to a moment the sentence is not
+// about, so a leading citation is always bare and opens the session at its
+// start. Only a bracket directly after the ordinal is that ordinal's stamp.
 const CITATION_RE = new RegExp(
   String.raw`(?<![\w$£€#])S(\d{1,3})(?:` +
     STAMP +
-    String.raw`|(?=\s*(?:[,;:)\].]|and\b|&|$)))`,
+    String.raw`|(?=\s*(?:[,;:)\].]|and\b|&|$))` +
+    String.raw`|(?<=` +
+    SENTENCE_START +
+    String.raw`S\d{1,3})(?=\s))`,
   'g'
 );
 
