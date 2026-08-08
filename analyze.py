@@ -905,9 +905,13 @@ never "Session 4", "#4", or "S4 at 1:09".
   cite a number above the group size, and never renumber the sessions.
 - The [MM:SS] must be a timestamp that appears in THAT session's write-up.
   Do not carry a timestamp from one session over to another.
+- Include the timestamp whenever the claim is about a moment. When it is a
+  counting claim and no single moment applies, a bare "S1, S2, S4" is right —
+  do not invent a timestamp to decorate it.
 - Cite the sessions the claim rests on, in brackets after the point:
   "Four sessions stalled on the guarantee (S1 [00:13], S4 [01:09],
   S6 [00:17], S8 [00:08]) — the promise is doing the selling."
+  "4 of 7 kept the default '90-Night Supply' (S1, S2, S4, S7)."
 - Citations are evidence, not the finding. They never replace the sentence,
   and a bare list of citations is not an observation.
 

@@ -75,6 +75,52 @@ test('a range keeps its full text in the link', () => {
   assert.match(out, />S2 \[00:05-00:12\]</);
 });
 
+// Counting claims cite bare ordinals — the model only has a moment to point
+// at when the claim is about a moment. Both forms appear in one sentence.
+const IDS7 = ['s1', 's2', 's3', 's4', 's5', 's6', 's7'];
+
+test('bare ordinals in a citation list all link', () => {
+  const out = linkCitations('(S1, S2, S4, S7)', IDS7, escapeAttr);
+  assert.equal((out.match(/cut-cite/g) || []).length, 4);
+  // No stamp means open at the start, which is still the right session.
+  assert.equal((out.match(/data-cite-t="0"/g) || []).length, 4);
+});
+
+test('bare and stamped citations mix in one observation', () => {
+  // The reported case: the stamped group linked, the bare group did not.
+  const text =
+    "4 of 7 purchased the default '90-Night Supply' (S1, S2, S4, S7), while 3 " +
+    "switched to '30-Night Supply' (S3 [01:10], S5 [00:10], S6 [00:36]).";
+  const out = linkCitations(text, IDS7, escapeAttr);
+  assert.equal((out.match(/cut-cite/g) || []).length, 7);
+  assert.match(out, /data-cite-sid="s1" data-cite-t="0"/);
+  assert.match(out, /data-cite-sid="s3" data-cite-t="70000"/);
+});
+
+test('a bare ordinal links at a clause end', () => {
+  for (const text of ['S2', 'S2.', 'S2;', 'S1 and S2', 'S2)']) {
+    assert.match(linkCitations(text, IDS, escapeAttr), /cut-cite/, text);
+  }
+});
+
+// A bare S<n> is loose enough to hit ordinary prose, so it is fenced.
+test('prose that merely looks like a citation is not linked', () => {
+  for (const text of [
+    'the S3 model',
+    'size S4 shirt',
+    'costs $S3',
+    'CSS3 rules',
+    'HTTPS3',
+    'AS1 BS2',
+  ]) {
+    assert.doesNotMatch(linkCitations(text, IDS, escapeAttr), /cut-cite/, text);
+  }
+});
+
+test('a zero ordinal is not a session', () => {
+  assert.doesNotMatch(linkCitations('S0 [00:05]', IDS, escapeAttr), /cut-cite/);
+});
+
 test('an ordinal past the group is left as plain text', () => {
   // The bug this guards: S44 cited against a 4-session cut.
   const out = linkCitations('see S44 [00:12]', IDS, escapeAttr);

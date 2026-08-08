@@ -1,25 +1,45 @@
-// Session citations in cut insights: "S4 [01:09]".
+// Session citations in cut insights: "S4 [01:09]", or a bare "S4".
 //
 // The model is told to cite write-ups as S<n>, where n is the 1-based position
 // in the prompt (see _cut_side_text in analyze.py). That is the same order the
 // cut stores in `session_ids`, so n resolves positionally against it. Kept in
 // its own module so it can be tested without a DOM.
+//
+// The ordinal is the anchor and the timestamp is optional, because the model
+// only has a moment to point at when the claim is about a moment. Counting
+// claims cite bare ordinals, and both forms routinely appear in one sentence:
+//
+//   "4 of 7 purchased the default (S1, S2, S4, S7), while 3 switched to
+//    '30-Night' (S3 [01:10], S5 [00:10], S6 [00:36])"
+//
+// Requiring a stamp left the first group dead while the second linked. A bare
+// citation opens its session at the start; that is still the right session.
 
-// The prompt asks for "S4 [01:09]", but the model reliably drifts around that
-// shape, and a citation that renders as dead text is worse than a loose match:
-//   S8 at [00:08]      a linking word before the stamp
-//   S24 (00:12)        parentheses instead of brackets
-//   S3 [00:05-00:12]   a range, which a stall is naturally written as
-//   S6 [00:17.5]       fractional seconds
-// So: allow a short connector, either bracket style, and take the START of a
-// range as the seek target. The ordinal is bounded by the group size, not here.
+// MM:SS, HH:MM:SS, optional fractional seconds.
 const TIME = String.raw`\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?`;
+
+// S<n>, then optionally: a connector ("at", "@"), a bracket or paren, a time
+// or time range, close. Everything after the ordinal is optional, so a bare
+// "S4" matches and a decorated "S4 at [00:05-00:12]" matches the whole span.
+//
+// A bare S<n> is a loose pattern, so it is fenced on both sides.
+//
+// Leading (?<![\w$£€#]) keeps "CSS3", "AS1" and "$S5" out. The trailing
+// lookahead requires the ordinal to end a clause or a citation list — a comma,
+// a closing bracket, "and", or end of string — so "the S3 model" and "size S4
+// shirt" stay prose. A following word means it is a noun phrase, not a cite.
+//
+// A stamped citation skips the fence entirely: the bracket disambiguates it.
+const STAMP =
+  String.raw`\s*(?:at\s+|@\s*)?[[(](` +
+  TIME +
+  String.raw`)(?:\s*[-–—]\s*` +
+  TIME +
+  String.raw`)?[\])]`;
 const CITATION_RE = new RegExp(
-  String.raw`\bS(\d+)\s*(?:at\s+|@\s*)?[[(](` +
-    TIME +
-    String.raw`)(?:\s*[-–—]\s*` +
-    TIME +
-    String.raw`)?[\])]`,
+  String.raw`(?<![\w$£€#])S(\d{1,3})(?:` +
+    STAMP +
+    String.raw`|(?=\s*(?:[,;:)\].]|and\b|&|$)))`,
   'g'
 );
 
@@ -41,22 +61,31 @@ export function citationMs(stamp) {
 }
 
 /**
- * Wrap each "S4 [01:09]" in a button linking to that session at that moment.
+ * Wrap each "S4" / "S4 [01:09]" in a button linking to that session.
  *
  * `escaped` MUST already be HTML-escaped: this returns markup, so linkifying
- * raw text would let a model-written observation inject HTML. Citations that
- * do not resolve — ordinal past the end of `sessionIds`, unparseable stamp —
- * are left as plain text, since a link to the wrong session is worse than none.
+ * raw text would let a model-written observation inject HTML.
+ *
+ * Left as plain text when the citation cannot be trusted to point somewhere:
+ * an ordinal past the end of `sessionIds`, or a stamp that is present but
+ * unparseable — a link to the wrong session is worse than no link. A stamp
+ * that is merely absent is fine; the session opens at its start.
  */
 export function linkCitations(escaped, sessionIds, escapeAttr = (s) => s) {
   if (!Array.isArray(sessionIds) || !sessionIds.length) return escaped;
   return String(escaped).replace(CITATION_RE, (whole, n, stamp) => {
     const sid = sessionIds[Number(n) - 1];
-    const ms = citationMs(stamp);
-    if (!sid || ms == null) return whole;
+    if (!sid) return whole;
+    // A written-but-malformed stamp is a signal the match is not what it
+    // looks like, so decline it rather than silently seeking to 0.
+    const ms = stamp === undefined ? 0 : citationMs(stamp);
+    if (ms == null) return whole;
+    const title = stamp
+      ? `Open this session at ${escapeAttr(stamp)}`
+      : 'Open this session';
     return (
       `<button type="button" class="cut-cite" data-cite-sid="${escapeAttr(sid)}"` +
-      ` data-cite-t="${ms}" title="Open this session at ${escapeAttr(stamp)}">${whole}</button>`
+      ` data-cite-t="${ms}" title="${title}">${whole}</button>`
     );
   });
 }
