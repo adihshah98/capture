@@ -14,6 +14,7 @@ const progressEl = document.getElementById('cohort-progress');
 const cutLabelEl = document.getElementById('cut-label');
 const cutProgressEl = document.getElementById('cut-progress');
 const cutRunBtn = document.getElementById('cut-run');
+const cutRefreshBtn = document.getElementById('cut-refresh');
 const cutBodyEl = document.getElementById('cut-body');
 const tableWrapEl = document.getElementById('cohort-table-wrap');
 const pickerEl = document.getElementById('cut-picker');
@@ -29,6 +30,9 @@ let activeTab = 'cut';
 let autoSwitchedForRun = false;
 let facets = null;
 let slice = emptySlice();
+// True while an already-computed cut is on screen — the only state where
+// re-analyzing means anything.
+let cutIsShowing = false;
 
 export function setInsightsAnalysisEnabled(on) {
   analysisEnabled = !!on;
@@ -66,6 +70,14 @@ function syncCutRunButton() {
   } else {
     cutRunBtn.title = '';
   }
+  if (!cutRefreshBtn) return;
+  // Offered only over a result: with nothing cached, "Analyze this group"
+  // already does the same work under a clearer name.
+  cutRefreshBtn.hidden = !cutIsShowing;
+  cutRefreshBtn.disabled = !ready;
+  cutRefreshBtn.title = ready
+    ? 'Discard this cached answer and ask the model again'
+    : cutRunBtn.title;
 }
 
 function withProject(params) {
@@ -113,12 +125,14 @@ function sliceIsEmpty(spec) {
   return SLICE_FIELDS.every((field) => !spec[field]);
 }
 
-function cutUrl(id, { run = false } = {}) {
+function cutUrl(id, { run = false, refresh = false } = {}) {
   const params = withProject(new URLSearchParams());
   for (const field of SLICE_FIELDS) {
     if (slice[field]) params.set(field, slice[field]);
   }
   if (run) params.set('run', '1');
+  // Busts the cached answer for this cut and asks the model again.
+  if (refresh) params.set('refresh', '1');
   return `/api/cohorts/${encodeURIComponent(id)}/cut?${params.toString()}`;
 }
 
@@ -386,7 +400,9 @@ async function loadFacets() {
 }
 
 function renderCutPlaceholder(message) {
+  cutIsShowing = false;
   cutBodyEl.innerHTML = `<div class="insights-placeholder">${escapeHtml(message)}</div>`;
+  syncCutRunButton();
 }
 
 /** Section order mirrors the prompt: journey, attention, intent, blockers. */
@@ -440,10 +456,13 @@ function renderCut(body) {
   const meta = `<p class="cut-meta">
     Read from ${n} analyzed session write-up(s) in this cohort.
     Written by ${escapeHtml(body.model || 'the model')}.
-    Cohort membership is fixed, so this cut is cached and will not be recomputed.
+    Cohort membership is fixed, so this cut is cached and served without another
+    model call — use Re-analyze to ask again.
   </p>`;
 
+  cutIsShowing = true;
   cutBodyEl.innerHTML = headline + sections + meta;
+  syncCutRunButton();
 }
 
 async function pollCut() {
@@ -517,14 +536,15 @@ async function loadCut() {
   }
 }
 
-async function runCut() {
+async function runCut({ refresh = false } = {}) {
   if (!cohortId || !analysisEnabled) return;
   stopCutPolling();
   cutRunBtn.disabled = true;
-  cutProgressEl.textContent = 'Analyzing…';
+  if (cutRefreshBtn) cutRefreshBtn.disabled = true;
+  cutProgressEl.textContent = refresh ? 'Re-analyzing…' : 'Analyzing…';
   renderCutPlaceholder('Reading the write-ups in this group. This takes a few seconds.');
   try {
-    const body = await fetchCut(cohortId, { run: true });
+    const body = await fetchCut(cohortId, { run: true, refresh });
     if (body.status === 'running') {
       cutPollTimer = setTimeout(pollCut, POLL_MS);
       return;
@@ -687,7 +707,10 @@ export function initInsights() {
   });
   runBtn.addEventListener('click', runCohort);
   renameBtn.addEventListener('click', renameCohort);
-  if (cutRunBtn) cutRunBtn.addEventListener('click', runCut);
+  if (cutRunBtn) cutRunBtn.addEventListener('click', () => runCut());
+  if (cutRefreshBtn) {
+    cutRefreshBtn.addEventListener('click', () => runCut({ refresh: true }));
+  }
   cohortSelectEl.addEventListener('change', () => {
     cohortId = cohortSelectEl.value || null;
     stopCutPolling();

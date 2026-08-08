@@ -1533,11 +1533,14 @@ async def get_cut(
     utm_content: Optional[str] = Query(None),
     fbclid: Optional[str] = Query(None),
     run: bool = Query(False),
+    refresh: bool = Query(False),
 ):
     """A cut's analysis: cached when we have it, queued when `run=1`.
 
-    Cohorts are frozen once sampled, so a cached cut is always valid — the
-    model is asked about a given cut exactly once.
+    Cohorts are frozen once sampled, so a cached cut stays valid for as long as
+    the question does. `refresh=1` drops the cached answer and re-asks — the
+    escape hatch for a reworded prompt or a new model, and the only way to
+    spend a second call on a cut.
     """
     require_read_access(request, project)
     pool = resolve_pool(project)
@@ -1551,17 +1554,21 @@ async def get_cut(
         or None
     )
     key = analyze.cut_key(slice_spec)
-
-    cached = analyze.read_cut(pool, cohort_id, key)
-    if cached:
-        return {**cached, "cohort_id": cohort_id, "cached": True}
+    # A refresh is a run by definition: there is no reason to bust the cache
+    # and then decline to refill it.
+    run = run or refresh
 
     task_key = _cut_task_key(pool, cohort_id, key)
     existing = _cut_tasks.get(task_key)
     if existing and not existing.done():
+        # A run already in flight is the fresh answer a refresh was asking for.
         return JSONResponse(
             {"status": "running", "cut": key, "cohort_id": cohort_id}, status_code=202
         )
+
+    cached = analyze.read_cut(pool, cohort_id, key)
+    if cached and not refresh:
+        return {**cached, "cohort_id": cohort_id, "cached": True}
 
     failure = _cut_errors.get(task_key)
     if failure and not run:
@@ -1582,6 +1589,11 @@ async def get_cut(
     rows = _cut_rows(pool, live)
     if not rows:
         raise ApiError(400, "no analyzed sessions in this cohort yet")
+
+    # Only now, with the call certain to be queued: a refresh that fails its
+    # preconditions must leave the old answer standing rather than delete it.
+    if refresh:
+        analyze.clear_cut(pool, cohort_id, key)
 
     task = asyncio.create_task(_run_cut_job(pool, cohort_id, rows, slice_spec, key))
     _cut_tasks[task_key] = task

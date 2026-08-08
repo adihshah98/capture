@@ -8,7 +8,8 @@ as the visitor saw it change, rather than a single end-state snapshot.
 Also owns cohorts: pick N purchased + N all sessions, persist the sample under
 `cohorts/<id>.json`, and leave the server to queue per-session analysis against
 it. A cohort is immutable once sampled, so a "cut" across it (Meta vs Google,
-campaign A vs B) can be analysed by the model once and cached forever beside it.
+campaign A vs B) can be analysed by the model once and cached beside it. The
+cache is busted only on request (`refresh=1`), for when the prompt changes.
 """
 
 import argparse
@@ -293,13 +294,30 @@ def read_cut(pool: Path, cohort_id: str, key: str) -> Optional[dict]:
 
 
 def write_cut(pool: Path, cohort_id: str, key: str, cut: dict) -> dict:
-    """Cache one cut. A done cohort is immutable, so this never needs busting."""
+    """Cache one cut. A done cohort is immutable, so this only needs busting
+    when the question changes (a reworded prompt), never when the data does."""
     path = cuts_path(pool, cohort_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     cuts = read_cuts(pool, cohort_id)
     cuts[key] = cut
     path.write_text(json.dumps(cuts, indent=2))
     return cut
+
+
+def clear_cut(pool: Path, cohort_id: str, key: str) -> bool:
+    """Drop one cached cut so the next run re-asks the model. Returns whether
+    anything was actually dropped."""
+    try:
+        path = cuts_path(pool, cohort_id)
+    except ValueError:
+        return False
+    cuts = read_cuts(pool, cohort_id)
+    if key not in cuts:
+        return False
+    cuts.pop(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cuts, indent=2))
+    return True
 
 
 def enrich_cohort_status(pool: Path, cohort: dict) -> dict:

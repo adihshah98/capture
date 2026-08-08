@@ -1099,6 +1099,51 @@ class TestCutEndpoint(ServerCase):
         self.assertEqual(status, 404)
         self.assertIn("no such cohort", json.loads(body)["error"])
 
+    def _cache_a_cut(self, cohort_id):
+        import analyze
+
+        key = analyze.cut_key({"outcome": "purchased"})
+        analyze.write_cut(
+            self.data_dir / "sessions",
+            cohort_id,
+            key,
+            {"cut": key, "label": "purchased", "n": 1, "analysis": {"headline": "old"}},
+        )
+        return key
+
+    def test_refresh_drops_the_cached_answer_and_queues_a_new_call(self):
+        import analyze
+
+        cohort_id = self.a_cohort()
+        key = self._cache_a_cut(cohort_id)
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased&refresh=1"
+        )
+        self.assertEqual(status, 202, body)
+        self.assertEqual(json.loads(body)["status"], "running")
+        # The stale answer is gone, so nothing can serve it while the run is in
+        # flight — the point of the refresh.
+        self.assertIsNone(
+            analyze.read_cut(self.data_dir / "sessions", cohort_id, key)
+        )
+
+    def test_refresh_on_a_cut_that_was_never_cached_just_runs(self):
+        cohort_id = self.a_cohort()
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased&refresh=1"
+        )
+        self.assertEqual(status, 202, body)
+        self.assertEqual(json.loads(body)["status"], "running")
+
+    def test_without_refresh_the_cache_still_answers(self):
+        cohort_id = self.a_cohort()
+        self._cache_a_cut(cohort_id)
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased"
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(json.loads(body)["cached"])
+
 
 class TestCutSlices(ServerCase):
     """Facets and free-form group slicing over a cohort with a known shape."""
@@ -1258,6 +1303,25 @@ class TestCohortUnavailable(ServerCase):
         status, body = request(f"{self.base}/api/cohorts", method="POST", data=b"")
         self.assertEqual(status, 503)
         self.assertIn("not configured", json.loads(body)["error"])
+
+    def test_a_refusable_refresh_keeps_the_cached_answer(self):
+        """Without a key the refresh cannot be served — it must leave the good
+        answer standing rather than delete what it cannot replace."""
+        import analyze
+
+        pool = self.data_dir / "sessions"
+        cohort = analyze.write_cohort(
+            pool,
+            {"id": "cohort-keyless", "status": "done", "sessions": []},
+        )
+        key = analyze.cut_key({"outcome": "purchased"})
+        analyze.write_cut(pool, cohort["id"], key, {"cut": key, "analysis": {"headline": "old"}})
+        status, _ = request(
+            f"{self.base}/api/cohorts/{cohort['id']}/cut?outcome=purchased&refresh=1"
+        )
+        self.assertEqual(status, 503)
+        still = analyze.read_cut(pool, cohort["id"], key)
+        self.assertEqual(still["analysis"]["headline"], "old")
 
 
 class TestCohortSampling(unittest.TestCase):

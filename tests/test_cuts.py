@@ -622,6 +622,33 @@ class TestCutCache(unittest.TestCase):
             analyze.cuts_path(self.pool, "../../etc/passwd")
         self.assertEqual(analyze.read_cuts(self.pool, "../../etc/passwd"), {})
 
+    def test_clearing_a_cut_frees_it_to_be_asked_again(self):
+        key = analyze.cut_key({"outcome": "purchased"})
+        analyze.write_cut(self.pool, "cohort-1", key, {"n": 3})
+        self.assertTrue(analyze.clear_cut(self.pool, "cohort-1", key))
+        self.assertIsNone(analyze.read_cut(self.pool, "cohort-1", key))
+
+    def test_clearing_one_cut_leaves_its_neighbours_cached(self):
+        k1 = analyze.cut_key({"outcome": "purchased"})
+        k2 = analyze.cut_key({"utm_source": "meta"})
+        analyze.write_cut(self.pool, "cohort-1", k1, {"n": 1})
+        analyze.write_cut(self.pool, "cohort-1", k2, {"n": 2})
+        analyze.clear_cut(self.pool, "cohort-1", k1)
+        self.assertIsNone(analyze.read_cut(self.pool, "cohort-1", k1))
+        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", k2)["n"], 2)
+
+    def test_clearing_a_cut_that_was_never_cached_is_a_no_op(self):
+        key = analyze.cut_key({"outcome": "purchased"})
+        self.assertFalse(analyze.clear_cut(self.pool, "cohort-1", key))
+        self.assertFalse(analyze.clear_cut(self.pool, "../../etc/passwd", key))
+
+    def test_a_cleared_cut_can_be_rewritten(self):
+        key = analyze.cut_key({"outcome": "purchased"})
+        analyze.write_cut(self.pool, "cohort-1", key, {"n": 3})
+        analyze.clear_cut(self.pool, "cohort-1", key)
+        analyze.write_cut(self.pool, "cohort-1", key, {"n": 4})
+        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", key)["n"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()
