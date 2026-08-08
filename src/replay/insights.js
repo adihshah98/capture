@@ -491,7 +491,7 @@ const CUT_SECTIONS = [
 ];
 
 /** An insight item: observation, its share of the group, and what to do. */
-function insightItem(item) {
+function insightItem(item, id) {
   if (typeof item === 'string') return `<li>${escapeHtml(item)}</li>`;
   const share = item.share
     ? `<span class="cut-share">${escapeHtml(item.share)}</span>`
@@ -499,7 +499,61 @@ function insightItem(item) {
   const action = item.action
     ? `<p class="cut-action">${escapeHtml(item.action)}</p>`
     : '';
-  return `<li>${share}${escapeHtml(item.observation || '')}${action}</li>`;
+  const idAttr = id ? ` id="${escapeAttr(id)}"` : '';
+  return `<li${idAttr} class="cut-insight">${share}${escapeHtml(item.observation || '')}${action}</li>`;
+}
+
+/** Map normalized action text → insight element id for recommendation jump links. */
+function actionTargets(analysis) {
+  const targets = new Map();
+  for (const { key } of CUT_SECTIONS) {
+    if (key === 'caveats') continue;
+    const items = analysis[key] || [];
+    items.forEach((item, i) => {
+      if (!item || typeof item !== 'object') return;
+      const action = typeof item.action === 'string' ? item.action.trim().toLowerCase() : '';
+      if (!action || targets.has(action)) return;
+      targets.set(action, `cut-insight-${key}-${i}`);
+    });
+  }
+  return targets;
+}
+
+/** Prefer an exact action match; otherwise the longest action that overlaps the line. */
+function targetForRecommendation(line, targets) {
+  const key = String(line || '').trim().toLowerCase();
+  if (!key) return null;
+  if (targets.has(key)) return targets.get(key);
+  let best = null;
+  let bestLen = 0;
+  for (const [action, id] of targets) {
+    if (action.length <= bestLen) continue;
+    if (key.includes(action) || action.includes(key)) {
+      best = id;
+      bestLen = action.length;
+    }
+  }
+  return best;
+}
+
+function recommendationItem(line, targetId) {
+  const text = escapeHtml(line);
+  if (!targetId) return `<li>${text}</li>`;
+  return `<li>
+    <button type="button" class="cut-rec-link" data-scroll-to="${escapeAttr(targetId)}">${text}</button>
+  </li>`;
+}
+
+function scrollToInsight(id) {
+  const el = cutBodyEl.querySelector(`#${CSS.escape(id)}`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.remove('cut-insight-flash');
+  // Retrigger the flash when the same rec is clicked again.
+  void el.offsetWidth;
+  el.classList.add('cut-insight-flash');
+  const clear = () => el.classList.remove('cut-insight-flash');
+  el.addEventListener('animationend', clear, { once: true });
 }
 
 function renderCut(body) {
@@ -514,30 +568,38 @@ function renderCut(body) {
     ? `<div class="cut-headline">${escapeHtml(analysis.headline)}</div>`
     : '';
 
-  // Marketer punch list sits under the headline so the team sees "what to do"
-  // before the evidence. Absent on thin/empty cuts — no empty block.
-  const recs = analysis.recommendations || [];
-  const recommendations = recs.length
-    ? `<div class="cut-block recommendations">
-        <h4>Recommendations</h4>
-        <ul>${recs.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>
-      </div>`
-    : '';
+  const targets = actionTargets(analysis);
 
   const sections = CUT_SECTIONS.map(({ key, title, cls, empty }) => {
     const items = analysis[key] || [];
     // Caveats have no empty copy: an absent caveat list is not worth a block.
     if (!items.length && !empty) return '';
     const count = key === 'journey' ? `<span class="n">(n=${n})</span>${thin}` : '';
-    return `<div class="cut-block ${cls || ''}">
+    return `<div class="cut-block ${cls || ''}" id="cut-section-${escapeAttr(key)}">
       <h4>${escapeHtml(title)}${count}</h4>
       ${
         items.length
-          ? `<ul>${items.map(insightItem).join('')}</ul>`
+          ? `<ul>${items
+              .map((item, i) =>
+                insightItem(item, key === 'caveats' ? null : `cut-insight-${key}-${i}`)
+              )
+              .join('')}</ul>`
           : `<p class="cut-empty">${escapeHtml(empty)}</p>`
       }
     </div>`;
   }).join('');
+
+  // Punch list after the evidence so recommendations close the cut. Absent on
+  // thin/empty cuts — no empty block.
+  const recs = analysis.recommendations || [];
+  const recommendations = recs.length
+    ? `<div class="cut-block recommendations">
+        <h4>Recommendations</h4>
+        <ul>${recs
+          .map((line) => recommendationItem(line, targetForRecommendation(line, targets)))
+          .join('')}</ul>
+      </div>`
+    : '';
 
   const meta = `<p class="cut-meta">
     Read from ${n} analyzed session write-up(s) in this cohort.
@@ -547,7 +609,7 @@ function renderCut(body) {
   </p>`;
 
   cutIsShowing = true;
-  cutBodyEl.innerHTML = headline + recommendations + sections + meta;
+  cutBodyEl.innerHTML = headline + sections + recommendations + meta;
   syncCutRunButton();
 }
 
@@ -837,6 +899,12 @@ export function initInsights() {
   if (cutRefreshBtn) {
     cutRefreshBtn.addEventListener('click', () => runCut({ refresh: true }));
   }
+  cutBodyEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('.cut-rec-link');
+    if (!btn || !cutBodyEl.contains(btn)) return;
+    const id = btn.dataset.scrollTo;
+    if (id) scrollToInsight(id);
+  });
   cohortSelectEl.addEventListener('change', () => {
     cohortId = cohortSelectEl.value || null;
     stopCutPolling();

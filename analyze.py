@@ -895,9 +895,6 @@ attention / intent / blockers is an OBJECT with three fields — never a bare st
 "recommendations" and "caveats" are plain string lists.
 {
   "headline": "one sentence a marketer could put at the top of a deck: the sharpest finding, with its share and what it means",
-  "recommendations": [
-    "the concrete next steps a marketer should take, drawn from the findings below — offer, message, placement, channel, or test. 3 to 6 items. This list is what the team reads first."
-  ],
   "journey": [
     {
       "observation": "what these visitors did, with the evidence — quoted labels, [MM:SS], durations — and one hedged reading of what it suggests",
@@ -908,16 +905,13 @@ attention / intent / blockers is an OBJECT with three fields — never a bare st
   "attention": [{"observation": "...", "share": "...", "action": "..."}],
   "intent": [{"observation": "...", "share": "...", "action": "..."}],
   "blockers": [{"observation": "...", "share": "...", "action": "..."}],
-  "caveats": ["plain strings here — what these sessions cannot tell you, and any single-session oddity worth a look"]
+  "caveats": ["plain strings here — what these sessions cannot tell you, and any single-session oddity worth a look"],
+  "recommendations": [
+    "concrete next steps drawn from the findings above — offer, message, placement, channel, or test. 3 to 6 items. Shown last in the UI."
+  ]
 }
 
 What each section is for:
-- "recommendations" — the marketer's punch list. Plain strings only. Every
-  item must be a concrete next step (test this default, move this proof
-  point up, lead this channel with that message, fix this broken step).
-  Pull them from the actions on the findings below; do not invent steps the
-  evidence does not support. Deduplicate: one recommendation per decision.
-  Never "investigate further" or "monitor this".
 - "journey" — how they moved through the site and where they dropped off.
   Which entry points and routes worked, where each cluster stopped, and what
   that says about the landing experience.
@@ -934,6 +928,12 @@ What each section is for:
   blockers list must mean the write-ups describe none — not that you did not
   look.
 - "caveats" — plain strings, no objects. Sample limits and one-off oddities.
+- "recommendations" — the marketer's punch list, last. Plain strings only. Every
+  item must be a concrete next step (test this default, move this proof
+  point up, lead this channel with that message, fix this broken step).
+  Pull them from the actions on the findings above; do not invent steps the
+  evidence does not support. Deduplicate: one recommendation per decision.
+  Never "investigate further" or "monitor this".
 
 Writing the three fields:
 - "observation" carries the evidence AND the reading. It must contain at least
