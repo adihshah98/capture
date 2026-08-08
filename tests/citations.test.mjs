@@ -69,6 +69,36 @@ for (const [name, text, ms] of DRIFT) {
   });
 }
 
+// A claim about a repeated action puts every occurrence in one bracket. This
+// matched neither branch: STAMP wanted "]" and found ", 01:54]", and the bare
+// fence wanted punctuation and found " [". Inside parens, nothing fired.
+test('a multi-stamp bracket seeks to the first time', () => {
+  const text =
+    "2% (1 of 46) clicked 'BUY NOW' twice without it adding to cart " +
+    '(S2 [00:33, 01:54]), leading to abandonment.';
+  const out = linkCitations(text, IDS, escapeAttr);
+  assert.match(out, /data-cite-sid="sid-b"/);
+  assert.match(out, /data-cite-t="33000"/);
+});
+
+test('a multi-stamp bracket is wrapped whole', () => {
+  // A partial match would leave ", 01:54]" dangling outside the link.
+  const out = linkCitations('S2 [00:33, 01:54]', IDS, escapeAttr);
+  assert.match(out, />S2 \[00:33, 01:54\]<\/button>/);
+});
+
+test('three stamps in one bracket still link', () => {
+  const out = linkCitations('(S2 [00:33, 01:54, 02:10])', IDS, escapeAttr);
+  assert.match(out, /data-cite-t="33000"/);
+  assert.match(out, />S2 \[00:33, 01:54, 02:10\]<\/button>/);
+});
+
+test('a malformed time in a stamp list is not seekable', () => {
+  // The list must be times throughout; "01:90" is a formatting error.
+  const out = linkCitations('see S2 [01:90, 02:10]', IDS, escapeAttr);
+  assert.doesNotMatch(out, /cut-cite/);
+});
+
 test('a range keeps its full text in the link', () => {
   // Seeking to the start must not visibly truncate what the model wrote.
   const out = linkCitations('S2 [00:05-00:12]', IDS, escapeAttr);

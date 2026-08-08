@@ -30,12 +30,24 @@ const TIME = String.raw`\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?`;
 // shirt" stay prose. A following word means it is a noun phrase, not a cite.
 //
 // A stamped citation skips the fence entirely: the bracket disambiguates it.
+//
+// The bracket holds one time, a range, or a comma-separated list: when a claim
+// is about a repeated action the model puts every occurrence in one bracket —
+//
+//   "clicked 'BUY NOW' twice (S39 [00:33, 01:54])"
+//
+// Both a range and a list seek to the first time, since that is where the
+// behaviour the sentence describes begins. The trailing times are matched only
+// so the link wraps the whole citation instead of ending mid-bracket; a partial
+// match would leave ", 01:54])" dangling outside it as plain text.
+const MORE_TIMES =
+  String.raw`(?:\s*[-–—]\s*` +
+  TIME +
+  String.raw`|(?:\s*,\s*` +
+  TIME +
+  String.raw`)+)?`;
 const STAMP =
-  String.raw`\s*(?:at\s+|@\s*)?[[(](` +
-  TIME +
-  String.raw`)(?:\s*[-–—]\s*` +
-  TIME +
-  String.raw`)?[\])]`;
+  String.raw`\s*(?:at\s+|@\s*)?[[(](` + TIME + String.raw`)` + MORE_TIMES + String.raw`[\])]`;
 
 // The clause fence above assumes a citation trails its claim. It also leads:
 // the model writes whole observations in the third person, with the session as
