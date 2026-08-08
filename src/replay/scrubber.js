@@ -16,20 +16,9 @@ const pcDotEl = document.getElementById('pc-dot');
 const pcSpeedsEl = document.getElementById('pc-speeds');
 const pcSkipEl = document.querySelector('#pc-skip input');
 const pcFsEl = document.getElementById('pc-fs');
-const pcBackEl = document.getElementById('pc-back');
-const pcFwdEl = document.getElementById('pc-fwd');
-const pcMarkersEl = document.getElementById('pc-markers');
-const pcPlayIcon = pcToggleEl.querySelector('.ic-play');
-const pcPauseIcon = pcToggleEl.querySelector('.ic-pause');
 
 export const currentSpeed = () => Number(pcSpeedsEl.querySelector('.active').dataset.speed);
 export const skipEnabled = () => pcSkipEl.checked;
-
-const accentRgb = () => {
-  const hex = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
-  const n = parseInt(hex.slice(1), 16);
-  return Number.isNaN(n) ? '91, 91, 214' : `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`;
-};
 
 function drawHistogram(events, duration) {
   const BUCKETS = 120;
@@ -53,7 +42,7 @@ function drawHistogram(events, duration) {
   const ctx = pcHistEl.getContext('2d');
   ctx.scale(devicePixelRatio, devicePixelRatio);
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = `rgba(${accentRgb()}, 0.38)`;
+  ctx.fillStyle = 'rgba(79, 70, 229, 0.4)';
   const bw = width / BUCKETS;
   for (let i = 0; i < BUCKETS; i++) {
     if (!smooth[i]) continue;
@@ -62,10 +51,7 @@ function drawHistogram(events, duration) {
   }
 }
 
-let lastChrome = null;
-
-export function renderScrubberChrome(p, markers = []) {
-  lastChrome = { p, markers };
+export function renderScrubberChrome(p) {
   pcDurEl.textContent = formatOffset(p.duration);
   pcGapsEl.innerHTML = '';
   for (const seg of p.segments) {
@@ -75,27 +61,8 @@ export function renderScrubberChrome(p, markers = []) {
     band.style.width = `${((seg.end - seg.start) / p.duration) * 100}%`;
     pcGapsEl.appendChild(band);
   }
-  pcMarkersEl.innerHTML = '';
-  for (const m of markers) {
-    if (m.offset < 0 || m.offset > p.duration) continue;
-    const tick = document.createElement('i');
-    tick.className = m.kind;
-    tick.style.left = `${(m.offset / p.duration) * 100}%`;
-    tick.title = m.label;
-    pcMarkersEl.appendChild(tick);
-  }
   drawHistogram(p.events, p.duration);
 }
-
-export function clearScrubberChrome() {
-  lastChrome = null;
-  pcMarkersEl.innerHTML = '';
-  pcGapsEl.innerHTML = '';
-}
-
-addEventListener('capture-theme-change', () => {
-  if (lastChrome) drawHistogram(lastChrome.p.events, lastChrome.p.duration);
-});
 
 export function updateScrubber(ms) {
   if (!player || scrubbing) return;
@@ -106,9 +73,7 @@ export function updateScrubber(ms) {
 }
 
 export function updatePlayState(state) {
-  const playing = state === 'playing';
-  pcPauseIcon.hidden = !playing;
-  pcPlayIcon.hidden = playing;
+  pcToggleEl.textContent = state === 'playing' ? '⏸' : '▶';
   if (state === 'ended') skipNoteEl.hidden = true;
 }
 
@@ -166,8 +131,6 @@ pcSpeedsEl.addEventListener('click', (e) => {
   for (const b of pcSpeedsEl.querySelectorAll('button')) b.classList.toggle('active', b === btn);
 });
 pcSkipEl.addEventListener('change', () => player && player.setSkipInactive(pcSkipEl.checked));
-pcBackEl.addEventListener('click', () => player && player.seekBy(-10000));
-pcFwdEl.addEventListener('click', () => player && player.seekBy(10000));
 pcFsEl.addEventListener('click', () => {
   (document.fullscreenElement
     ? document.exitFullscreen()

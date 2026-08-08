@@ -9,7 +9,7 @@ addEventListener('keydown', (e) => {
     player.toggle();
   } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
     e.preventDefault();
-    player.seekBy(e.code === 'ArrowRight' ? 10000 : -10000);
+    player.seekBy(e.code === 'ArrowRight' ? 5000 : -5000);
   } else if (e.code === 'KeyF' && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
     document.getElementById('pc-fs').click();

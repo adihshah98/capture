@@ -7,9 +7,6 @@ const timelineCountEl = document.getElementById('timeline-count');
 
 let timelineRows = [];
 export let syncStart = 0;
-export let markers = [];
-
-const MARKER_KINDS = { rage: 'rage', purchased: 'order', checkout: 'order', page: 'page' };
 
 export function setSyncStart(t) {
   syncStart = t;
@@ -18,7 +15,6 @@ export function setSyncStart(t) {
 export function clearTimeline() {
   timelineListEl.innerHTML = '';
   timelineRows = [];
-  markers = [];
   clearUrlTable();
 }
 
@@ -90,9 +86,6 @@ export function renderTimeline(events, navigations, session, showOrder = true) {
   const start = events.length ? events[0].timestamp : entries.length ? entries[0].t : 0;
   timelineCountEl.textContent = entries.length ? `(${entries.length})` : '';
   clearTimeline();
-  markers = entries
-    .filter((e) => MARKER_KINDS[e.kind])
-    .map((e) => ({ offset: e.t - start, kind: MARKER_KINDS[e.kind], label: `${e.kind} — ${e.detail}` }));
   renderUrlTable(navigations);
   if (entries.length === 0) {
     timelineListEl.innerHTML = '<li class="empty">No clicks, triggers, idle gaps or navigations in this recording.</li>';

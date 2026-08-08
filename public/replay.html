@@ -316,137 +316,35 @@
     #window-tabs button:hover { color: var(--text); }
     #window-tabs button.active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
     #load-progress { font-size: 11.5px; color: var(--text-faint); }
-    #asset-errors { font-size: 11px; color: var(--warn); background: var(--warn-soft); border-radius: 999px; padding: 2px 9px; }
+    #asset-errors { font-size: 11px; color: #b45309; background: #fef3c7; border-radius: 999px; padding: 2px 8px; }
 
-    #player-host {
-      position: relative; background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--r-lg); box-shadow: var(--shadow-sm);
-      min-height: 0; overflow: hidden; display: flex; flex-direction: column;
-    }
-    #player-host:fullscreen { border-radius: 0; border: none; }
-    .stage-wrap { flex: 1; min-height: 0; display: flex; padding: 16px; background: var(--stage-ground); }
-    #player-host:fullscreen .stage-wrap { padding: 24px; }
-    .stage-frame {
-      flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
-      background: #fff; border-radius: var(--r); overflow: hidden; box-shadow: var(--shadow-lg);
-    }
-    .stage-chrome {
-      flex: none; display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px;
-      background: var(--surface-2); border-bottom: 1px solid var(--border);
-    }
-    .stage-chrome .dots { display: flex; gap: 5px; flex: none; }
-    .stage-chrome .dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
-    #stage-url {
-      flex: 1; min-width: 0; font-family: var(--mono); font-size: 11px; color: var(--text-faint);
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center;
-    }
-    #stage-device { flex: none; font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
-    #stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #fff; }
+    #player-host { position: relative; background: #fff; border: 1px solid #e3e5e8; border-radius: 8px; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+    #player-host:fullscreen { border-radius: 0; }
+    #stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #fafafa; }
     #stage iframe { border: none; background: #fff; }
     #stage .replayer-wrapper { position: absolute; left: 50%; top: 50%; transform-origin: top left; }
-
-    .click-pulse {
-      position: absolute; width: calc(52px / var(--rescale, 1)); height: calc(52px / var(--rescale, 1));
-      border: calc(3px / var(--rescale, 1)) solid #5b5bd6; border-radius: 50%;
-      pointer-events: none; z-index: 20; opacity: 0; animation: click-pulse 800ms ease-out 2;
-    }
-    .click-pulse.rage { border-color: #c4342c; }
-    @keyframes click-pulse {
-      0% { transform: translate(-50%, -50%) scale(0.25); opacity: 0.9; }
-      70% { opacity: 0.5; }
-      100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
-    }
-
-    #player-msg {
-      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-      text-align: center; padding: 24px; background: var(--surface); color: var(--text-dim);
-    }
+    .click-pulse { position: absolute; width: calc(52px / var(--rescale, 1)); height: calc(52px / var(--rescale, 1)); border: calc(3px / var(--rescale, 1)) solid #4f46e5; border-radius: 50%; pointer-events: none; z-index: 20; opacity: 0; animation: click-pulse 800ms ease-out 2; }
+    .click-pulse.rage { border-color: #dc2626; }
+    @keyframes click-pulse { 0% { transform: translate(-50%, -50%) scale(0.25); opacity: 0.9; } 70% { opacity: 0.5; } 100% { transform: translate(-50%, -50%) scale(1); opacity: 0; } }
+    #player-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
     #player-msg[hidden] { display: none !important; }
-    #skip-note {
-      position: absolute; top: 12px; right: 12px; z-index: 2;
-      background: rgb(20 22 28 / 0.82); color: #fff; font-size: 11.5px;
-      padding: 4px 10px; border-radius: 999px; backdrop-filter: blur(6px);
-      animation: fade-in var(--t) both;
-    }
-    @keyframes fade-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
-
-    #controls {
-      flex: none; display: flex; align-items: center; gap: 10px;
-      padding: 9px 12px; border-top: 1px solid var(--border);
-      background: var(--surface); user-select: none;
-    }
+    #skip-note { position: absolute; top: 12px; right: 12px; background: rgba(28, 30, 33, 0.75); color: #fff; font-size: 12px; padding: 4px 10px; border-radius: 999px; z-index: 2; }
+    #controls { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid #e3e5e8; background: #fff; user-select: none; }
     #controls[hidden] { display: none !important; }
-    #controls .ctl {
-      display: grid; place-items: center; width: 30px; height: 30px; flex: none;
-      border: none; background: transparent; color: var(--text-dim); border-radius: var(--r-sm);
-      transition: background var(--t), color var(--t), transform var(--t);
-    }
-    #controls .ctl:hover { background: var(--surface-2); color: var(--text); }
-    #controls .ctl:active { transform: scale(0.92); }
-    #controls .ctl svg { width: 16px; height: 16px; }
-    #controls .ctl svg[hidden] { display: none; }
-    #pc-toggle { color: var(--text); }
-
-    .pc-time {
-      font-family: var(--mono); font-size: 11.5px; color: var(--text-faint);
-      font-variant-numeric: tabular-nums; min-width: 40px; text-align: center; flex: none;
-    }
-    #pc-bar { position: relative; flex: 1; min-width: 0; height: 30px; cursor: pointer; touch-action: none; }
-    .pc-track {
-      position: absolute; left: 0; right: 0; top: 50%; height: 4px; margin-top: -2px;
-      background: var(--surface-3); border-radius: 999px; transition: height var(--t), margin-top var(--t);
-    }
-    #pc-bar:hover .pc-track { height: 6px; margin-top: -3px; }
+    #controls button { border: none; background: none; cursor: pointer; font-size: 14px; color: #1c1e21; padding: 2px 6px; border-radius: 6px; }
+    #controls button:hover { background: #f0f2f5; }
+    .pc-time { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #6b7280; min-width: 42px; text-align: center; }
+    #pc-bar { position: relative; flex: 1; height: 28px; cursor: pointer; touch-action: none; }
+    .pc-track { position: absolute; left: 0; right: 0; top: 50%; height: 4px; margin-top: -2px; background: #e3e5e8; border-radius: 2px; }
     #pc-gaps { position: absolute; inset: 0; pointer-events: none; }
-    #pc-gaps div {
-      position: absolute; top: 50%; height: 4px; margin-top: -2px; border-radius: 999px;
-      background: repeating-linear-gradient(90deg, var(--border-strong) 0 3px, transparent 3px 7px);
-    }
-    #pc-hist { position: absolute; left: 0; bottom: 50%; margin-bottom: 4px; width: 100%; height: 14px; pointer-events: none; }
-    #pc-fill {
-      position: absolute; left: 0; top: 50%; height: 4px; margin-top: -2px; width: 0;
-      background: var(--accent); border-radius: 999px; pointer-events: none;
-      transition: height var(--t), margin-top var(--t);
-    }
-    #pc-bar:hover #pc-fill { height: 6px; margin-top: -3px; }
-    #pc-markers { position: absolute; inset: 0; pointer-events: none; }
-    #pc-markers i {
-      position: absolute; top: 50%; width: 3px; height: 10px; margin: -5px 0 0 -1.5px;
-      border-radius: 999px; background: var(--text-faint); opacity: 0.7;
-    }
-    #pc-markers i.rage { background: var(--neg); opacity: 1; }
-    #pc-markers i.order { background: var(--pos); opacity: 1; }
-    #pc-markers i.page { background: var(--accent); opacity: 0.85; }
-    #pc-dot {
-      position: absolute; top: 50%; left: 0; width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px;
-      background: var(--surface); border: 3px solid var(--accent); border-radius: 50%;
-      pointer-events: none; box-shadow: var(--shadow-sm); transition: transform var(--t);
-    }
-    #pc-bar:hover #pc-dot { transform: scale(1.15); }
-
-    #pc-speeds { display: flex; gap: 1px; padding: 2px; background: var(--surface-2); border-radius: var(--r-sm); flex: none; }
-    #pc-speeds button {
-      border: none; background: transparent; color: var(--text-dim);
-      font-size: 11.5px; font-weight: 500; padding: 3px 7px; border-radius: var(--r-xs);
-      font-variant-numeric: tabular-nums; transition: background var(--t), color var(--t);
-    }
-    #pc-speeds button:hover { color: var(--text); }
-    #pc-speeds button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
-
-    #pc-skip { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--text-dim); cursor: pointer; white-space: nowrap; flex: none; }
-    #pc-skip input { position: absolute; opacity: 0; width: 0; height: 0; }
-    .switch {
-      position: relative; width: 28px; height: 16px; border-radius: 999px; flex: none;
-      background: var(--surface-3); transition: background var(--t);
-    }
-    .switch::after {
-      content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
-      border-radius: 50%; background: var(--surface); box-shadow: var(--shadow-sm);
-      transition: transform var(--t);
-    }
-    #pc-skip input:checked + .switch { background: var(--accent); }
-    #pc-skip input:checked + .switch::after { transform: translateX(12px); }
-    #pc-skip input:focus-visible + .switch { outline: 2px solid var(--accent); outline-offset: 2px; }
+    #pc-gaps div { position: absolute; top: 50%; height: 4px; margin-top: -2px; background: repeating-linear-gradient(90deg, #d0d3d8 0 4px, #ebedf0 4px 8px); border-radius: 2px; }
+    #pc-hist { position: absolute; left: 0; bottom: 50%; margin-bottom: 3px; width: 100%; height: 14px; pointer-events: none; }
+    #pc-fill { position: absolute; left: 0; top: 50%; height: 4px; margin-top: -2px; width: 0; background: #4f46e5; border-radius: 2px; pointer-events: none; }
+    #pc-dot { position: absolute; top: 50%; left: 0; width: 12px; height: 12px; margin: -6px 0 0 -6px; background: #4f46e5; border-radius: 50%; pointer-events: none; }
+    #pc-speeds { display: flex; gap: 2px; }
+    #pc-speeds button { font-size: 12px; color: #6b7280; }
+    #pc-speeds button.active { background: #4f46e5; color: #fff; }
+    #pc-skip { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #6b7280; cursor: pointer; white-space: nowrap; }
 
     .devtools-panel {
       background: var(--surface); border: 1px solid var(--border);
@@ -713,58 +611,29 @@
         <span id="asset-errors" title="Resources the recorded page references could not be fetched during replay" hidden></span>
       </div>
       <div id="player-host">
-        <div class="stage-wrap">
-          <div class="stage-frame">
-            <div class="stage-chrome">
-              <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span id="stage-url"></span>
-              <span id="stage-device"></span>
-            </div>
-            <div id="stage">
-              <div id="skip-note" hidden></div>
-              <div id="player-msg" class="empty" hidden></div>
-            </div>
-          </div>
+        <div id="stage">
+          <div id="skip-note" hidden></div>
+          <div id="player-msg" class="empty" hidden></div>
         </div>
         <div id="controls" hidden>
-          <button id="pc-toggle" class="ctl" title="Play / pause (space)" aria-label="Play or pause">
-            <svg class="ic-pause" viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="5" width="4" height="14" rx="1.3" /><rect x="13.5" y="5" width="4" height="14" rx="1.3" /></svg>
-            <svg class="ic-play" viewBox="0 0 24 24" fill="currentColor" hidden><path d="M8 5.6c0-1 1.1-1.6 2-1.1l8.4 5.4a1.3 1.3 0 0 1 0 2.2L10 17.5c-.9.5-2 0-2-1.1z" /></svg>
-          </button>
-          <button id="pc-back" class="ctl" title="Back 10s (←)" aria-label="Back 10 seconds">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 12a8 8 0 1 0 2.3-5.6" /><path d="M4 4v5h5" />
-            </svg>
-          </button>
-          <button id="pc-fwd" class="ctl" title="Forward 10s (→)" aria-label="Forward 10 seconds">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M20 12a8 8 0 1 1-2.3-5.6" /><path d="M20 4v5h-5" />
-            </svg>
-          </button>
+          <button id="pc-toggle" title="Play / pause (space)">⏸</button>
           <span id="pc-cur" class="pc-time">00:00</span>
           <div id="pc-bar">
             <div class="pc-track"></div>
             <div id="pc-gaps"></div>
             <canvas id="pc-hist"></canvas>
             <div id="pc-fill"></div>
-            <div id="pc-markers"></div>
             <div id="pc-dot"></div>
           </div>
           <span id="pc-dur" class="pc-time">00:00</span>
           <div id="pc-speeds">
-            <button data-speed="1" class="active">1×</button>
-            <button data-speed="2">2×</button>
-            <button data-speed="4">4×</button>
-            <button data-speed="8">8×</button>
+            <button data-speed="1" class="active">1x</button>
+            <button data-speed="2">2x</button>
+            <button data-speed="4">4x</button>
+            <button data-speed="8">8x</button>
           </div>
-          <label id="pc-skip" title="Jump over idle stretches">
-            <input type="checkbox" checked /><span class="switch"></span>skip idle
-          </label>
-          <button id="pc-fs" class="ctl" title="Fullscreen (f)" aria-label="Fullscreen">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
-            </svg>
-          </button>
+          <label id="pc-skip" title="Jump over idle stretches"><input type="checkbox" checked />skip idle</label>
+          <button id="pc-fs" title="Fullscreen">⛶</button>
         </div>
       </div>
       <section class="devtools-panel">
