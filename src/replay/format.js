@@ -13,6 +13,7 @@ export function isLive(session) {
 }
 
 export function sessionDuration(session) {
+  if (session.duration != null) return session.duration;
   const end = session.last_active
     ? Math.min(session.last_seen, session.last_active + 1500)
     : session.last_seen;

@@ -354,10 +354,18 @@ async def ingest(
         states = json.loads(state_path.read_text())
     except Exception:
         states = {}
-    window_key = str(payload.get("window_id") or "default")
-    active_ts = last_active_scan(events, states.setdefault(window_key, {}))
+    state = states.setdefault(str(payload.get("window_id") or "default"), {})
+    active_ts = last_active_scan(events, state)
+    if active_ts:
+        state["active"] = max(state.get("active", 0), active_ts)
+    state["first"] = min(state.get("first", first_ts), first_ts)
+    state["last"] = max(state.get("last", last_ts), last_ts)
+    state["bytes"] = state.get("bytes", 0) + size
     state_path.write_text(json.dumps(states))
-    index_ingest(pool, session_id, first_ts, last_ts, active_ts or 0, size, meta, interactions, device)
+    index_ingest(
+        pool, session_id, first_ts, last_ts, active_ts or 0, window_duration(states),
+        size, meta, interactions, device,
+    )
     _pool_bytes[pool] = pool_bytes(pool) + size
 
     return {"status": "ok", "stored": len(events)}
@@ -573,6 +581,18 @@ def event_span(events: list) -> Optional[tuple]:
     ]
     return (int(min(ts)), int(max(ts))) if ts else None
 
+def window_duration(states: dict) -> Optional[int]:
+    """Clamped span of the primary (biggest) window — the one the player
+    opens by default."""
+    spans = [w for w in states.values() if isinstance(w.get("first"), (int, float))]
+    if not spans:
+        return None
+    primary = max(spans, key=lambda w: w.get("bytes", 0))
+    end = primary["last"]
+    if primary.get("active"):
+        end = min(end, primary["active"] + 1500)
+    return max(int(end - primary["first"]), 0)
+
 def chunk_files(session_dir: Path) -> list:
 
     return sorted(
@@ -626,6 +646,8 @@ def ensure_index_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE sessions ADD COLUMN attribution TEXT")
     if "last_active" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN last_active INTEGER NOT NULL DEFAULT 0")
+    if "duration" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN duration INTEGER")
 
 def index_conn() -> sqlite3.Connection:
     global _index_conn
@@ -662,20 +684,21 @@ def index_conn() -> sqlite3.Connection:
 def pool_key(pool: Path) -> str:
     return "" if pool == DATA_DIR else pool.parent.name
 
-def index_ingest(pool, session_id, first_ts, last_ts, active_ts, size, meta, interactions, device) -> None:
+def index_ingest(pool, session_id, first_ts, last_ts, active_ts, duration, size, meta, interactions, device) -> None:
     attribution = parse_attribution(meta.get("url"))
     with _index_lock:
         conn = index_conn()
         conn.execute(
             """
             INSERT INTO sessions
-                (pool, session_id, first_seen, last_seen, last_active, chunk_count, bytes,
+                (pool, session_id, first_seen, last_seen, last_active, duration, chunk_count, bytes,
                  visitor_id, url, interactions, device, attribution)
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (pool, session_id) DO UPDATE SET
                 first_seen = min(first_seen, excluded.first_seen),
                 last_seen = max(last_seen, excluded.last_seen),
                 last_active = max(coalesce(last_active, 0), excluded.last_active),
+                duration = coalesce(excluded.duration, duration),
                 chunk_count = chunk_count + 1,
                 bytes = bytes + excluded.bytes,
                 visitor_id = coalesce(visitor_id, excluded.visitor_id),
@@ -685,7 +708,7 @@ def index_ingest(pool, session_id, first_ts, last_ts, active_ts, size, meta, int
                 attribution = coalesce(attribution, excluded.attribution)
             """,
             (
-                pool_key(pool), session_id, first_ts, last_ts, active_ts, size,
+                pool_key(pool), session_id, first_ts, last_ts, active_ts, duration, size,
                 meta.get("visitor_id"), meta.get("url"),
                 json.dumps(interactions) if interactions else None,
                 json.dumps(device) if device else None,
@@ -733,15 +756,20 @@ def session_info(entry: Path) -> Optional[dict]:
             continue
         first = span[0] if first is None else min(first, span[0])
         last = span[1] if last is None else max(last, span[1])
-        window_key = str(data.get("window_id") or "default")
-        chunk_active = last_active_scan(events, states.setdefault(window_key, {}))
+        state = states.setdefault(str(data.get("window_id") or "default"), {})
+        chunk_active = last_active_scan(events, state)
         if chunk_active:
             active = max(active, chunk_active)
+            state["active"] = max(state.get("active", 0), chunk_active)
+        state["first"] = min(state.get("first", span[0]), span[0])
+        state["last"] = max(state.get("last", span[1]), span[1])
+        state["bytes"] = state.get("bytes", 0) + chunk.stat().st_size
     info = {
         "session_id": entry.name,
         "first_seen": first if first is not None else chunk_timestamp(chunks[0]),
         "last_seen": last if last is not None else chunk_timestamp(chunks[-1]),
         "last_active": active,
+        "duration": window_duration(states),
         "chunk_count": len(chunks),
         "bytes": sum(c.stat().st_size for c in chunks),
     }
@@ -791,13 +819,14 @@ def rebuild_index(pool: Path) -> int:
         conn.executemany(
             """
             INSERT INTO sessions
-                (pool, session_id, first_seen, last_seen, last_active, chunk_count, bytes,
+                (pool, session_id, first_seen, last_seen, last_active, duration, chunk_count, bytes,
                  visitor_id, url, "order", interactions, device, attribution)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (pool, session_id) DO UPDATE SET
                 first_seen = min(first_seen, excluded.first_seen),
                 last_seen = max(last_seen, excluded.last_seen),
                 last_active = max(coalesce(last_active, 0), excluded.last_active),
+                duration = coalesce(excluded.duration, duration),
                 chunk_count = max(chunk_count, excluded.chunk_count),
                 bytes = max(bytes, excluded.bytes),
                 visitor_id = coalesce(excluded.visitor_id, visitor_id),
@@ -810,7 +839,7 @@ def rebuild_index(pool: Path) -> int:
             [
                 (
                     key, i["session_id"], i["first_seen"], i["last_seen"], i.get("last_active", 0),
-                    i["chunk_count"], i["bytes"], i.get("visitor_id"), i.get("url"),
+                    i.get("duration"), i["chunk_count"], i["bytes"], i.get("visitor_id"), i.get("url"),
                     json.dumps(i["order"]) if "order" in i else None,
                     json.dumps(i["interactions"]) if "interactions" in i else None,
                     json.dumps(i["device"]) if "device" in i else None,
@@ -1020,7 +1049,7 @@ def list_sessions(
                 raise ApiError(400, "bad cursor")
         rows = conn.execute(
             f"""
-            SELECT session_id, first_seen, last_seen, last_active, chunk_count, bytes,
+            SELECT session_id, first_seen, last_seen, last_active, duration, chunk_count, bytes,
                    visitor_id, url, "order", interactions, device, attribution
             FROM sessions WHERE {' AND '.join(where)}
             ORDER BY last_seen DESC, session_id DESC LIMIT ?
@@ -1029,12 +1058,13 @@ def list_sessions(
         ).fetchall()
     more = len(rows) > limit
     sessions = []
-    for sid, first, last, active, count, size, visitor, url, order, interactions, device, attribution in rows[:limit]:
+    for sid, first, last, active, duration, count, size, visitor, url, order, interactions, device, attribution in rows[:limit]:
         info = {
             "session_id": sid,
             "first_seen": first,
             "last_seen": last,
             "last_active": active or 0,
+            "duration": duration,
             "chunk_count": count,
             "bytes": size,
         }
