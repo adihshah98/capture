@@ -750,6 +750,11 @@ brackets: "44% (4 of 9)". Round to whole numbers. With fewer than 5 sessions
 a percentage overstates precision, so use "4 of 9 sessions" alone and say the
 evidence is directional.
 
+Every denominator is the size of THIS group, stated under "Already known"
+below. The examples here use 9 only as an illustration — never copy 9, and
+never use a total from anywhere else. The write-ups below are numbered, and
+the last number is the group size: no count you write may exceed it.
+
 ## The single most important rule
 
 The group was SELECTED by a filter, stated below as "This group is".
@@ -888,6 +893,28 @@ mobile and desktop sessions did the same things" is a real, useful result.
 When the group really is uniform, say so plainly and move on — but only after
 looking. "They all did X (9 of 9)" is a strong finding when it is true.
 
+## Citing sessions
+
+Each write-up below is headed "--- SESSIONS session N ---". When an item points
+at specific sessions, cite them as S<N> using that same N, immediately followed
+by a timestamp from that session: "S4 [01:09]". The UI turns these into links
+that open the replay at that moment, so the format must be exact — "S4 [01:09]",
+never "Session 4", "#4", or "S4 at 1:09".
+
+- Use only the N of a write-up actually shown below. Never invent one, never
+  cite a number above the group size, and never renumber the sessions.
+- The [MM:SS] must be a timestamp that appears in THAT session's write-up.
+  Do not carry a timestamp from one session over to another.
+- Include the timestamp whenever the claim is about a moment. When it is a
+  counting claim and no single moment applies, a bare "S1, S2, S4" is right —
+  do not invent a timestamp to decorate it.
+- Cite the sessions the claim rests on, in brackets after the point:
+  "Four sessions stalled on the guarantee (S1 [00:13], S4 [01:09],
+  S6 [00:17], S8 [00:08]) — the promise is doing the selling."
+  "4 of 7 kept the default '90-Night Supply' (S1, S2, S4, S7)."
+- Citations are evidence, not the finding. They never replace the sentence,
+  and a bare list of citations is not an observation.
+
 ## Output
 
 Return a single JSON object with this exact shape. Every item in journey /
@@ -939,8 +966,10 @@ Writing the three fields:
 - "observation" carries the evidence AND the reading. It must contain at least
   one concrete anchor from the write-ups — a quoted label or heading, an
   [MM:SS], a duration, or a scroll position — followed by what it suggests.
+  It must also cite the sessions it rests on, in the S<N> form below.
 - "share" is the size of the pattern: "44% (4 of 9)". Below 5 sessions use
-  "4 of 9 sessions" with no percentage. Use "9 of 9" for the whole group.
+  "4 of 9 sessions" with no percentage. When a pattern covers the whole group,
+  write "N of N" using this group's actual size, not the 9 in this example.
   For a split, describe the side this item is about.
 - "action" is a concrete next step for a marketing team — test this default,
   move this proof point up, lead this channel with that message, fix this
@@ -986,12 +1015,21 @@ Rules:
 - No preamble, no markdown — JSON only."""
 
 
-def _cut_side_text(rows: list, label: str) -> str:
-    """The group's write-ups, labelled per session so the model can cite counts."""
+def _cut_side_text(rows: list, label: str) -> tuple:
+    """(text, citations) — the group's write-ups, numbered for citation.
+
+    The 1-based number in each header is what the model cites as S<n>. The
+    `citations` map returned alongside is that same numbering as data —
+    {"1": session_id, ...} — built in this loop, so the numbers the model was
+    shown and the ids the UI resolves cannot drift apart. Callers must store
+    what they get back rather than rebuilding it from the row list.
+    """
     if not rows:
-        return f"### {label}\n(no sessions in this group)\n"
+        return f"### {label}\n(no sessions in this group)\n", {}
+    citations = {}
     parts = [f"### {label} — {len(rows)} session(s)\n"]
     for i, row in enumerate(rows, 1):
+        citations[str(i)] = row.get("session_id")
         attrs = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
         # Every clusterable field is stated on every session, "unknown"
         # included: a missing label reads as a difference the model would
@@ -1005,36 +1043,47 @@ def _cut_side_text(rows: list, label: str) -> str:
             bits.append("meta click id present")
         text = (row.get("text") or "").strip() or "(no write-up)"
         parts.append(f"--- {label} session {i} ({'; '.join(bits)}) ---\n{text}\n")
-    return "\n".join(parts)
+    return "\n".join(parts), citations
 
 
-def _given_facts(spec: dict) -> str:
-    """Spell out what the filter already guarantees, so it is not 'found'."""
-    lines = []
+def _given_facts(spec: dict, n: int) -> str:
+    """Spell out what the filter already guarantees, so it is not 'found'.
+
+    `n` is the size of the filtered group. Every premise below states it, so
+    the only session count in the model's context is the right one: given a
+    bare "every session in this group", the model has been seen to attach the
+    cohort-wide total instead ("All 46 sessions landed on /x" for a group of 9).
+    """
+    lines = [
+        f"- This group contains exactly {n} session(s). {n} is the ONLY total "
+        f"you may use. Every share you write is out of {n} — never out of any "
+        f"larger number, and never out of the whole cohort."
+    ]
 
     if spec.get("outcome"):
         joined = " or ".join(OUTCOME_LABELS.get(v, v) for v in spec["outcome"])
         lines.append(
-            f"- Every session in this group {joined}. Do not report this, or "
-            f"any step it entails (clicking buy, reaching checkout, "
+            f"- All {n} session(s) in this group {joined}. Do not report this, "
+            f"or any step it entails (clicking buy, reaching checkout, "
             f"converting), as a finding."
         )
     if spec.get("device"):
         lines.append(
-            f"- Every session in this group was on "
+            f"- All {n} session(s) in this group were on "
             f"{' or '.join(spec['device'])}. Do not report the device itself "
             f"as a finding."
         )
     if spec.get("page"):
         lines.append(
-            f"- Every session in this group landed on {spec['page']}. Do not "
-            f"report the landing page itself as a finding."
+            f"- All {n} session(s) in this group landed on {spec['page']}. Do "
+            f"not report the landing page itself as a finding."
         )
     for key in ("utm_source", "utm_medium", "utm_campaign", "utm_content"):
         if spec.get(key):
             lines.append(
-                f"- Every session in this group came from {key}={spec[key]}. "
-                f"Do not report the traffic source as a finding."
+                f"- All {n} session(s) in this group came from "
+                f"{key}={spec[key]}. Do not report the traffic source as a "
+                f"finding."
             )
 
     # A filtered field is constant here, so it cannot split the group. Point
@@ -1050,15 +1099,15 @@ def _given_facts(spec: dict) -> str:
         )
         if not spec.get(key)
     ]
-    if lines and free:
+    # len(lines) > 1 means the filter actually pinned a field: the count line
+    # is always present and pins nothing on its own.
+    if len(lines) > 1 and free:
         lines.append(
             "- These are fixed for every session here, so they cannot separate "
             "one cluster from another. Cluster on " + ", ".join(free) + " and "
             "on what the sessions actually did on the page."
         )
 
-    if not lines:
-        return ""
     return "## Already known — never report these as findings\n\n" + "\n".join(lines)
 
 
@@ -1146,8 +1195,34 @@ def _recommendations_from_actions(out: dict) -> list:
     return lines
 
 
-def normalize_cut_analysis(raw) -> dict:
-    """Coerce the model's JSON into the documented shape, dropping anything else."""
+# "4 of 9", "44% (4 of 9)", "9 of 9 sessions" — the denominator is the group
+# size, and the model is told it is the only total it may use.
+_SHARE_DENOM_RE = re.compile(r"\b(\d+)\s+of\s+(\d+)\b", re.IGNORECASE)
+
+
+def _share_denominator_ok(share: str, n: Optional[int]) -> bool:
+    """False when a share cites a total that is not the group size.
+
+    The model has been seen to write the cohort-wide total into a share for a
+    much smaller filtered group. A share whose denominator is not `n` is not
+    describing this group, so it is dropped rather than shown as fact.
+    """
+    if n is None or not share:
+        return True
+    found = _SHARE_DENOM_RE.findall(share)
+    if not found:
+        return True
+    # A numerator above the group size is impossible here too.
+    return all(int(den) == n and int(num) <= n for num, den in found)
+
+
+def normalize_cut_analysis(raw, n: Optional[int] = None) -> dict:
+    """Coerce the model's JSON into the documented shape, dropping anything else.
+
+    `n` is the group size when known. Shares citing a different total are
+    dropped: the observation still carries the finding, and a missing share
+    renders as nothing, which beats rendering a wrong one.
+    """
     data = raw if isinstance(raw, dict) else {}
     out = empty_cut_analysis()
     out["headline"] = _clean_text(data.get("headline"), 600)
@@ -1160,6 +1235,10 @@ def normalize_cut_analysis(raw) -> dict:
             # Caveats stay plain strings; the insight sections are objects.
             entry = _clean_text(item, 900) if key == "caveats" else _insight_item(item)
             if entry:
+                if isinstance(entry, dict) and not _share_denominator_ok(
+                    entry["share"], n
+                ):
+                    entry["share"] = ""
                 clean.append(entry)
             if len(clean) >= CUT_ITEMS_PER_SECTION:
                 break
@@ -1186,8 +1265,12 @@ async def call_gemini_cut(
     rows: list,
     label: str,
     given: str = "",
-) -> dict:
-    """One text-only pass over the group's write-ups."""
+) -> tuple:
+    """(analysis, citations) — one text-only pass over the group's write-ups.
+
+    The citation map comes back from the same call that numbered the write-ups,
+    so what the caller stores is exactly what the model was shown.
+    """
     from google import genai
     from google.genai import types
 
@@ -1196,9 +1279,10 @@ async def call_gemini_cut(
     if given:
         header += "\n" + given + "\n"
     header += "\nThe write-ups for this group follow."
+    side_text, citations = _cut_side_text(rows, "SESSIONS")
     parts = [
         types.Part.from_text(text=header),
-        types.Part.from_text(text=_cut_side_text(rows, "SESSIONS")),
+        types.Part.from_text(text=side_text),
     ]
     response = await client.aio.models.generate_content(
         model=GEMINI_MODEL,
@@ -1216,7 +1300,8 @@ async def call_gemini_cut(
             response_mime_type="application/json",
         ),
     )
-    return normalize_cut_analysis(_parse_json_object(response.text or ""))
+    analysis = normalize_cut_analysis(_parse_json_object(response.text or ""), len(rows))
+    return analysis, citations
 
 
 async def build_cut_analysis(rows: list, slice_spec: Optional[dict]) -> dict:
@@ -1240,13 +1325,15 @@ async def build_cut_analysis(rows: list, slice_spec: Optional[dict]) -> dict:
     if not selected:
         empty = empty_cut_analysis()
         empty["headline"] = f"No analyzed sessions match {label} in this cohort."
-        return {**base, "analysis": empty}
+        return {**base, "analysis": empty, "citations": {}}
 
-    given = _given_facts(spec)
+    given = _given_facts(spec, len(selected))
     _, model_gate = _gates()
     async with model_gate:
-        analysis = await call_gemini_cut(selected, label, given)
-    return {**base, "analysis": analysis}
+        analysis, citations = await call_gemini_cut(selected, label, given)
+    # Stored, not derived: this is the numbering the model actually saw, so a
+    # later change to row ordering cannot repoint the links in this cut.
+    return {**base, "analysis": analysis, "citations": citations}
 
 
 def sample_cohort_rows(

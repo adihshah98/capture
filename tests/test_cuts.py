@@ -433,7 +433,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
 
         async def fake(*args):
             calls.append(args)
-            return analyze.empty_cut_analysis()
+            return analyze.empty_cut_analysis(), {}
 
         analyze.call_gemini_cut = fake
         rows = [row("a", "purchased"), row("b", "purchased")]
@@ -450,7 +450,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
             seen["rows"] = [r["session_id"] for r in rows]
             seen["label"] = label
             seen["given"] = given
-            return analyze.normalize_cut_analysis({"headline": "they hesitate"})
+            return analyze.normalize_cut_analysis({"headline": "they hesitate"}), {"1": "p1"}
 
         analyze.call_gemini_cut = fake
         rows = [row("p1", "purchased"), row("n1"), row("n2")]
@@ -460,6 +460,8 @@ class TestBuildCutAnalysis(unittest.TestCase):
         self.assertEqual(seen["label"], "purchased")
         self.assertEqual(out["n"], 1)
         self.assertEqual(out["session_ids"], ["p1"])
+        # The map the model was shown is stored, not rebuilt from the rows.
+        self.assertEqual(out["citations"], {"1": "p1"})
         self.assertEqual(out["analysis"]["headline"], "they hesitate")
         self.assertEqual(out["cut"], analyze.cut_key({"outcome": "purchased"}))
 
@@ -470,20 +472,22 @@ class TestBuildCutAnalysis(unittest.TestCase):
             seen["rows"] = [r["session_id"] for r in rows]
             seen["label"] = label
             seen["given"] = given
-            return analyze.empty_cut_analysis()
+            return analyze.empty_cut_analysis(), {}
 
         analyze.call_gemini_cut = fake
         rows = [row("p1", "purchased"), row("n1"), row("n2")]
         out = asyncio.run(analyze.build_cut_analysis(rows, None))
 
         self.assertEqual(seen["rows"], ["p1", "n1", "n2"])
-        # No filter means nothing is already known, so nothing is banned.
-        self.assertEqual(seen["given"], "")
+        # No filter means nothing is banned — but the group size is still
+        # stated, so shares cannot borrow a total from the wider cohort.
+        self.assertNotIn("Do not report", seen["given"])
+        self.assertIn("exactly 3 session(s)", seen["given"])
         self.assertEqual(out["n"], 3)
         self.assertEqual(out["label"], "all sessions")
 
     def test_side_text_labels_every_session_for_counting(self):
-        text = analyze._cut_side_text(
+        text, _ = analyze._cut_side_text(
             [row("s1", "purchased", "mobile", utm_source="meta"), row("s2", "checkout")],
             "SESSIONS",
         )
@@ -497,14 +501,14 @@ class TestBuildCutAnalysis(unittest.TestCase):
 
     def test_every_clusterable_field_is_stated_on_every_session(self):
         """A missing label would read as a difference and skew the clusters."""
-        text = analyze._cut_side_text([row("bare", "rest")], "SESSIONS")
+        text, _ = analyze._cut_side_text([row("bare", "rest")], "SESSIONS")
         self.assertIn("device: unknown", text)
         self.assertIn("page: unknown", text)
         self.assertIn("utm_source: none", text)
         self.assertIn("utm_campaign: none", text)
 
     def test_known_values_still_win_over_the_placeholders(self):
-        text = analyze._cut_side_text(
+        text, _ = analyze._cut_side_text(
             [
                 row(
                     "s1",
@@ -527,26 +531,48 @@ class TestBuildCutAnalysis(unittest.TestCase):
 class TestGivenFacts(unittest.TestCase):
     """The filter that selected a group must never come back as a finding."""
 
-    def given(self, spec):
-        return analyze._given_facts(analyze.normalize_slice(spec))
+    def given(self, spec, n=9):
+        return analyze._given_facts(analyze.normalize_slice(spec), n)
 
     def test_outcome_filter_bans_the_obvious_restatement(self):
         text = self.given({"outcome": ["purchased"]})
-        self.assertIn("Every session in this group purchased", text)
+        self.assertIn("All 9 session(s) in this group purchased", text)
         # The exact tautology the first version of this prompt produced.
         self.assertIn("clicking buy", text)
+
+    def test_every_premise_carries_the_group_size(self):
+        """The bug: a bare "every session" let the model attach the cohort total.
+
+        Each premise states n, so the only session count in context is right.
+        """
+        text = self.given({"page": "/products/cream", "device": ["mobile"]}, n=9)
+        self.assertIn("This group contains exactly 9 session(s)", text)
+        for line in text.splitlines():
+            if "in this group" in line:
+                self.assertIn("All 9 session(s)", line)
+
+    def test_the_group_size_is_declared_even_with_no_filter(self):
+        """An unfiltered cut still needs a denominator — that is where 46 came from."""
+        text = analyze._given_facts({}, 9)
+        self.assertIn("exactly 9 session(s)", text)
+        self.assertIn("ONLY total", text)
+        # Nothing is pinned, so nothing is banned from being reported.
+        self.assertNotIn("cannot separate", text)
 
     def test_campaign_and_device_filters_are_declared(self):
         text = self.given({"utm_campaign": "spring", "device": ["mobile"]})
         self.assertIn("utm_campaign=spring", text)
-        self.assertIn("was on mobile", text)
+        self.assertIn("were on mobile", text)
 
     def test_page_filter_is_declared(self):
         text = self.given({"page": "/products/cream"})
         self.assertIn("landed on /products/cream", text)
 
-    def test_an_unconstrained_cut_has_nothing_to_declare(self):
-        self.assertEqual(analyze._given_facts({}), "")
+    def test_an_unconstrained_cut_declares_only_the_size(self):
+        """Nothing is banned, but the denominator is still stated."""
+        text = analyze._given_facts({}, 9)
+        self.assertNotIn("Do not report", text)
+        self.assertIn("exactly 9 session(s)", text)
 
     def test_points_clustering_at_the_dimensions_still_free(self):
         """A filtered field is constant, so it cannot separate two clusters."""
@@ -581,7 +607,7 @@ class TestGivenFacts(unittest.TestCase):
 
         async def fake(rows, label, given=""):
             seen["given"] = given
-            return analyze.empty_cut_analysis()
+            return analyze.empty_cut_analysis(), {}
 
         saved_enabled, saved_call = analyze.ANALYSIS_ENABLED, analyze.call_gemini_cut
         analyze.ANALYSIS_ENABLED = True
@@ -594,7 +620,50 @@ class TestGivenFacts(unittest.TestCase):
             analyze.ANALYSIS_ENABLED = saved_enabled
             analyze.call_gemini_cut = saved_call
             analyze._gate_loop = None
-        self.assertIn("Every session in this group purchased", seen["given"])
+        # One row matches the filter, so the premise must say 1 — not 2.
+        self.assertIn("All 1 session(s) in this group purchased", seen["given"])
+        self.assertIn("exactly 1 session(s)", seen["given"])
+
+
+class TestShareDenominator(unittest.TestCase):
+    """A share must count out of the group, not out of the wider cohort.
+
+    The observed bug: a 9-session cut rendered "All 46 sessions landed ...",
+    46 being the cohort total. The observation survives; the wrong share does not.
+    """
+
+    def norm(self, share, n):
+        out = analyze.normalize_cut_analysis(
+            {"journey": [{"observation": "They read the FAQ at [00:12].", "share": share}]},
+            n,
+        )
+        return out["journey"][0]
+
+    def test_a_share_matching_the_group_size_is_kept(self):
+        self.assertEqual(self.norm("44% (4 of 9)", 9)["share"], "44% (4 of 9)")
+        self.assertEqual(self.norm("9 of 9 sessions", 9)["share"], "9 of 9 sessions")
+
+    def test_a_cohort_wide_total_is_dropped(self):
+        item = self.norm("All 46 of 46 sessions", 9)
+        self.assertEqual(item["share"], "")
+        # The finding itself is still worth showing.
+        self.assertIn("read the FAQ", item["observation"])
+
+    def test_a_numerator_above_the_group_size_is_dropped(self):
+        self.assertEqual(self.norm("12 of 9", 9)["share"], "")
+
+    def test_a_share_with_no_explicit_total_is_left_alone(self):
+        """Percent-only shares carry no denominator to check."""
+        self.assertEqual(self.norm("44%", 9)["share"], "44%")
+
+    def test_an_unknown_group_size_disables_the_check(self):
+        """Cached cuts normalized without n must pass through unchanged."""
+        self.assertEqual(self.norm("4 of 46", None)["share"], "4 of 46")
+
+    def test_the_group_size_reaches_the_normalizer(self):
+        """len(rows), not the cohort, is what call_gemini_cut validates against."""
+        self.assertFalse(analyze._share_denominator_ok("All 46 of 46", 9))
+        self.assertTrue(analyze._share_denominator_ok("All 9 of 9", 9))
 
 
 class TestCutOutputBudget(unittest.TestCase):
@@ -649,6 +718,43 @@ class TestCutPromptContent(unittest.TestCase):
     def test_a_minority_cluster_is_not_demoted_to_an_anecdote(self):
         prompt = analyze.CUT_PROMPT
         self.assertIn("is a real pattern, not an anecdote", prompt)
+
+    def test_pins_the_citation_format_the_ui_links(self):
+        """S<n> was the model's own invention; the UI now parses it, so it is pinned."""
+        prompt = analyze.CUT_PROMPT
+        self.assertIn("S<N>", prompt)
+        self.assertIn("S4 [01:09]", prompt)
+        # The ordinal must be the write-up's, not a number the model chose.
+        self.assertIn("Never invent one", prompt)
+        # Collapse the prompt's own wrapping before matching a sentence.
+        flat = " ".join(prompt.split())
+        self.assertIn("never cite a number above the group size", flat)
+        # The near-miss formats the UI regex would not match.
+        self.assertIn('never "Session 4", "#4", or "S4 at 1:09"', flat)
+
+    def test_the_citation_map_is_the_numbering_the_model_was_shown(self):
+        """The map is emitted by the loop that writes the headers, not rebuilt."""
+        rows = [row("a", "purchased"), row("b", "rest"), row("c", "rest")]
+        text, citations = analyze._cut_side_text(rows, "SESSIONS")
+        self.assertEqual(citations, {"1": "a", "2": "b", "3": "c"})
+        # Every number in the map must appear as that session's header.
+        for n, sid in citations.items():
+            self.assertIn(f"--- SESSIONS session {n} (", text)
+            self.assertIn(f"write-up for {sid}", text)
+
+    def test_reordering_rows_moves_the_map_with_them(self):
+        """The bug this design removes: numbering and ids drifting apart."""
+        rows = [row("a"), row("b"), row("c")]
+        _, forward = analyze._cut_side_text(rows, "SESSIONS")
+        _, reversed_ = analyze._cut_side_text(list(reversed(rows)), "SESSIONS")
+        self.assertEqual(forward, {"1": "a", "2": "b", "3": "c"})
+        # Not {"1": "a"} — the map follows the order the model actually saw.
+        self.assertEqual(reversed_, {"1": "c", "2": "b", "3": "a"})
+
+    def test_an_empty_group_has_an_empty_map(self):
+        text, citations = analyze._cut_side_text([], "SESSIONS")
+        self.assertEqual(citations, {})
+        self.assertIn("no sessions in this group", text)
 
     def test_is_written_for_a_marketing_audience(self):
         prompt = analyze.CUT_PROMPT
