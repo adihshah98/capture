@@ -923,6 +923,88 @@ class TestCohort(ServerCase):
         self.wait_done(cohort_id)
         return cohort_id
 
+    def seed_facts(self, sid, **over):
+        """Tier 1 facts for a session, as the extractor would have written them."""
+        out = self.data_dir / "sessions" / sid / ".analysis"
+        out.mkdir(parents=True, exist_ok=True)
+        facts = {
+            "schema": 1,
+            "duration_s": 60,
+            "active_s": 45,
+            "idle_s": 15,
+            "active_pct": 75,
+            "max_depth_pct": 90,
+            "dwell_ms_by_band": {"0-25": 0, "25-50": 0, "50-75": 0, "75-100": 20000},
+            "page_count": 1,
+            "pages": ["/p/item"],
+            "click_count": 2,
+            "rage_click_count": 0,
+            "viewport": {"width": 400, "height": 800},
+            "page_height_px": 2600,
+            "has_geometry": True,
+        }
+        facts.update(over)
+        (out / "facts.json").write_text(json.dumps(facts))
+
+    def metrics(self, cohort_id, **params):
+        qs = urllib.parse.urlencode(params) if params else ""
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}/metrics" + (f"?{qs}" if qs else "")
+        )
+        self.assertEqual(status, 200, body)
+        return json.loads(body)
+
+    def test_metrics_counts_rates_without_a_model_call(self):
+        sid = "metric1" + "x" * 25
+        cohort_id = self._cohort_of_one(sid)
+        self.seed_facts(sid)
+        body = self.metrics(cohort_id)
+        by_key = {m["key"]: m for m in body["metrics"]}
+        # Every session carrying facts here scrolled to 90% and dwelt past 75%.
+        self.assertEqual(by_key["scrolled_past_75"]["pct"], 100)
+        self.assertEqual(by_key["dwell_over_10s_deep"]["count"], body["with_facts"])
+        self.assertEqual(by_key["rage_clicked"]["pct"], 0)
+
+    def test_metrics_excludes_unmeasurable_sessions_from_the_denominator(self):
+        sid = "metric2" + "x" * 25
+        cohort_id = self._cohort_of_one(sid)
+        # Extracted, but with no geometry: a depth metric cannot read it, and
+        # must not count it as "did not scroll".
+        self.seed_facts(sid, has_geometry=False, max_depth_pct=None)
+        body = self.metrics(cohort_id)
+        by_key = {m["key"]: m for m in body["metrics"]}
+        depth = by_key["scrolled_past_75"]
+        # The ungeometried session is absent from the depth denominator, while
+        # a markup-free metric still reads every extracted session.
+        self.assertEqual(depth["eligible"], by_key["any_click"]["eligible"] - 1)
+        self.assertEqual(by_key["any_click"]["eligible"], body["with_facts"])
+
+    def test_metrics_reports_sessions_that_have_no_facts_yet(self):
+        # _cohort_of_one samples the newest purchased session, which earlier
+        # tests in this class may already have seeded facts for; assert against
+        # the cohort's real membership rather than assuming it is this session.
+        sid = "metric3" + "x" * 25
+        cohort_id = self._cohort_of_one(sid)
+        body = self.metrics(cohort_id)
+        self.assertEqual(body["with_facts"] + body["missing_facts"], body["cohort_size"])
+        self.assertGreaterEqual(body["missing_facts"], 1)
+
+    def test_metrics_honours_the_same_slice_a_cut_uses(self):
+        sid = "metric4" + "x" * 25
+        cohort_id = self._cohort_of_one(sid)
+        self.seed_facts(sid)
+        # Outcome slices partition the cohort: every session is one or the
+        # other, and at least the sampled session is purchased.
+        full = self.metrics(cohort_id)["cohort_size"]
+        bought = self.metrics(cohort_id, outcome="purchased")["cohort_size"]
+        rest = self.metrics(cohort_id, outcome="rest")["cohort_size"]
+        self.assertGreaterEqual(bought, 1)
+        self.assertEqual(bought + rest, full)
+
+    def test_metrics_404s_for_an_unknown_cohort(self):
+        status, _ = request(f"{self.base}/api/cohorts/cohort-nope/metrics")
+        self.assertEqual(status, 404)
+
     def test_retry_clears_the_recorded_error_for_that_row(self):
         sid = "retry1" + "x" * 26
         cohort_id = self._cohort_of_one(sid)

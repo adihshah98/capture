@@ -35,6 +35,7 @@ except ImportError:
     pass
 
 import analyze
+import metrics
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -1573,6 +1574,42 @@ def get_cohort_facets(
     return {"cohort_id": cohort["id"], **cohort_facets(pool, live)}
 
 
+@app.get("/api/cohorts/{cohort_id}/metrics")
+def get_cohort_metrics(
+    request: Request,
+    cohort_id: str,
+    project: Optional[str] = Query(None),
+    outcome: Optional[list] = Query(None),
+    device: Optional[list] = Query(None),
+    page: Optional[str] = Query(None),
+    utm_source: Optional[str] = Query(None),
+    utm_medium: Optional[str] = Query(None),
+    utm_campaign: Optional[str] = Query(None),
+    utm_content: Optional[str] = Query(None),
+    fbclid: Optional[str] = Query(None),
+):
+    """Counted Tier 1 rates for a cut. No model call — this is arithmetic.
+
+    Unlike a cut, this reads every session that has been *extracted*, analyzed
+    or not: the facts come from the replay, not from a write-up. So metrics are
+    available for a cohort long before its analysis finishes, and cover more
+    sessions than the cut does.
+    """
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    cohort = _resolve_cohort_or_404(pool, cohort_id)
+
+    slice_spec = (
+        _slice_from_params(
+            outcome, device, page, utm_source, utm_medium, utm_campaign, utm_content, fbclid
+        )
+        or None
+    )
+    rows = _metric_rows(pool, cohort)
+    out = metrics.cohort_metrics(rows, lambda r: metrics.read_facts(pool / r["session_id"]), slice_spec)
+    return {"cohort_id": cohort["id"], "label": analyze.slice_label(out["filter"]), **out}
+
+
 @app.get("/api/cohorts/{cohort_id}/cut")
 async def get_cut(
     request: Request,
@@ -1766,6 +1803,31 @@ def _cut_rows(pool: Path, cohort: dict) -> list:
                 "page": fact.get("page"),
                 "attribution": fact.get("attribution"),
                 "text": text,
+            }
+        )
+    return rows
+
+
+def _metric_rows(pool: Path, cohort: dict) -> list:
+    """Every session in the cohort, with the fields a slice filters on.
+
+    Deliberately not _cut_rows: that drops sessions with no write-up, which is
+    right for a cut but would make a counted rate describe only the analyzed
+    subset. Whether a session has facts is handled downstream as coverage.
+    """
+    facts = _session_facts(pool)
+    rows = []
+    for entry in cohort.get("sessions") or []:
+        sid = entry["session_id"]
+        fact = facts.get(sid) or {}
+        rows.append(
+            {
+                "session_id": sid,
+                "outcome": fact.get("outcome")
+                or ("purchased" if entry.get("filter") == "purchased" else "rest"),
+                "device": fact.get("device"),
+                "page": fact.get("page"),
+                "attribution": fact.get("attribution"),
             }
         )
     return rows

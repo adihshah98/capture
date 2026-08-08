@@ -194,6 +194,42 @@
     #cut-picker .hint [data-hint-text]:not(:empty) + .n { margin-left: 4px; }
     #cut-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px 18px; }
     .cut-headline { margin: 0 0 14px; padding: 12px 14px; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; font-size: 14px; line-height: 1.5; color: #1e1b4b; }
+
+    /* Counted metrics. Deliberately plainer than the model's prose below: these
+       are arithmetic, and should not borrow the accent colour that marks
+       generated insight. */
+    .metrics-block { border: 1px solid #e3e5e8; border-radius: 8px; background: #fff; margin-bottom: 14px; }
+    .metrics-head {
+      display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+      padding: 10px 14px; border-bottom: 1px solid #eef0f2;
+    }
+    .metrics-head h4 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; }
+    .metrics-head .metrics-sub { font-size: 11px; color: #9ca3af; }
+    /* Separators come from the tiles' own borders rather than a background
+       showing through gaps: a trailing unfilled track would otherwise render
+       as a stray grey cell. */
+    .metrics-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    }
+    .metric {
+      background: #fff; padding: 10px 14px 11px;
+      border-right: 1px solid #eef0f2; border-bottom: 1px solid #eef0f2;
+    }
+    .metric-value { font-size: 20px; font-weight: 700; color: #1c1e21; line-height: 1.15; }
+    .metric-value .metric-unit { font-size: 12px; font-weight: 600; color: #6b7280; margin-left: 1px; }
+    .metric-label { margin-top: 2px; font-size: 12px; color: #4b5563; line-height: 1.35; }
+    .metric-sub { margin-top: 3px; font-size: 11px; color: #9ca3af; }
+    /* An unmeasurable metric stays in place rather than disappearing: a missing
+       tile would read as "we didn't check", which is a different claim. */
+    .metric.is-unavailable .metric-value { color: #c3c7cd; font-weight: 600; font-size: 15px; }
+    .metric.is-unavailable .metric-label { color: #9ca3af; }
+    .metric-flag {
+      display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
+      border-radius: 3px; padding: 0 4px; margin-left: 5px; vertical-align: 1px;
+    }
+    .metric-flag.low-coverage { background: #fef3c7; color: #92400e; }
+    .metric-flag.directional { background: #f1f2f4; color: #6b7280; }
+    .metrics-note { padding: 8px 14px 10px; font-size: 11px; color: #9ca3af; line-height: 1.45; border-top: 1px solid #eef0f2; }
     .cut-block { border: 1px solid #e3e5e8; border-radius: 8px; padding: 12px 14px; background: #fff; margin-bottom: 14px; }
     .cut-block h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; }
     .cut-block h4 .n { color: #9ca3af; font-weight: 500; text-transform: none; letter-spacing: 0; margin-left: 4px; }
@@ -355,7 +391,10 @@
         <p class="hint"><span data-hint-text></span><span class="n" data-count="n"></span></p>
       </div>
       <div id="cut-body">
-        <div class="insights-placeholder">Analyze a cohort, then pick a group to see what those sessions have in common.</div>
+        <div id="cut-metrics" hidden></div>
+        <div id="cut-analysis">
+          <div class="insights-placeholder">Analyze a cohort, then pick a group to see what those sessions have in common.</div>
+        </div>
       </div>
     </section>
     <section class="insights-panel" id="insights-queue" hidden>

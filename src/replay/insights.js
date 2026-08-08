@@ -19,6 +19,10 @@ const cutProgressEl = document.getElementById('cut-progress');
 const cutRunBtn = document.getElementById('cut-run');
 const cutRefreshBtn = document.getElementById('cut-refresh');
 const cutBodyEl = document.getElementById('cut-body');
+// The model's prose lives in its own child so counted metrics, which render
+// above it on a different cadence, survive a re-render of the cut.
+const cutAnalysisEl = document.getElementById('cut-analysis');
+const cutMetricsEl = document.getElementById('cut-metrics');
 const tableWrapEl = document.getElementById('cohort-table-wrap');
 const pickerEl = document.getElementById('cut-picker');
 const queuePanelEl = document.getElementById('insights-queue');
@@ -462,6 +466,9 @@ function rowMatches(row, spec) {
 function onSliceChanged() {
   renderPicker();
   stopCutPolling();
+  // Counted metrics need no model call, so they follow the filter immediately
+  // rather than waiting on the cut.
+  loadMetrics();
   loadCut().catch(() => {});
 }
 
@@ -475,9 +482,123 @@ async function loadFacets() {
   }
 }
 
+/* ---- Counted metrics ------------------------------------------------------
+ *
+ * These are arithmetic over facts.json, not model output, so they render on
+ * their own cadence: as soon as a group is picked, without waiting for — or
+ * needing — a cut analysis.
+ */
+
+function metricsUrl(id) {
+  const params = withProject(new URLSearchParams());
+  for (const field of SLICE_FIELDS) {
+    if (slice[field]) params.set(field, slice[field]);
+  }
+  return `/api/cohorts/${encodeURIComponent(id)}/metrics?${params.toString()}`;
+}
+
+// Below this, a metric describes so small a slice of the group that showing a
+// bare percentage would misrepresent it.
+const LOW_COVERAGE_PCT = 60;
+
+function metricTile(m) {
+  // No eligible sessions: say the measurement is missing rather than printing a
+  // zero, which would read as "nobody did this".
+  if (!m.eligible) {
+    return `<div class="metric is-unavailable">
+      <div class="metric-value">Not measured</div>
+      <div class="metric-label">${escapeHtml(m.label)}</div>
+      <div class="metric-sub">No session in this group carries it</div>
+    </div>`;
+  }
+
+  const isRate = m.kind === 'rate';
+  let value;
+  if (isRate) {
+    // Under the sample floor a percentage implies precision we do not have, so
+    // the count leads instead.
+    value = m.directional
+      ? `${m.count}<span class="metric-unit"> of ${m.eligible}</span>`
+      : `${m.pct}<span class="metric-unit">%</span>`;
+  } else if (m.median === null || m.median === undefined) {
+    value = '—';
+  } else if (m.key === 'median_depth_pct') {
+    value = `${Math.round(m.median)}<span class="metric-unit">%</span>`;
+  } else {
+    value = `${Math.round(m.median)}<span class="metric-unit">s</span>`;
+  }
+
+  const flags = [];
+  if (m.coverage_pct < LOW_COVERAGE_PCT) {
+    flags.push('<span class="metric-flag low-coverage">low coverage</span>');
+  }
+  if (isRate && m.directional && m.eligible) {
+    flags.push('<span class="metric-flag directional">directional</span>');
+  }
+
+  const sub = isRate && !m.directional ? `${m.count} of ${m.eligible} sessions` : `n=${m.eligible}`;
+
+  return `<div class="metric">
+    <div class="metric-value">${value}</div>
+    <div class="metric-label">${escapeHtml(m.label)}${flags.join('')}</div>
+    <div class="metric-sub">${escapeHtml(sub)}</div>
+  </div>`;
+}
+
+function renderMetrics(body) {
+  if (!cutMetricsEl) return;
+  const list = body && body.metrics ? body.metrics : [];
+  if (!list.length || !body.cohort_size) {
+    cutMetricsEl.hidden = true;
+    cutMetricsEl.innerHTML = '';
+    return;
+  }
+
+  // Measurable metrics lead. On a partly-extracted cohort the unmeasured ones
+  // can outnumber the real numbers, and burying the signal under a wall of
+  // "not measured" makes the panel look broken rather than honest.
+  const ordered = [...list].sort((a, b) => (b.eligible ? 1 : 0) - (a.eligible ? 1 : 0));
+  const measured = list.filter((m) => m.eligible).length;
+  // Extraction, not analysis, is what these need — worth saying, since the
+  // cut below may cover fewer sessions than the numbers above it.
+  const pending = body.missing_facts
+    ? ` · ${body.missing_facts} not yet extracted`
+    : '';
+
+  cutMetricsEl.hidden = false;
+  cutMetricsEl.innerHTML = `<div class="metrics-block">
+    <div class="metrics-head">
+      <h4>Measured</h4>
+      <span class="metrics-sub">${body.with_facts} of ${body.cohort_size} sessions${escapeHtml(
+        pending
+      )}</span>
+    </div>
+    <div class="metrics-grid">${ordered.map(metricTile).join('')}</div>
+    <p class="metrics-note">
+      Counted from session replays, not written by the model. Percentages are of
+      sessions where the measurement exists${
+        measured < list.length
+          ? ' — metrics marked “not measured” need a re-analysis to populate'
+          : ''
+      }.
+    </p>
+  </div>`;
+}
+
+async function loadMetrics() {
+  if (!cohortId || !cutMetricsEl) return;
+  try {
+    renderMetrics(await fetchJson(metricsUrl(cohortId)));
+  } catch {
+    // A metrics failure must not blank the cut below it.
+    cutMetricsEl.hidden = true;
+    cutMetricsEl.innerHTML = '';
+  }
+}
+
 function renderCutPlaceholder(message) {
   cutIsShowing = false;
-  cutBodyEl.innerHTML = `<div class="insights-placeholder">${escapeHtml(message)}</div>`;
+  cutAnalysisEl.innerHTML = `<div class="insights-placeholder">${escapeHtml(message)}</div>`;
   syncCutRunButton();
 }
 
@@ -609,7 +730,7 @@ function renderCut(body) {
   </p>`;
 
   cutIsShowing = true;
-  cutBodyEl.innerHTML = headline + sections + recommendations + meta;
+  cutAnalysisEl.innerHTML = headline + sections + recommendations + meta;
   syncCutRunButton();
 }
 
@@ -767,6 +888,10 @@ function resetEmptyState() {
   cutProgressEl.textContent = 'No cohort yet';
   renderSelection(null);
   syncRunButtons();
+  if (cutMetricsEl) {
+    cutMetricsEl.hidden = true;
+    cutMetricsEl.innerHTML = '';
+  }
   renderCutPlaceholder(
     'Analyze a cohort, then pick a group to see what those sessions have in common.'
   );
@@ -790,6 +915,7 @@ export async function refreshCohorts() {
   renderCohortOptions(cohorts);
   await refreshCohort();
   await loadFacets();
+  loadMetrics();
   await loadCut();
 }
 
