@@ -717,6 +717,28 @@ class TestCutPromptContent(unittest.TestCase):
         prompt = analyze.CUT_PROMPT
         self.assertIn("is a real pattern, not an anecdote", prompt)
 
+    def test_pins_the_citation_format_the_ui_links(self):
+        """S<n> was the model's own invention; the UI now parses it, so it is pinned."""
+        prompt = analyze.CUT_PROMPT
+        self.assertIn("S<N>", prompt)
+        self.assertIn("S4 [01:09]", prompt)
+        # The ordinal must be the write-up's, not a number the model chose.
+        self.assertIn("Never invent one", prompt)
+        # Collapse the prompt's own wrapping before matching a sentence.
+        flat = " ".join(prompt.split())
+        self.assertIn("never cite a number above the group size", flat)
+        # The near-miss formats the UI regex would not match.
+        self.assertIn('never "Session 4", "#4", or "S4 at 1:09"', flat)
+
+    def test_side_text_numbers_match_the_stored_session_ids(self):
+        """S<n> resolves positionally, so both orders must come from `selected`."""
+        rows = [row("a", "purchased"), row("b", "rest"), row("c", "rest")]
+        text = analyze._cut_side_text(rows, "SESSIONS")
+        for i, r in enumerate(rows, 1):
+            self.assertIn(f"--- SESSIONS session {i} (", text)
+        # The nth header must describe the nth session_id the cut stores.
+        self.assertEqual([r["session_id"] for r in rows], ["a", "b", "c"])
+
     def test_is_written_for_a_marketing_audience(self):
         prompt = analyze.CUT_PROMPT
         self.assertIn("MARKETING", prompt)

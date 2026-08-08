@@ -233,6 +233,20 @@
       display: inline-block; font-size: 11px; font-weight: 700; color: #3730a3;
       background: #e0e7ff; border-radius: 4px; padding: 1px 6px; margin-right: 6px;
     }
+    /* Sits inline inside an observation, so it must not break the sentence. */
+    .cut-cite {
+      display: inline; margin: 0; padding: 0 1px; border: 0; background: none;
+      font: inherit; font-variant-numeric: tabular-nums; color: #4338ca;
+      cursor: pointer; white-space: nowrap;
+      text-decoration: underline; text-decoration-color: #a5b4fc;
+      text-underline-offset: 2px;
+    }
+    .cut-cite:hover { color: #3730a3; text-decoration-color: #6366f1; }
+    .cut-cite:focus-visible {
+      outline: 2px solid #6366f1; outline-offset: 1px; border-radius: 2px;
+    }
+    .cut-block.friction .cut-cite { color: #b91c1c; text-decoration-color: #fecaca; }
+    .cut-block.friction .cut-cite:hover { color: #991b1b; text-decoration-color: #ef4444; }
     .cut-action {
       margin: 4px 0 0; padding-left: 8px; border-left: 2px solid #c7d2fe;
       font-size: 12px; line-height: 1.45; color: #4338ca;

@@ -1,6 +1,7 @@
 import { currentProject, fetchJson, setProject } from './api.js';
+import { linkCitations } from './citations.js';
 import { writeHash } from './deeplink.js';
-import { loadSession } from './session-player.js';
+import { loadSession, setPendingSeek } from './session-player.js';
 
 const POLL_MS = 2000;
 
@@ -261,9 +262,13 @@ function setTab(tab) {
   queuePanelEl.hidden = activeTab !== 'queue';
 }
 
-function openSession(sessionId) {
+function openSession(sessionId, atMs = 0) {
+  if (!sessionId) return;
   setMode('replay');
-  writeHash({ p: currentProject, s: sessionId });
+  // setPendingSeek is consumed once the replay has loaded and knows its
+  // duration; a citation past the end is clamped there, not here.
+  if (atMs > 0) setPendingSeek(atMs);
+  writeHash({ p: currentProject, s: sessionId, t: atMs > 0 ? Math.round(atMs / 1000) : 0 });
   loadSession(sessionId);
 }
 
@@ -490,9 +495,16 @@ const CUT_SECTIONS = [
   { key: 'caveats', title: 'Worth checking', cls: 'caveats' },
 ];
 
+/** Escaped observation text with each "S4 [01:09]" turned into a seek link. */
+function withCitations(text, sessionIds) {
+  return linkCitations(escapeHtml(text || ''), sessionIds, escapeAttr);
+}
+
 /** An insight item: observation, its share of the group, and what to do. */
-function insightItem(item, id) {
-  if (typeof item === 'string') return `<li>${escapeHtml(item)}</li>`;
+function insightItem(item, id, sessionIds) {
+  if (typeof item === 'string') {
+    return `<li>${withCitations(item, sessionIds)}</li>`;
+  }
   const share = item.share
     ? `<span class="cut-share">${escapeHtml(item.share)}</span>`
     : '';
@@ -500,7 +512,8 @@ function insightItem(item, id) {
     ? `<p class="cut-action">${escapeHtml(item.action)}</p>`
     : '';
   const idAttr = id ? ` id="${escapeAttr(id)}"` : '';
-  return `<li${idAttr} class="cut-insight">${share}${escapeHtml(item.observation || '')}${action}</li>`;
+  const observation = withCitations(item.observation, sessionIds);
+  return `<li${idAttr} class="cut-insight">${share}${observation}${action}</li>`;
 }
 
 /** Map normalized action text → insight element id for recommendation jump links. */
@@ -569,6 +582,9 @@ function renderCut(body) {
     : '';
 
   const targets = actionTargets(analysis);
+  // S<n> is positional against this list — the same order _cut_side_text
+  // numbered the write-ups in.
+  const sessionIds = body.session_ids || [];
 
   const sections = CUT_SECTIONS.map(({ key, title, cls, empty }) => {
     const items = analysis[key] || [];
@@ -581,7 +597,11 @@ function renderCut(body) {
         items.length
           ? `<ul>${items
               .map((item, i) =>
-                insightItem(item, key === 'caveats' ? null : `cut-insight-${key}-${i}`)
+                insightItem(
+                  item,
+                  key === 'caveats' ? null : `cut-insight-${key}-${i}`,
+                  sessionIds
+                )
               )
               .join('')}</ul>`
           : `<p class="cut-empty">${escapeHtml(empty)}</p>`
@@ -900,6 +920,11 @@ export function initInsights() {
     cutRefreshBtn.addEventListener('click', () => runCut({ refresh: true }));
   }
   cutBodyEl.addEventListener('click', (e) => {
+    const cite = e.target.closest('.cut-cite');
+    if (cite && cutBodyEl.contains(cite)) {
+      openSession(cite.dataset.citeSid, Number(cite.dataset.citeT) || 0);
+      return;
+    }
     const btn = e.target.closest('.cut-rec-link');
     if (!btn || !cutBodyEl.contains(btn)) return;
     const id = btn.dataset.scrollTo;

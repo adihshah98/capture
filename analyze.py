@@ -893,6 +893,24 @@ mobile and desktop sessions did the same things" is a real, useful result.
 When the group really is uniform, say so plainly and move on — but only after
 looking. "They all did X (9 of 9)" is a strong finding when it is true.
 
+## Citing sessions
+
+Each write-up below is headed "--- SESSIONS session N ---". When an item points
+at specific sessions, cite them as S<N> using that same N, immediately followed
+by a timestamp from that session: "S4 [01:09]". The UI turns these into links
+that open the replay at that moment, so the format must be exact — "S4 [01:09]",
+never "Session 4", "#4", or "S4 at 1:09".
+
+- Use only the N of a write-up actually shown below. Never invent one, never
+  cite a number above the group size, and never renumber the sessions.
+- The [MM:SS] must be a timestamp that appears in THAT session's write-up.
+  Do not carry a timestamp from one session over to another.
+- Cite the sessions the claim rests on, in brackets after the point:
+  "Four sessions stalled on the guarantee (S1 [00:13], S4 [01:09],
+  S6 [00:17], S8 [00:08]) — the promise is doing the selling."
+- Citations are evidence, not the finding. They never replace the sentence,
+  and a bare list of citations is not an observation.
+
 ## Output
 
 Return a single JSON object with this exact shape. Every item in journey /
@@ -944,6 +962,7 @@ Writing the three fields:
 - "observation" carries the evidence AND the reading. It must contain at least
   one concrete anchor from the write-ups — a quoted label or heading, an
   [MM:SS], a duration, or a scroll position — followed by what it suggests.
+  It must also cite the sessions it rests on, in the S<N> form below.
 - "share" is the size of the pattern: "44% (4 of 9)". Below 5 sessions use
   "4 of 9 sessions" with no percentage. When a pattern covers the whole group,
   write "N of N" using this group's actual size, not the 9 in this example.
@@ -993,7 +1012,13 @@ Rules:
 
 
 def _cut_side_text(rows: list, label: str) -> str:
-    """The group's write-ups, labelled per session so the model can cite counts."""
+    """The group's write-ups, labelled per session so the model can cite counts.
+
+    The 1-based number in each header is what the model cites as S<n>, and the
+    UI resolves it positionally against the cut's `session_ids`. Both come from
+    the same `selected` list, so this enumeration order IS the citation
+    contract — reordering rows here silently repoints every link.
+    """
     if not rows:
         return f"### {label}\n(no sessions in this group)\n"
     parts = [f"### {label} — {len(rows)} session(s)\n"]
