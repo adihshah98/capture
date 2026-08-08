@@ -750,6 +750,11 @@ brackets: "44% (4 of 9)". Round to whole numbers. With fewer than 5 sessions
 a percentage overstates precision, so use "4 of 9 sessions" alone and say the
 evidence is directional.
 
+Every denominator is the size of THIS group, stated under "Already known"
+below. The examples here use 9 only as an illustration — never copy 9, and
+never use a total from anywhere else. The write-ups below are numbered, and
+the last number is the group size: no count you write may exceed it.
+
 ## The single most important rule
 
 The group was SELECTED by a filter, stated below as "This group is".
@@ -940,7 +945,8 @@ Writing the three fields:
   one concrete anchor from the write-ups — a quoted label or heading, an
   [MM:SS], a duration, or a scroll position — followed by what it suggests.
 - "share" is the size of the pattern: "44% (4 of 9)". Below 5 sessions use
-  "4 of 9 sessions" with no percentage. Use "9 of 9" for the whole group.
+  "4 of 9 sessions" with no percentage. When a pattern covers the whole group,
+  write "N of N" using this group's actual size, not the 9 in this example.
   For a split, describe the side this item is about.
 - "action" is a concrete next step for a marketing team — test this default,
   move this proof point up, lead this channel with that message, fix this
@@ -1008,33 +1014,44 @@ def _cut_side_text(rows: list, label: str) -> str:
     return "\n".join(parts)
 
 
-def _given_facts(spec: dict) -> str:
-    """Spell out what the filter already guarantees, so it is not 'found'."""
-    lines = []
+def _given_facts(spec: dict, n: int) -> str:
+    """Spell out what the filter already guarantees, so it is not 'found'.
+
+    `n` is the size of the filtered group. Every premise below states it, so
+    the only session count in the model's context is the right one: given a
+    bare "every session in this group", the model has been seen to attach the
+    cohort-wide total instead ("All 46 sessions landed on /x" for a group of 9).
+    """
+    lines = [
+        f"- This group contains exactly {n} session(s). {n} is the ONLY total "
+        f"you may use. Every share you write is out of {n} — never out of any "
+        f"larger number, and never out of the whole cohort."
+    ]
 
     if spec.get("outcome"):
         joined = " or ".join(OUTCOME_LABELS.get(v, v) for v in spec["outcome"])
         lines.append(
-            f"- Every session in this group {joined}. Do not report this, or "
-            f"any step it entails (clicking buy, reaching checkout, "
+            f"- All {n} session(s) in this group {joined}. Do not report this, "
+            f"or any step it entails (clicking buy, reaching checkout, "
             f"converting), as a finding."
         )
     if spec.get("device"):
         lines.append(
-            f"- Every session in this group was on "
+            f"- All {n} session(s) in this group were on "
             f"{' or '.join(spec['device'])}. Do not report the device itself "
             f"as a finding."
         )
     if spec.get("page"):
         lines.append(
-            f"- Every session in this group landed on {spec['page']}. Do not "
-            f"report the landing page itself as a finding."
+            f"- All {n} session(s) in this group landed on {spec['page']}. Do "
+            f"not report the landing page itself as a finding."
         )
     for key in ("utm_source", "utm_medium", "utm_campaign", "utm_content"):
         if spec.get(key):
             lines.append(
-                f"- Every session in this group came from {key}={spec[key]}. "
-                f"Do not report the traffic source as a finding."
+                f"- All {n} session(s) in this group came from "
+                f"{key}={spec[key]}. Do not report the traffic source as a "
+                f"finding."
             )
 
     # A filtered field is constant here, so it cannot split the group. Point
@@ -1050,15 +1067,15 @@ def _given_facts(spec: dict) -> str:
         )
         if not spec.get(key)
     ]
-    if lines and free:
+    # len(lines) > 1 means the filter actually pinned a field: the count line
+    # is always present and pins nothing on its own.
+    if len(lines) > 1 and free:
         lines.append(
             "- These are fixed for every session here, so they cannot separate "
             "one cluster from another. Cluster on " + ", ".join(free) + " and "
             "on what the sessions actually did on the page."
         )
 
-    if not lines:
-        return ""
     return "## Already known — never report these as findings\n\n" + "\n".join(lines)
 
 
@@ -1146,8 +1163,34 @@ def _recommendations_from_actions(out: dict) -> list:
     return lines
 
 
-def normalize_cut_analysis(raw) -> dict:
-    """Coerce the model's JSON into the documented shape, dropping anything else."""
+# "4 of 9", "44% (4 of 9)", "9 of 9 sessions" — the denominator is the group
+# size, and the model is told it is the only total it may use.
+_SHARE_DENOM_RE = re.compile(r"\b(\d+)\s+of\s+(\d+)\b", re.IGNORECASE)
+
+
+def _share_denominator_ok(share: str, n: Optional[int]) -> bool:
+    """False when a share cites a total that is not the group size.
+
+    The model has been seen to write the cohort-wide total into a share for a
+    much smaller filtered group. A share whose denominator is not `n` is not
+    describing this group, so it is dropped rather than shown as fact.
+    """
+    if n is None or not share:
+        return True
+    found = _SHARE_DENOM_RE.findall(share)
+    if not found:
+        return True
+    # A numerator above the group size is impossible here too.
+    return all(int(den) == n and int(num) <= n for num, den in found)
+
+
+def normalize_cut_analysis(raw, n: Optional[int] = None) -> dict:
+    """Coerce the model's JSON into the documented shape, dropping anything else.
+
+    `n` is the group size when known. Shares citing a different total are
+    dropped: the observation still carries the finding, and a missing share
+    renders as nothing, which beats rendering a wrong one.
+    """
     data = raw if isinstance(raw, dict) else {}
     out = empty_cut_analysis()
     out["headline"] = _clean_text(data.get("headline"), 600)
@@ -1160,6 +1203,10 @@ def normalize_cut_analysis(raw) -> dict:
             # Caveats stay plain strings; the insight sections are objects.
             entry = _clean_text(item, 900) if key == "caveats" else _insight_item(item)
             if entry:
+                if isinstance(entry, dict) and not _share_denominator_ok(
+                    entry["share"], n
+                ):
+                    entry["share"] = ""
                 clean.append(entry)
             if len(clean) >= CUT_ITEMS_PER_SECTION:
                 break
@@ -1216,7 +1263,7 @@ async def call_gemini_cut(
             response_mime_type="application/json",
         ),
     )
-    return normalize_cut_analysis(_parse_json_object(response.text or ""))
+    return normalize_cut_analysis(_parse_json_object(response.text or ""), len(rows))
 
 
 async def build_cut_analysis(rows: list, slice_spec: Optional[dict]) -> dict:
@@ -1242,7 +1289,7 @@ async def build_cut_analysis(rows: list, slice_spec: Optional[dict]) -> dict:
         empty["headline"] = f"No analyzed sessions match {label} in this cohort."
         return {**base, "analysis": empty}
 
-    given = _given_facts(spec)
+    given = _given_facts(spec, len(selected))
     _, model_gate = _gates()
     async with model_gate:
         analysis = await call_gemini_cut(selected, label, given)

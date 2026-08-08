@@ -477,8 +477,10 @@ class TestBuildCutAnalysis(unittest.TestCase):
         out = asyncio.run(analyze.build_cut_analysis(rows, None))
 
         self.assertEqual(seen["rows"], ["p1", "n1", "n2"])
-        # No filter means nothing is already known, so nothing is banned.
-        self.assertEqual(seen["given"], "")
+        # No filter means nothing is banned — but the group size is still
+        # stated, so shares cannot borrow a total from the wider cohort.
+        self.assertNotIn("Do not report", seen["given"])
+        self.assertIn("exactly 3 session(s)", seen["given"])
         self.assertEqual(out["n"], 3)
         self.assertEqual(out["label"], "all sessions")
 
@@ -527,26 +529,48 @@ class TestBuildCutAnalysis(unittest.TestCase):
 class TestGivenFacts(unittest.TestCase):
     """The filter that selected a group must never come back as a finding."""
 
-    def given(self, spec):
-        return analyze._given_facts(analyze.normalize_slice(spec))
+    def given(self, spec, n=9):
+        return analyze._given_facts(analyze.normalize_slice(spec), n)
 
     def test_outcome_filter_bans_the_obvious_restatement(self):
         text = self.given({"outcome": ["purchased"]})
-        self.assertIn("Every session in this group purchased", text)
+        self.assertIn("All 9 session(s) in this group purchased", text)
         # The exact tautology the first version of this prompt produced.
         self.assertIn("clicking buy", text)
+
+    def test_every_premise_carries_the_group_size(self):
+        """The bug: a bare "every session" let the model attach the cohort total.
+
+        Each premise states n, so the only session count in context is right.
+        """
+        text = self.given({"page": "/products/cream", "device": ["mobile"]}, n=9)
+        self.assertIn("This group contains exactly 9 session(s)", text)
+        for line in text.splitlines():
+            if "in this group" in line:
+                self.assertIn("All 9 session(s)", line)
+
+    def test_the_group_size_is_declared_even_with_no_filter(self):
+        """An unfiltered cut still needs a denominator — that is where 46 came from."""
+        text = analyze._given_facts({}, 9)
+        self.assertIn("exactly 9 session(s)", text)
+        self.assertIn("ONLY total", text)
+        # Nothing is pinned, so nothing is banned from being reported.
+        self.assertNotIn("cannot separate", text)
 
     def test_campaign_and_device_filters_are_declared(self):
         text = self.given({"utm_campaign": "spring", "device": ["mobile"]})
         self.assertIn("utm_campaign=spring", text)
-        self.assertIn("was on mobile", text)
+        self.assertIn("were on mobile", text)
 
     def test_page_filter_is_declared(self):
         text = self.given({"page": "/products/cream"})
         self.assertIn("landed on /products/cream", text)
 
-    def test_an_unconstrained_cut_has_nothing_to_declare(self):
-        self.assertEqual(analyze._given_facts({}), "")
+    def test_an_unconstrained_cut_declares_only_the_size(self):
+        """Nothing is banned, but the denominator is still stated."""
+        text = analyze._given_facts({}, 9)
+        self.assertNotIn("Do not report", text)
+        self.assertIn("exactly 9 session(s)", text)
 
     def test_points_clustering_at_the_dimensions_still_free(self):
         """A filtered field is constant, so it cannot separate two clusters."""
@@ -594,7 +618,50 @@ class TestGivenFacts(unittest.TestCase):
             analyze.ANALYSIS_ENABLED = saved_enabled
             analyze.call_gemini_cut = saved_call
             analyze._gate_loop = None
-        self.assertIn("Every session in this group purchased", seen["given"])
+        # One row matches the filter, so the premise must say 1 — not 2.
+        self.assertIn("All 1 session(s) in this group purchased", seen["given"])
+        self.assertIn("exactly 1 session(s)", seen["given"])
+
+
+class TestShareDenominator(unittest.TestCase):
+    """A share must count out of the group, not out of the wider cohort.
+
+    The observed bug: a 9-session cut rendered "All 46 sessions landed ...",
+    46 being the cohort total. The observation survives; the wrong share does not.
+    """
+
+    def norm(self, share, n):
+        out = analyze.normalize_cut_analysis(
+            {"journey": [{"observation": "They read the FAQ at [00:12].", "share": share}]},
+            n,
+        )
+        return out["journey"][0]
+
+    def test_a_share_matching_the_group_size_is_kept(self):
+        self.assertEqual(self.norm("44% (4 of 9)", 9)["share"], "44% (4 of 9)")
+        self.assertEqual(self.norm("9 of 9 sessions", 9)["share"], "9 of 9 sessions")
+
+    def test_a_cohort_wide_total_is_dropped(self):
+        item = self.norm("All 46 of 46 sessions", 9)
+        self.assertEqual(item["share"], "")
+        # The finding itself is still worth showing.
+        self.assertIn("read the FAQ", item["observation"])
+
+    def test_a_numerator_above_the_group_size_is_dropped(self):
+        self.assertEqual(self.norm("12 of 9", 9)["share"], "")
+
+    def test_a_share_with_no_explicit_total_is_left_alone(self):
+        """Percent-only shares carry no denominator to check."""
+        self.assertEqual(self.norm("44%", 9)["share"], "44%")
+
+    def test_an_unknown_group_size_disables_the_check(self):
+        """Cached cuts normalized without n must pass through unchanged."""
+        self.assertEqual(self.norm("4 of 46", None)["share"], "4 of 46")
+
+    def test_the_group_size_reaches_the_normalizer(self):
+        """len(rows), not the cohort, is what call_gemini_cut validates against."""
+        self.assertFalse(analyze._share_denominator_ok("All 46 of 46", 9))
+        self.assertTrue(analyze._share_denominator_ok("All 9 of 9", 9))
 
 
 class TestCutOutputBudget(unittest.TestCase):
