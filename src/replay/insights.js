@@ -44,10 +44,12 @@ function cohortIsRunning() {
 }
 
 function syncRunButtons() {
-  const running = cohortIsRunning();
-  runBtn.disabled = !analysisEnabled || running;
-  runBtn.title = analysisEnabled ? '' : 'Analysis is not configured on this server';
-  runBtn.textContent = running ? 'Analyzing…' : 'Analyze 10 sessions';
+  // Creating a cohort always adds a new one — never replaces the selected cohort.
+  runBtn.disabled = !analysisEnabled;
+  runBtn.title = analysisEnabled
+    ? 'Sample latest 50 purchased + 50 non-purchase ashwamag-01 sessions (≥5s) into a new cohort. Existing cohorts stay in the list.'
+    : 'Analysis is not configured on this server';
+  runBtn.textContent = 'New cohort';
   renameBtn.disabled = !cohortId;
   syncCutRunButton();
 }
@@ -97,8 +99,10 @@ function cohortUrl(id) {
 
 function createCohortUrl() {
   const params = withProject(new URLSearchParams());
-  params.set('purchased', '5');
-  params.set('all', '5');
+  params.set('purchased', '50');
+  params.set('all', '50');
+  params.set('min_duration_ms', '5000');
+  params.set('url_contains', '/pages/ashwamag-01');
   return `/api/cohorts?${params.toString()}`;
 }
 
@@ -221,10 +225,12 @@ function escapeAttr(s) {
 
 function progressText(body) {
   const prog = body.progress || {};
+  const batch = body.batch ? ' · Gemini batch queued' : '';
   return (
     `${prog.done || 0} / ${prog.total || 0} done · ${prog.running || 0} running · ` +
     `${prog.queued || 0} queued` +
-    (prog.error ? ` · ${prog.error} failed` : '')
+    (prog.error ? ` · ${prog.error} failed` : '') +
+    batch
   );
 }
 
@@ -629,7 +635,7 @@ function resetEmptyState() {
     'Analyze a cohort, then pick a group to see what those sessions have in common.'
   );
   renderEmpty(
-    'Run analysis on 5 purchased and 5 other sessions. Open any row to watch it in Replay.'
+    'Create a new cohort to sample the latest 50 purchased + 50 non-purchase ashwamag-01 sessions (≥5s). Prior cohorts stay in the dropdown. Open any row to watch it in Replay.'
   );
 }
 
@@ -675,7 +681,7 @@ async function runCohort() {
   autoSwitchedForRun = false;
   runBtn.disabled = true;
   runBtn.textContent = 'Starting…';
-  progressEl.textContent = 'Sampling sessions…';
+  progressEl.textContent = 'Sampling a new cohort (existing cohorts kept)…';
   try {
     const body = await fetchJson(createCohortUrl(), { method: 'POST' });
     cohortId = body.id;

@@ -691,7 +691,11 @@ class TestAnalysisStatus(ServerCase):
 
 
 class TestCohort(ServerCase):
-    env = {"GEMINI_API_KEY": "test-key-not-used-when-cached"}
+    # Relaxed sampling defaults for fixtures; Batch off so cached write-ups settle sync.
+    env = {
+        "GEMINI_API_KEY": "test-key-not-used-when-cached",
+        "ANALYZE_BATCH": "0",
+    }
 
     def order(self, session_id, payload):
         return request(
@@ -713,6 +717,18 @@ class TestCohort(ServerCase):
                 }
             )
         )
+
+    def create_cohort_url(self, purchased=1, all_n=0, **extra):
+        """POST URL that disables production ashwamag/≥5s filters for test fixtures."""
+        params = {
+            "purchased": purchased,
+            "all": all_n,
+            "min_duration_ms": 0,
+            "url_contains": "",
+        }
+        params.update(extra)
+        qs = urllib.parse.urlencode(params)
+        return f"{self.base}/api/cohorts?{qs}"
 
     def cohorts(self):
         status, body = request(f"{self.base}/api/cohorts")
@@ -763,7 +779,7 @@ class TestCohort(ServerCase):
             self.seed_analysis(sid)
 
         status, body = request(
-            f"{self.base}/api/cohorts?purchased=2&all=2", method="POST", data=b""
+            self.create_cohort_url(purchased=2, all_n=2), method="POST", data=b""
         )
         self.assertEqual(status, 202, body)
         cohort = json.loads(body)
@@ -807,7 +823,7 @@ class TestCohort(ServerCase):
         ids = []
         for _ in range(2):
             status, body = request(
-                f"{self.base}/api/cohorts?purchased=1&all=0", method="POST", data=b""
+                self.create_cohort_url(purchased=1, all_n=0), method="POST", data=b""
             )
             self.assertEqual(status, 202, body)
             cohort_id = json.loads(body)["id"]
@@ -823,6 +839,9 @@ class TestCohort(ServerCase):
             self.assertIn(cohort_id, listed)
         # Newest first, so the later run sorts ahead of the earlier one.
         self.assertLess(listed.index(ids[1]), listed.index(ids[0]))
+        # First cohort file still exists with its membership.
+        first = json.loads((self.data_dir / "cohorts" / f"{ids[0]}.json").read_text())
+        self.assertEqual(len(first["sessions"]), 1)
 
     def test_rename_sets_the_label_and_keeps_membership(self):
         sid = "rename" + "x" * 26
@@ -884,7 +903,7 @@ class TestCohort(ServerCase):
         self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
         self.seed_analysis(sid)
         status, body = request(
-            f"{self.base}/api/cohorts?purchased=1&all=0", method="POST", data=b""
+            self.create_cohort_url(purchased=1, all_n=0), method="POST", data=b""
         )
         self.assertEqual(status, 202)
         cohort_id = json.loads(body)["id"]
@@ -1005,7 +1024,10 @@ class TestAttribution(ServerCase):
 
 
 class TestCutEndpoint(ServerCase):
-    env = {"GEMINI_API_KEY": "test-key-not-used-when-cached"}
+    env = {
+        "GEMINI_API_KEY": "test-key-not-used-when-cached",
+        "ANALYZE_BATCH": "0",
+    }
 
     def order(self, session_id, payload):
         return request(
@@ -1026,8 +1048,16 @@ class TestCutEndpoint(ServerCase):
     def a_cohort(self):
         self.seed("cutbuy" + "x" * 26, purchased=True)
         self.seed("cutall" + "x" * 26)
+        qs = urllib.parse.urlencode(
+            {
+                "purchased": 1,
+                "all": 1,
+                "min_duration_ms": 0,
+                "url_contains": "",
+            }
+        )
         status, body = request(
-            f"{self.base}/api/cohorts?purchased=1&all=1", method="POST", data=b""
+            f"{self.base}/api/cohorts?{qs}", method="POST", data=b""
         )
         self.assertEqual(status, 202, body)
         cohort_id = json.loads(body)["id"]
@@ -1148,7 +1178,10 @@ class TestCutEndpoint(ServerCase):
 class TestCutSlices(ServerCase):
     """Facets and free-form group slicing over a cohort with a known shape."""
 
-    env = {"GEMINI_API_KEY": "test-key-not-used-when-cached"}
+    env = {
+        "GEMINI_API_KEY": "test-key-not-used-when-cached",
+        "ANALYZE_BATCH": "0",
+    }
 
     SPECS = [
         ("p" * 32, "purchased", 360, "https://shop.test/p?utm_source=google"),
@@ -1180,8 +1213,16 @@ class TestCutSlices(ServerCase):
             (self.data_dir / "sessions" / sid / "analysis.json").write_text(
                 json.dumps({"text": f"write-up {outcome}", "model": "test", "warnings": []})
             )
+        qs = urllib.parse.urlencode(
+            {
+                "purchased": 2,
+                "all": 2,
+                "min_duration_ms": 0,
+                "url_contains": "",
+            }
+        )
         status, body = request(
-            f"{self.base}/api/cohorts?purchased=2&all=2", method="POST", data=b""
+            f"{self.base}/api/cohorts?{qs}", method="POST", data=b""
         )
         self.assertEqual(status, 202, body)
         cohort_id = json.loads(body)["id"]
@@ -1337,7 +1378,7 @@ class TestCohortUnavailable(ServerCase):
 
 
 class TestCohortSampling(unittest.TestCase):
-    def test_sample_prefers_newest_and_splits_filters(self):
+    def _conn(self, rows):
         import analyze
 
         conn = sqlite3.connect(":memory:")
@@ -1350,21 +1391,41 @@ class TestCohortSampling(unittest.TestCase):
             )
             """
         )
-        rows = [
-            ("", "oldbuy" + "x" * 26, 1, 10, 1, 1, None, None, json.dumps({"purchased_at": 1}), None, None),
-            ("", "newbuy" + "x" * 26, 1, 30, 1, 1, None, None, json.dumps({"purchased_at": 2}), json.dumps({"clicks": 3}), None),
-            ("", "oldall" + "x" * 26, 1, 5, 1, 1, None, None, None, None, None),
-            ("", "newall" + "x" * 26, 1, 40, 1, 1, None, None, None, json.dumps({"clicks": 2}), None),
-            ("", "nochunk" + "x" * 25, 1, 50, 0, 0, None, None, json.dumps({"purchased_at": 3}), None, None),
-        ]
         conn.executemany(
             'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)',
             rows,
+        )
+        return analyze, conn
+
+    def test_sample_prefers_newest_and_splits_filters(self):
+        analyze, conn = self._conn(
+            [
+                ("", "oldbuy" + "x" * 26, 0, 10_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 1}), None, None),
+                ("", "newbuy" + "x" * 26, 0, 30_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 2}), json.dumps({"clicks": 3}), None),
+                ("", "oldall" + "x" * 26, 0, 5_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None),
+                ("", "newall" + "x" * 26, 0, 40_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, json.dumps({"clicks": 2}), None),
+                ("", "nochunk" + "x" * 25, 0, 50_000, 0, 0, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 3}), None, None),
+            ]
         )
         sampled = analyze.sample_cohort_rows(conn, "", purchased_n=1, all_n=1)
         self.assertEqual(
             [(s["session_id"], s["filter"]) for s in sampled],
             [("newbuy" + "x" * 26, "purchased"), ("newall" + "x" * 26, "all")],
+        )
+
+    def test_sample_requires_ashwamag_path_and_min_duration(self):
+        analyze, conn = self._conn(
+            [
+                ("", "short" + "x" * 27, 0, 4_999, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 1}), None, None),
+                ("", "other" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/other", json.dumps({"purchased_at": 1}), None, None),
+                ("", "okbuy" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01?x=1", json.dumps({"purchased_at": 1}), None, None),
+                ("", "okall" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None),
+            ]
+        )
+        sampled = analyze.sample_cohort_rows(conn, "", purchased_n=5, all_n=5)
+        self.assertEqual(
+            {(s["session_id"], s["filter"]) for s in sampled},
+            {("okbuy" + "x" * 27, "purchased"), ("okall" + "x" * 27, "all")},
         )
 
     def test_standout_line_prefers_what_stands_out_section(self):

@@ -64,6 +64,14 @@ async def lifespan(_app):
             await asyncio.sleep(24 * 3600)
 
     task = asyncio.create_task(loop())
+    # Cohorts mid-Batch lose their asyncio task on restart — pick them back up.
+    for pool, cohort in analyze.cohorts_needing_batch_resume(DATA_ROOT):
+        key = _cohort_key(pool, cohort["id"])
+        if key not in _cohort_tasks:
+            print(f"resuming cohort batch {cohort['id']} ({(cohort.get('batch') or {}).get('name')})")
+            _cohort_tasks[key] = asyncio.create_task(
+                _resume_cohort_batch(pool, cohort["id"])
+            )
     try:
         yield
     finally:
@@ -1221,51 +1229,25 @@ async def _await_session_analysis(session_dir: Path, force: bool = False) -> Non
         raise RuntimeError("analysis finished without a result")
 
 async def _run_cohort_job(pool: Path, cohort_id: str, force: bool = False) -> None:
+    """Analyze one cohort in the background. Other cohorts on disk are untouched."""
     key = _cohort_key(pool, cohort_id)
     try:
         cohort = analyze.read_cohort(pool, cohort_id)
         if not cohort:
             return
-        cohort = {**cohort, "status": "running"}
-        analyze.write_cohort(pool, cohort)
+        await analyze.run_cohort_job(pool, cohort, force=force)
+    finally:
+        _cohort_tasks.pop(key, None)
 
-        pending = []
-        for entry in cohort.get("sessions") or []:
-            session_dir = pool / entry["session_id"]
-            if not force and analyze.read_analysis(session_dir):
-                entry["status"] = "done"
-                entry["analysis"] = analyze.ANALYSIS_FILE
-                entry.pop("error", None)
-                continue
-            entry["status"] = "queued"
-            entry.pop("error", None)
-            pending.append((entry, session_dir))
-        analyze.write_cohort(pool, cohort)
 
-        # Fan out and let analyze.py's semaphores pace the work — extraction
-        # still runs one at a time, but a session waiting on Gemini no longer
-        # blocks the next session's reconstruction.
-        async def run_one(entry: dict, session_dir: Path) -> None:
-            entry["status"] = "running"
-            analyze.write_cohort(pool, cohort)
-            try:
-                await _await_session_analysis(session_dir, force=force)
-                entry["status"] = "done"
-                entry["analysis"] = analyze.ANALYSIS_FILE
-                entry.pop("error", None)
-            except Exception as exc:
-                entry["status"] = "error"
-                entry["error"] = getattr(exc, "message", None) or str(exc) or "analysis failed"
-            analyze.write_cohort(pool, cohort)
-
-        if pending:
-            await asyncio.gather(
-                *(run_one(entry, session_dir) for entry, session_dir in pending),
-                return_exceptions=True,
-            )
-
-        final = analyze.enrich_cohort_status(pool, analyze.read_cohort(pool, cohort_id) or cohort)
-        analyze.write_cohort(pool, final)
+async def _resume_cohort_batch(pool: Path, cohort_id: str) -> None:
+    """Re-attach to a Batch job after a process restart."""
+    key = _cohort_key(pool, cohort_id)
+    try:
+        cohort = analyze.read_cohort(pool, cohort_id)
+        if not cohort:
+            return
+        await analyze.resume_cohort_batch(pool, cohort)
     finally:
         _cohort_tasks.pop(key, None)
 
@@ -1379,18 +1361,27 @@ async def rename_cohort(request: Request, cohort_id: str, project: Optional[str]
 async def create_cohort(
     request: Request,
     project: Optional[str] = Query(None),
-    purchased: int = Query(5, ge=0, le=50),
-    all_n: int = Query(5, ge=0, le=50, alias="all"),
+    purchased: int = Query(analyze.COHORT_DEFAULT_PURCHASED_N, ge=0, le=50),
+    all_n: int = Query(analyze.COHORT_DEFAULT_ALL_N, ge=0, le=50, alias="all"),
+    min_duration_ms: int = Query(analyze.COHORT_MIN_DURATION_MS, ge=0),
+    url_contains: str = Query(analyze.COHORT_URL_CONTAINS),
     force: bool = Query(False),
 ):
-    """Sample a new cohort. Each call mints its own id — cohorts accumulate."""
+    """Sample a new cohort. Each call mints its own id — prior cohorts are kept."""
     require_read_access(request, project)
     _require_analysis_runtime()
     pool = resolve_pool(project)
 
     with _index_lock:
         conn = index_conn()
-        cohort = analyze.build_cohort(conn, pool_key(pool), purchased, all_n)
+        cohort = analyze.build_cohort(
+            conn,
+            pool_key(pool),
+            purchased,
+            all_n,
+            min_duration_ms=min_duration_ms,
+            url_contains=url_contains,
+        )
 
     if not cohort["sessions"]:
         raise ApiError(400, "no sessions matched the purchased/all sample")

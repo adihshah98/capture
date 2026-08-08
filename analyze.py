@@ -5,11 +5,12 @@ are frozen and recorded scroll offsets are re-applied exactly as they are on
 screen. Stepping that player yields a frame per second of activity — the page
 as the visitor saw it change, rather than a single end-state snapshot.
 
-Also owns cohorts: pick N purchased + N all sessions, persist the sample under
-`cohorts/<id>.json`, and leave the server to queue per-session analysis against
-it. A cohort is immutable once sampled, so a "cut" across it (Meta vs Google,
-campaign A vs B) can be analysed by the model once and cached beside it. The
-cache is busted only on request (`refresh=1`), for when the prompt changes.
+Also owns cohorts: sample latest N purchased + N non-purchase sessions (default
+50+50, ashwamag-01, ≥5s), persist each sample under `cohorts/<id>.json` without
+touching prior cohorts, reconstruct pages locally, then run write-ups through
+the Gemini Batch API (interactive generate_content remains for single-session
+Analyze). A cohort is immutable once sampled, so a "cut" across it can be
+analysed once and cached beside it (`refresh=1` busts that cache).
 """
 
 import argparse
@@ -57,6 +58,26 @@ ANALYSIS_ENABLED = bool(GEMINI_API_KEY)
 # most of its wall clock idle.
 ANALYZE_EXTRACT_CONCURRENCY = max(1, int(os.environ.get("ANALYZE_EXTRACT_CONCURRENCY", "1")))
 ANALYZE_MODEL_CONCURRENCY = max(1, int(os.environ.get("ANALYZE_MODEL_CONCURRENCY", "3")))
+
+# Insights cohort defaults: latest ashwamag-01 sessions ≥5s, 50/50 split.
+COHORT_DEFAULT_PURCHASED_N = 50
+COHORT_DEFAULT_ALL_N = 50
+COHORT_MIN_DURATION_MS = 5000
+COHORT_URL_CONTAINS = "/pages/ashwamag-01"
+
+# Cohort write-ups go through Gemini Batch (≈50% cheaper). Single-session
+# Analyze stays on the interactive API. Set ANALYZE_BATCH=0 to force sync.
+ANALYZE_BATCH = os.environ.get("ANALYZE_BATCH", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+ANALYZE_BATCH_POLL_S = float(os.environ.get("ANALYZE_BATCH_POLL_S", "15"))
+# Inline batch payloads cap around 20MB; above this we upload a JSONL file.
+ANALYZE_BATCH_INLINE_MAX_BYTES = int(
+    os.environ.get("ANALYZE_BATCH_INLINE_MAX_BYTES", str(15 * 1024 * 1024))
+)
 
 # Created lazily: a Semaphore binds to the running loop, and this module is
 # imported before the server's loop exists (and reused by the sync CLI).
@@ -1210,36 +1231,50 @@ def sample_cohort_rows(
     pool: str,
     purchased_n: int,
     all_n: int,
+    *,
+    min_duration_ms: int = COHORT_MIN_DURATION_MS,
+    url_contains: str = COHORT_URL_CONTAINS,
 ) -> list:
-    """Newest purchased + newest non-purchased sessions that have at least one chunk.
+    """Newest purchased + newest non-purchased sessions that match the filters.
 
     Prefers sessions with recorded clicks when breaking ties on recency, so thin
-    bounce recordings are less likely to fill the sample.
+    bounce recordings are less likely to fill the sample. Duration is wall-clock
+    (`last_seen - first_seen`). Empty `url_contains` disables the path filter.
     """
     activity = "coalesce(json_extract(interactions, '$.clicks'), 0)"
+    where = [
+        "pool = ?",
+        "chunk_count > 0",
+        "(last_seen - first_seen) >= ?",
+    ]
+    base_params: list = [pool, int(min_duration_ms)]
+    needle = (url_contains or "").strip()
+    if needle:
+        where.append("url LIKE ?")
+        base_params.append(f"%{needle}%")
+    where_sql = " AND ".join(where)
+
     purchased = conn.execute(
         f"""
         SELECT session_id FROM sessions
-        WHERE pool = ?
-          AND chunk_count > 0
+        WHERE {where_sql}
           AND json_extract("order", '$.purchased_at') IS NOT NULL
         ORDER BY last_seen DESC, {activity} DESC, session_id DESC
         LIMIT ?
         """,
-        (pool, purchased_n),
+        (*base_params, purchased_n),
     ).fetchall()
     purchased_ids = {row[0] for row in purchased}
 
     all_rows = conn.execute(
         f"""
         SELECT session_id FROM sessions
-        WHERE pool = ?
-          AND chunk_count > 0
+        WHERE {where_sql}
           AND json_extract("order", '$.purchased_at') IS NULL
         ORDER BY last_seen DESC, {activity} DESC, session_id DESC
         LIMIT ?
         """,
-        (pool, all_n + len(purchased_ids)),
+        (*base_params, all_n + len(purchased_ids)),
     ).fetchall()
 
     sessions = [{"session_id": sid, "filter": "purchased", "status": "queued"} for (sid,) in purchased]
@@ -1255,21 +1290,35 @@ def sample_cohort_rows(
 def build_cohort(
     conn: sqlite3.Connection,
     pool_key: str,
-    purchased_n: int = 5,
-    all_n: int = 5,
+    purchased_n: int = COHORT_DEFAULT_PURCHASED_N,
+    all_n: int = COHORT_DEFAULT_ALL_N,
+    *,
+    min_duration_ms: int = COHORT_MIN_DURATION_MS,
+    url_contains: str = COHORT_URL_CONTAINS,
 ) -> dict:
     now = int(time.time() * 1000)
-    sessions = sample_cohort_rows(conn, pool_key, purchased_n, all_n)
+    sessions = sample_cohort_rows(
+        conn,
+        pool_key,
+        purchased_n,
+        all_n,
+        min_duration_ms=min_duration_ms,
+        url_contains=url_contains,
+    )
     stamp = time.strftime("%b %-d, %H:%M", time.localtime(now / 1000))
+    page = (url_contains or "").strip() or "all pages"
+    min_s = max(0, int(min_duration_ms)) // 1000
     return {
         "id": f"cohort-{now}",
         # Auto label; renameable once the user decides a cohort is worth keeping.
-        "label": f"Sample {purchased_n}+{all_n} · {stamp}",
+        "label": f"{purchased_n}+{all_n} · {page} · ≥{min_s}s · {stamp}",
         "created_at": now,
         "updated_at": now,
         "status": "queued",
         "purchased_n": purchased_n,
         "all_n": all_n,
+        "min_duration_ms": int(min_duration_ms),
+        "url_contains": (url_contains or "").strip(),
         "sessions": sessions,
     }
 
@@ -1362,14 +1411,22 @@ def prompt_digest(digest: dict) -> dict:
     }
 
 
-async def call_gemini(digest: dict, frames: list) -> str:
-    from google import genai
+def session_chunk_names(session_dir: Path) -> list:
+    if not session_dir.is_dir():
+        return []
+    return sorted(
+        c.name for c in session_dir.iterdir() if c.is_file() and SAFE_CHUNK.match(c.name)
+    )
+
+
+def _usable_frames(frames: list) -> list:
+    return [f for f in frames if Path(f.get("file") or "").is_file()]
+
+
+def _session_model_parts(digest: dict, frames: list):
     from google.genai import types
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
-
-    usable = [f for f in frames if Path(f["file"]).is_file()]
-
+    usable = _usable_frames(frames)
     parts = [
         types.Part.from_text(
             text="Measured digest for this session:\n\n"
@@ -1390,25 +1447,258 @@ async def call_gemini(digest: dict, frames: list) -> str:
                 data=Path(frame["file"]).read_bytes(), mime_type="image/jpeg"
             )
         )
+    return parts
 
+
+def _session_model_config():
+    from google.genai import types
+
+    return types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        # max_output_tokens covers thinking as well as the answer, and a
+        # long frame sequence makes the model think hard: at 1400 with no
+        # budget, thinking ate all but ~50 tokens and the analysis came
+        # back cut off mid-sentence.
+        max_output_tokens=4000,
+        thinking_config=types.ThinkingConfig(thinking_budget=1024),
+        temperature=0.3,
+    )
+
+
+def build_inlined_session_request(session_id: str, digest: dict, frames: list):
+    """One Batch API request for a session write-up, keyed by session_id."""
+    from google.genai import types
+
+    return types.InlinedRequest(
+        contents=[types.Content(role="user", parts=_session_model_parts(digest, frames))],
+        metadata={"session_id": session_id},
+        config=_session_model_config(),
+    )
+
+
+def write_analysis_result(
+    session_dir: Path,
+    text: str,
+    *,
+    frame_count: int = 0,
+    warnings: Optional[list] = None,
+    model: Optional[str] = None,
+) -> dict:
+    analysis_path, _ = analysis_paths(session_dir)
+    result = {
+        "status": "done",
+        "text": text,
+        "model": model or GEMINI_MODEL,
+        "created_at": int(time.time() * 1000),
+        "frame_count": frame_count,
+        "warnings": warnings or [],
+    }
+    analysis_path.write_text(json.dumps(result))
+    clear_job(session_dir)
+    return result
+
+
+async def call_gemini(digest: dict, frames: list) -> str:
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
     response = await client.aio.models.generate_content(
         model=GEMINI_MODEL,
-        contents=[types.Content(role="user", parts=parts)],
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            # max_output_tokens covers thinking as well as the answer, and a
-            # long frame sequence makes the model think hard: at 1400 with no
-            # budget, thinking ate all but ~50 tokens and the analysis came
-            # back cut off mid-sentence.
-            max_output_tokens=4000,
-            thinking_config=types.ThinkingConfig(thinking_budget=1024),
-            temperature=0.3,
-        ),
+        contents=[types.Content(role="user", parts=_session_model_parts(digest, frames))],
+        config=_session_model_config(),
     )
     text = (response.text or "").strip()
     if not text:
         raise RuntimeError("Gemini returned an empty analysis")
     return text
+
+
+def _estimate_inlined_bytes(requests: list) -> int:
+    total = 0
+    for req in requests:
+        dumped = req.model_dump(mode="json", exclude_none=True)
+        total += len(json.dumps(dumped))
+    return total
+
+
+async def submit_gemini_batch(requests: list, *, display_name: str) -> str:
+    """Create a Batch job; returns the job resource name."""
+    from google import genai
+    from google.genai import types
+
+    if not requests:
+        raise ValueError("batch requires at least one request")
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    config = types.CreateBatchJobConfig(display_name=display_name[:128])
+    size = _estimate_inlined_bytes(requests)
+    if size <= ANALYZE_BATCH_INLINE_MAX_BYTES:
+        job = await client.aio.batches.create(
+            model=GEMINI_MODEL, src=requests, config=config
+        )
+    else:
+        # JSONL + Files API — each line is {key, request} for result matching.
+        lines = []
+        for req in requests:
+            payload = req.model_dump(mode="json", exclude_none=True)
+            key = (payload.pop("metadata", None) or {}).get("session_id") or f"r{len(lines)}"
+            lines.append(json.dumps({"key": key, "request": payload}, separators=(",", ":")))
+        tmp = Path(os.environ.get("TMPDIR") or "/tmp") / f"capture-batch-{int(time.time() * 1000)}.jsonl"
+        try:
+            tmp.write_text("\n".join(lines) + "\n")
+            uploaded = await client.aio.files.upload(
+                file=str(tmp),
+                config=types.UploadFileConfig(mime_type="jsonl"),
+            )
+        finally:
+            tmp.unlink(missing_ok=True)
+        job = await client.aio.batches.create(
+            model=GEMINI_MODEL,
+            src=types.BatchJobSource(file_name=uploaded.name),
+            config=config,
+        )
+    if not job.name:
+        raise RuntimeError("Gemini batch create returned no job name")
+    return job.name
+
+
+def _batch_state_name(job) -> str:
+    state = getattr(job, "state", None)
+    if state is None:
+        return ""
+    return getattr(state, "name", None) or str(state)
+
+
+def _batch_response_text(response) -> str:
+    text = (getattr(response, "text", None) or "").strip()
+    if text:
+        return text
+    # Some SDK shapes only expose candidates/parts.
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        parts = (candidates[0].content.parts if candidates else []) or []
+        chunks = [getattr(p, "text", "") for p in parts if getattr(p, "text", None)]
+        return "\n".join(chunks).strip()
+    except Exception:
+        return ""
+
+
+def parse_batch_results(job) -> dict:
+    """Map session_id → {"text": str} or {"error": str} from a finished batch job."""
+    out: dict = {}
+    dest = getattr(job, "dest", None)
+    inlined = getattr(dest, "inlined_responses", None) if dest else None
+    if inlined:
+        for item in inlined:
+            meta = getattr(item, "metadata", None) or {}
+            sid = meta.get("session_id") if isinstance(meta, dict) else None
+            if not sid:
+                continue
+            err = getattr(item, "error", None)
+            if err:
+                out[sid] = {
+                    "error": getattr(err, "message", None) or str(err) or "batch request failed"
+                }
+                continue
+            text = _batch_response_text(getattr(item, "response", None))
+            if text:
+                out[sid] = {"text": text}
+            else:
+                out[sid] = {"error": "Gemini returned an empty analysis"}
+        return out
+
+    # File-output jobs: download JSONL and match on `key`.
+    file_name = getattr(dest, "file_name", None) if dest else None
+    if not file_name:
+        return out
+    from google import genai
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    raw = client.files.download(file=file_name)
+    if isinstance(raw, bytes):
+        content = raw.decode("utf-8", "replace")
+    else:
+        content = str(raw)
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        sid = row.get("key")
+        if not sid:
+            continue
+        if row.get("error"):
+            err = row["error"]
+            out[sid] = {
+                "error": err.get("message") if isinstance(err, dict) else str(err)
+            }
+            continue
+        response = row.get("response") or {}
+        text = ""
+        if isinstance(response, dict):
+            text = (response.get("text") or "").strip()
+            if not text:
+                try:
+                    parts = response["candidates"][0]["content"]["parts"]
+                    text = "\n".join(
+                        p.get("text", "") for p in parts if isinstance(p, dict)
+                    ).strip()
+                except Exception:
+                    text = ""
+        if text:
+            out[sid] = {"text": text}
+        else:
+            out[sid] = {"error": "Gemini returned an empty analysis"}
+    return out
+
+
+async def wait_gemini_batch(job_name: str, *, poll_s: Optional[float] = None):
+    """Poll until the batch leaves a non-terminal state; return the final job."""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    interval = ANALYZE_BATCH_POLL_S if poll_s is None else poll_s
+    terminal = {
+        types.JobState.JOB_STATE_SUCCEEDED,
+        types.JobState.JOB_STATE_FAILED,
+        types.JobState.JOB_STATE_CANCELLED,
+        types.JobState.JOB_STATE_EXPIRED,
+        types.JobState.JOB_STATE_PARTIALLY_SUCCEEDED,
+    }
+    while True:
+        job = await client.aio.batches.get(name=job_name)
+        state = getattr(job, "state", None)
+        if state in terminal or _batch_state_name(job) in {
+            s.name for s in terminal
+        }:
+            return job
+        await asyncio.sleep(max(1.0, interval))
+
+
+async def extract_session_digest(
+    session_dir: Path, chunk_names: list, *, force: bool = False
+) -> dict:
+    """Rebuild frames for a session. Returns the extractor digest."""
+    if not force:
+        cached = read_analysis(session_dir)
+        if cached:
+            return {"cached": True, "analysis": cached}
+
+    _, out_dir = analysis_paths(session_dir)
+    shutil.rmtree(out_dir, ignore_errors=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    extract_gate, _ = _gates()
+    async with extract_gate:
+        digest = await run_extractor(session_dir, out_dir, chunk_names)
+    if digest.get("error"):
+        raise RuntimeError(digest["error"])
+    return digest
 
 
 def _parse_json_object(text: str) -> dict:
@@ -1434,31 +1724,263 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
         if cached:
             return cached
 
-    analysis_path, out_dir = analysis_paths(session_dir)
-    shutil.rmtree(out_dir, ignore_errors=True)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    extract_gate, model_gate = _gates()
-
-    async with extract_gate:
-        digest = await run_extractor(session_dir, out_dir, chunk_names)
-    if digest.get("error"):
-        raise RuntimeError(digest["error"])
-
+    digest = await extract_session_digest(session_dir, chunk_names, force=True)
+    _, model_gate = _gates()
     async with model_gate:
         text = await call_gemini(digest, digest.get("frames") or [])
+    return write_analysis_result(
+        session_dir,
+        text,
+        frame_count=len(digest.get("frames") or []),
+        warnings=digest.get("warnings") or [],
+    )
 
-    result = {
-        "status": "done",
-        "text": text,
-        "model": GEMINI_MODEL,
-        "created_at": int(time.time() * 1000),
-        "frame_count": len(digest.get("frames") or []),
-        "warnings": digest.get("warnings") or [],
-    }
-    analysis_path.write_text(json.dumps(result))
-    clear_job(session_dir)
-    return result
+
+def load_session_digest(session_dir: Path) -> Optional[dict]:
+    """Read extractor digest.json if a prior reconstruction left one on disk."""
+    path = session_dir / ANALYSIS_DIR / "digest.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+async def resume_cohort_batch(pool: Path, cohort: dict) -> dict:
+    """Finish a cohort that already has a Gemini Batch job name persisted."""
+    batch = cohort.get("batch") or {}
+    job_name = batch.get("name")
+    if not job_name:
+        return enrich_cohort_status(pool, cohort)
+
+    prepared = []
+    wanted = set(batch.get("session_ids") or [])
+    for entry in cohort.get("sessions") or []:
+        sid = entry.get("session_id")
+        if wanted and sid not in wanted:
+            continue
+        session_dir = pool / sid
+        if read_analysis(session_dir):
+            entry["status"] = "done"
+            entry["analysis"] = ANALYSIS_FILE
+            entry.pop("error", None)
+            continue
+        digest = load_session_digest(session_dir) or {"frames": [], "warnings": []}
+        entry["status"] = "running"
+        write_job(session_dir, "running")
+        prepared.append((entry, digest))
+    write_cohort(pool, cohort)
+
+    if prepared:
+        await apply_cohort_batch(pool, cohort, prepared, job_name=job_name)
+    live = read_cohort(pool, cohort["id"]) or cohort
+    live.pop("batch", None)
+    final = enrich_cohort_status(pool, live)
+    write_cohort(pool, final)
+    return final
+
+
+async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> dict:
+    """Extract cohort sessions, then analyze via Batch (or sync fallback).
+
+    Mutates and persists the cohort as work progresses. Returns the enriched
+    final cohort dict. Never deletes or overwrites other cohorts.
+    """
+    if (cohort.get("batch") or {}).get("name") and not force:
+        return await resume_cohort_batch(pool, cohort)
+
+    cohort = {**cohort, "status": "running"}
+    cohort.pop("batch", None)
+    write_cohort(pool, cohort)
+
+    pending_entries = []
+    for entry in cohort.get("sessions") or []:
+        session_dir = pool / entry["session_id"]
+        if not force and read_analysis(session_dir):
+            entry["status"] = "done"
+            entry["analysis"] = ANALYSIS_FILE
+            entry.pop("error", None)
+            continue
+        entry["status"] = "queued"
+        entry.pop("error", None)
+        pending_entries.append(entry)
+    write_cohort(pool, cohort)
+
+    if not pending_entries:
+        return enrich_cohort_status(pool, read_cohort(pool, cohort["id"]) or cohort)
+
+    prepared = []  # (entry, digest)
+
+    async def extract_one(entry: dict) -> None:
+        session_dir = pool / entry["session_id"]
+        entry["status"] = "running"
+        write_job(session_dir, "running")
+        write_cohort(pool, cohort)
+        try:
+            chunks = session_chunk_names(session_dir)
+            if not chunks:
+                raise RuntimeError("no chunks to analyze")
+            if force:
+                clear_analysis(session_dir)
+            digest = await extract_session_digest(session_dir, chunks, force=True)
+            prepared.append((entry, digest))
+        except Exception as exc:
+            entry["status"] = "error"
+            entry["error"] = str(exc) or "analysis failed"
+            write_job(session_dir, "error", error=entry["error"])
+            write_cohort(pool, cohort)
+
+    await asyncio.gather(*(extract_one(e) for e in pending_entries), return_exceptions=True)
+
+    if not prepared:
+        return enrich_cohort_status(pool, read_cohort(pool, cohort["id"]) or cohort)
+
+    use_batch = ANALYZE_BATCH and ANALYSIS_ENABLED
+    if use_batch:
+        try:
+            requests = [
+                build_inlined_session_request(
+                    entry["session_id"], digest, digest.get("frames") or []
+                )
+                for entry, digest in prepared
+            ]
+            job_name = await submit_gemini_batch(
+                requests, display_name=f"capture-{cohort['id']}"
+            )
+            cohort["batch"] = {
+                "name": job_name,
+                "submitted_at": int(time.time() * 1000),
+                "session_ids": [e["session_id"] for e, _ in prepared],
+            }
+            write_cohort(pool, cohort)
+            await apply_cohort_batch(pool, cohort, prepared, job_name=job_name)
+        except Exception as exc:
+            # Fall back to interactive calls so a Batch outage does not strand
+            # an already-extracted cohort.
+            print(f"cohort batch failed ({exc}); falling back to sync Gemini")
+            cohort.pop("batch", None)
+            write_cohort(pool, cohort)
+            await _cohort_sync_model(pool, cohort, prepared)
+    else:
+        await _cohort_sync_model(pool, cohort, prepared)
+
+    live = read_cohort(pool, cohort["id"]) or cohort
+    live.pop("batch", None)
+    final = enrich_cohort_status(pool, live)
+    write_cohort(pool, final)
+    return final
+
+
+async def apply_cohort_batch(
+    pool: Path,
+    cohort: dict,
+    prepared: list,
+    *,
+    job_name: Optional[str] = None,
+) -> None:
+    """Wait for a batch job and write per-session analysis.json results."""
+    name = job_name or (cohort.get("batch") or {}).get("name")
+    if not name:
+        raise RuntimeError("cohort has no batch job to apply")
+
+    by_id = {entry["session_id"]: (entry, digest) for entry, digest in prepared}
+    job = await wait_gemini_batch(name)
+    state = _batch_state_name(job)
+    if state in ("JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"):
+        err = getattr(job, "error", None)
+        message = getattr(err, "message", None) if err else None
+        message = message or f"Gemini batch {state}"
+        for entry, _ in prepared:
+            entry["status"] = "error"
+            entry["error"] = message
+            write_job(pool / entry["session_id"], "error", error=message)
+        write_cohort(pool, cohort)
+        return
+
+    results = parse_batch_results(job)
+    for sid, (entry, digest) in by_id.items():
+        session_dir = pool / sid
+        hit = results.get(sid)
+        if not hit:
+            entry["status"] = "error"
+            entry["error"] = "missing from batch results"
+            write_job(session_dir, "error", error=entry["error"])
+        elif hit.get("error"):
+            entry["status"] = "error"
+            entry["error"] = hit["error"]
+            write_job(session_dir, "error", error=entry["error"])
+        else:
+            write_analysis_result(
+                session_dir,
+                hit["text"],
+                frame_count=len(digest.get("frames") or []),
+                warnings=digest.get("warnings") or [],
+            )
+            entry["status"] = "done"
+            entry["analysis"] = ANALYSIS_FILE
+            entry.pop("error", None)
+        write_cohort(pool, cohort)
+
+
+async def _cohort_sync_model(pool: Path, cohort: dict, prepared: list) -> None:
+    """Interactive Gemini fallback used when Batch is off or unavailable."""
+
+    async def one(entry: dict, digest: dict) -> None:
+        session_dir = pool / entry["session_id"]
+        entry["status"] = "running"
+        write_job(session_dir, "running")
+        write_cohort(pool, cohort)
+        try:
+            _, model_gate = _gates()
+            async with model_gate:
+                text = await call_gemini(digest, digest.get("frames") or [])
+            write_analysis_result(
+                session_dir,
+                text,
+                frame_count=len(digest.get("frames") or []),
+                warnings=digest.get("warnings") or [],
+            )
+            entry["status"] = "done"
+            entry["analysis"] = ANALYSIS_FILE
+            entry.pop("error", None)
+        except Exception as exc:
+            entry["status"] = "error"
+            entry["error"] = str(exc) or "analysis failed"
+            write_job(session_dir, "error", error=entry["error"])
+        write_cohort(pool, cohort)
+
+    await asyncio.gather(
+        *(one(entry, digest) for entry, digest in prepared),
+        return_exceptions=True,
+    )
+
+
+def iter_session_pools(data_root: Path) -> list:
+    """Session directories that may own a cohorts/ sibling."""
+    pools = []
+    legacy = data_root / "sessions"
+    if legacy.is_dir():
+        pools.append(legacy)
+    projects = data_root / "projects"
+    if projects.is_dir():
+        for path in projects.iterdir():
+            sessions = path / "sessions"
+            if sessions.is_dir():
+                pools.append(sessions)
+    return pools
+
+
+def cohorts_needing_batch_resume(data_root: Path) -> list:
+    """(pool, cohort) pairs with an in-flight Batch job name on disk."""
+    out = []
+    for pool in iter_session_pools(data_root):
+        for cohort in list_cohorts(pool):
+            batch = cohort.get("batch") or {}
+            if cohort.get("status") == "running" and batch.get("name"):
+                out.append((pool, cohort))
+    return out
 
 
 def _cli_data_root() -> Path:
@@ -1472,7 +1994,16 @@ def _cli_pool(project: Optional[str]) -> Path:
     return root / "projects" / project / "sessions"
 
 
-async def _cli_run_cohort(pool: Path, pool_key: str, purchased_n: int, all_n: int, force: bool) -> int:
+async def _cli_run_cohort(
+    pool: Path,
+    pool_key: str,
+    purchased_n: int,
+    all_n: int,
+    force: bool,
+    *,
+    min_duration_ms: int,
+    url_contains: str,
+) -> int:
     index = _cli_data_root() / "index.db"
     if not index.is_file():
         print(f"no session index at {index} — start the server once to build it")
@@ -1486,7 +2017,14 @@ async def _cli_run_cohort(pool: Path, pool_key: str, purchased_n: int, all_n: in
 
     conn = sqlite3.connect(index)
     try:
-        cohort = build_cohort(conn, pool_key, purchased_n, all_n)
+        cohort = build_cohort(
+            conn,
+            pool_key,
+            purchased_n,
+            all_n,
+            min_duration_ms=min_duration_ms,
+            url_contains=url_contains,
+        )
     finally:
         conn.close()
 
@@ -1495,44 +2033,13 @@ async def _cli_run_cohort(pool: Path, pool_key: str, purchased_n: int, all_n: in
         write_cohort(pool, cohort)
         return 1
 
-    write_cohort(pool, {**cohort, "status": "running"})
+    write_cohort(pool, cohort)
     print(
         f"{cohort['label']}: {len(cohort['sessions'])} session(s) → "
         f"{cohort_path(pool, cohort['id'])}"
+        f"{' [batch]' if ANALYZE_BATCH else ' [sync]'}"
     )
-
-    for entry in cohort["sessions"]:
-        session_dir = pool / entry["session_id"]
-        chunk_names = sorted(
-            (c.name for c in session_dir.iterdir() if c.is_file() and SAFE_CHUNK.match(c.name))
-        )
-        if not chunk_names:
-            entry["status"] = "error"
-            entry["error"] = "no chunks to analyze"
-            write_cohort(pool, cohort)
-            print(f"  {entry['filter']:9} {entry['session_id'][:8]}… error (no chunks)")
-            continue
-
-        entry["status"] = "running"
-        write_cohort(pool, cohort)
-        print(f"  {entry['filter']:9} {entry['session_id'][:8]}… running", flush=True)
-        try:
-            if force:
-                clear_analysis(session_dir)
-            await analyze_session(session_dir, chunk_names, force=force)
-            entry["status"] = "done"
-            entry["analysis"] = ANALYSIS_FILE
-            entry.pop("error", None)
-            print(f"  {entry['filter']:9} {entry['session_id'][:8]}… done")
-        except Exception as exc:
-            entry["status"] = "error"
-            entry["error"] = str(exc)
-            write_job(session_dir, "error", error=str(exc))
-            print(f"  {entry['filter']:9} {entry['session_id'][:8]}… error ({exc})")
-        write_cohort(pool, cohort)
-
-    final = enrich_cohort_status(pool, cohort)
-    write_cohort(pool, final)
+    final = await run_cohort_job(pool, cohort, force=force)
     prog = final["progress"]
     print(
         f"{final['status']}: {prog['done']} done · {prog['error']} error · "
@@ -1546,8 +2053,30 @@ def main(argv: Optional[list] = None) -> int:
     sub = parser.add_subparsers(dest="cmd")
 
     cohort_p = sub.add_parser("cohort", help="Sample purchased+all sessions and analyze them")
-    cohort_p.add_argument("--purchased", type=int, default=5, help="purchased sample size (default 5)")
-    cohort_p.add_argument("--all", type=int, default=5, dest="all_n", help="all/non-purchase sample size (default 5)")
+    cohort_p.add_argument(
+        "--purchased",
+        type=int,
+        default=COHORT_DEFAULT_PURCHASED_N,
+        help=f"purchased sample size (default {COHORT_DEFAULT_PURCHASED_N})",
+    )
+    cohort_p.add_argument(
+        "--all",
+        type=int,
+        default=COHORT_DEFAULT_ALL_N,
+        dest="all_n",
+        help=f"all/non-purchase sample size (default {COHORT_DEFAULT_ALL_N})",
+    )
+    cohort_p.add_argument(
+        "--min-duration-ms",
+        type=int,
+        default=COHORT_MIN_DURATION_MS,
+        help=f"minimum last_seen-first_seen (default {COHORT_MIN_DURATION_MS})",
+    )
+    cohort_p.add_argument(
+        "--url-contains",
+        default=COHORT_URL_CONTAINS,
+        help=f"require this path fragment in url (default {COHORT_URL_CONTAINS!r}; empty = any)",
+    )
     cohort_p.add_argument("--project", default="", help="project token (default: no-project pool)")
     cohort_p.add_argument("--force", action="store_true", help="re-analyze even when analysis.json exists")
 
@@ -1559,7 +2088,15 @@ def main(argv: Optional[list] = None) -> int:
         pool = _cli_pool(args.project or None)
         pool_key = "" if not args.project else args.project
         return asyncio.run(
-            _cli_run_cohort(pool, pool_key, args.purchased, args.all_n, args.force)
+            _cli_run_cohort(
+                pool,
+                pool_key,
+                args.purchased,
+                args.all_n,
+                args.force,
+                min_duration_ms=args.min_duration_ms,
+                url_contains=args.url_contains,
+            )
         )
 
     parser.print_help()
