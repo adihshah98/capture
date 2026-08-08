@@ -22,7 +22,7 @@ class TestCohortBatch(unittest.TestCase):
             "ANALYSIS_ENABLED": analyze.ANALYSIS_ENABLED,
             "ANALYZE_BATCH": analyze.ANALYZE_BATCH,
             "run_extractor": analyze.run_extractor,
-            "submit_gemini_batch": analyze.submit_gemini_batch,
+            "submit_prepared_gemini_batch": analyze.submit_prepared_gemini_batch,
             "wait_gemini_batch": analyze.wait_gemini_batch,
             "parse_batch_results": analyze.parse_batch_results,
             "call_gemini": analyze.call_gemini,
@@ -69,8 +69,8 @@ class TestCohortBatch(unittest.TestCase):
             (out_dir / "digest.json").write_text(json.dumps(digest))
             return digest
 
-        async def fake_submit(requests, *, display_name):
-            self.assertEqual(len(requests), 2)
+        async def fake_submit(prepared, *, display_name, work_dir=None):
+            self.assertEqual(len(prepared), 2)
             self.assertTrue(display_name.startswith("capture-"))
             return "batches/test-job"
 
@@ -89,7 +89,7 @@ class TestCohortBatch(unittest.TestCase):
             }
 
         analyze.run_extractor = fake_extract
-        analyze.submit_gemini_batch = fake_submit
+        analyze.submit_prepared_gemini_batch = fake_submit
         analyze.wait_gemini_batch = fake_wait
         analyze.parse_batch_results = fake_parse
 

@@ -1572,7 +1572,11 @@ def _estimate_inlined_bytes(requests: list) -> int:
 
 
 async def submit_gemini_batch(requests: list, *, display_name: str) -> str:
-    """Create a Batch job; returns the job resource name."""
+    """Create a Batch job from already-built InlinedRequest objects.
+
+    Prefer submit_prepared_gemini_batch for cohorts: building every request up
+    front keeps all frame bytes in RAM and OOM'd a 2GB box at n=100.
+    """
     from google import genai
     from google.genai import types
 
@@ -1588,14 +1592,17 @@ async def submit_gemini_batch(requests: list, *, display_name: str) -> str:
         )
     else:
         # JSONL + Files API — each line is {key, request} for result matching.
-        lines = []
-        for req in requests:
-            payload = req.model_dump(mode="json", exclude_none=True)
-            key = (payload.pop("metadata", None) or {}).get("session_id") or f"r{len(lines)}"
-            lines.append(json.dumps({"key": key, "request": payload}, separators=(",", ":")))
-        tmp = Path(os.environ.get("TMPDIR") or "/tmp") / f"capture-batch-{int(time.time() * 1000)}.jsonl"
+        # Write on disk (not tmpfs /tmp) so the payload does not compete for RAM.
+        tmp = _batch_jsonl_path()
         try:
-            tmp.write_text("\n".join(lines) + "\n")
+            with tmp.open("w") as out:
+                for req in requests:
+                    payload = req.model_dump(mode="json", exclude_none=True)
+                    key = (payload.pop("metadata", None) or {}).get("session_id") or f"r{out.tell()}"
+                    out.write(
+                        json.dumps({"key": key, "request": payload}, separators=(",", ":"))
+                    )
+                    out.write("\n")
             uploaded = await client.aio.files.upload(
                 file=str(tmp),
                 config=types.UploadFileConfig(mime_type="jsonl"),
@@ -1607,6 +1614,66 @@ async def submit_gemini_batch(requests: list, *, display_name: str) -> str:
             src=types.BatchJobSource(file_name=uploaded.name),
             config=config,
         )
+    if not job.name:
+        raise RuntimeError("Gemini batch create returned no job name")
+    return job.name
+
+
+def _batch_jsonl_path(work_dir: Optional[Path] = None) -> Path:
+    """Disk-backed temp path for batch JSONL (avoid tmpfs /tmp on small boxes)."""
+    base = work_dir if work_dir is not None else Path("/var/tmp")
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"capture-batch-{int(time.time() * 1000)}.jsonl"
+
+
+async def submit_prepared_gemini_batch(
+    prepared: list,
+    *,
+    display_name: str,
+    work_dir: Optional[Path] = None,
+) -> str:
+    """Create a Batch job from (entry, digest) pairs, one session at a time.
+
+    Streams JSONL to disk so peak RAM is roughly one session's frames, not the
+    whole cohort. Always uses the Files API — at cohort scale the inline path
+    is both oversized and an OOM hazard while estimating size.
+    """
+    from google import genai
+    from google.genai import types
+
+    if not prepared:
+        raise ValueError("batch requires at least one request")
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    config = types.CreateBatchJobConfig(display_name=display_name[:128])
+    tmp = _batch_jsonl_path(work_dir)
+    try:
+        with tmp.open("w") as out:
+            for entry, digest in prepared:
+                sid = entry["session_id"]
+                req = build_inlined_session_request(
+                    sid, digest, digest.get("frames") or []
+                )
+                payload = req.model_dump(mode="json", exclude_none=True)
+                del req
+                key = (payload.pop("metadata", None) or {}).get("session_id") or sid
+                out.write(
+                    json.dumps({"key": key, "request": payload}, separators=(",", ":"))
+                )
+                out.write("\n")
+                del payload
+        uploaded = await client.aio.files.upload(
+            file=str(tmp),
+            config=types.UploadFileConfig(mime_type="jsonl"),
+        )
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    job = await client.aio.batches.create(
+        model=GEMINI_MODEL,
+        src=types.BatchJobSource(file_name=uploaded.name),
+        config=config,
+    )
     if not job.name:
         raise RuntimeError("Gemini batch create returned no job name")
     return job.name
@@ -1903,6 +1970,14 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
             write_job(session_dir, "running")
             write_cohort(pool, cohort)
             try:
+                # Reuse a prior reconstruction unless the caller asked to redo.
+                # Without this, a retry after a Batch OOM would wipe digests and
+                # spend another hour in Playwright before talking to Gemini.
+                if not force:
+                    digest = load_session_digest(session_dir)
+                    if digest and _usable_frames(digest.get("frames") or []):
+                        prepared.append((entry, digest))
+                        return
                 chunks = session_chunk_names(session_dir)
                 if not chunks:
                     raise RuntimeError("no chunks to analyze")
@@ -1926,14 +2001,10 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
         use_batch = ANALYZE_BATCH and ANALYSIS_ENABLED
         if use_batch:
             try:
-                requests = [
-                    build_inlined_session_request(
-                        entry["session_id"], digest, digest.get("frames") or []
-                    )
-                    for entry, digest in prepared
-                ]
-                job_name = await submit_gemini_batch(
-                    requests, display_name=f"capture-{cohort['id']}"
+                job_name = await submit_prepared_gemini_batch(
+                    prepared,
+                    display_name=f"capture-{cohort['id']}",
+                    work_dir=cohorts_dir(pool),
                 )
                 cohort["batch"] = {
                     "name": job_name,
