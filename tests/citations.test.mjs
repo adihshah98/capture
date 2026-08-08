@@ -46,6 +46,35 @@ test('every citation in a long list is linked', () => {
   assert.match(out, /data-cite-sid="sid-d"/);
 });
 
+// The model drifts around the format the prompt asks for. Each of these was
+// rendering as dead text while its neighbours linked — the "some have a link
+// and some don't" report.
+const DRIFT = [
+  ['a linking word before the stamp', 'S2 at [00:08]', 8000],
+  ['an @ before the stamp', 'S2 @ [00:08]', 8000],
+  ['parentheses instead of brackets', 'S2 (00:12)', 12000],
+  ['no space at all', 'S2[00:46]', 46000],
+  ['a single-digit minute', 'S2 [1:09]', 69000],
+  ['fractional seconds', 'S2 [00:17.5]', 17500],
+  ['a hyphen range seeks to the start', 'S2 [00:05-00:12]', 5000],
+  ['an en-dash range seeks to the start', 'S2 [00:05 – 00:12]', 5000],
+];
+
+for (const [name, text, ms] of DRIFT) {
+  test(`links ${name}`, () => {
+    const out = linkCitations(text, IDS, escapeAttr);
+    assert.match(out, /class="cut-cite"/, text);
+    assert.match(out, new RegExp(`data-cite-t="${ms}"`), text);
+    assert.match(out, /data-cite-sid="sid-b"/);
+  });
+}
+
+test('a range keeps its full text in the link', () => {
+  // Seeking to the start must not visibly truncate what the model wrote.
+  const out = linkCitations('S2 [00:05-00:12]', IDS, escapeAttr);
+  assert.match(out, />S2 \[00:05-00:12\]</);
+});
+
 test('an ordinal past the group is left as plain text', () => {
   // The bug this guards: S44 cited against a 4-session cut.
   const out = linkCitations('see S44 [00:12]', IDS, escapeAttr);
