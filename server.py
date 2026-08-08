@@ -349,7 +349,15 @@ async def ingest(
     device = index_device(session_dir, events)
     size = chunk_path.stat().st_size
     first_ts, last_ts = event_span(events) or (now, now)
-    index_ingest(pool, session_id, first_ts, last_ts, size, meta, interactions, device)
+    state_path = session_dir / WINDOW_STATE_FILE
+    try:
+        states = json.loads(state_path.read_text())
+    except Exception:
+        states = {}
+    window_key = str(payload.get("window_id") or "default")
+    active_ts = last_active_scan(events, states.setdefault(window_key, {}))
+    state_path.write_text(json.dumps(states))
+    index_ingest(pool, session_id, first_ts, last_ts, active_ts or 0, size, meta, interactions, device)
     _pool_bytes[pool] = pool_bytes(pool) + size
 
     return {"status": "ok", "stored": len(events)}
@@ -524,6 +532,39 @@ def chunk_timestamp(path: Path) -> int:
     except ValueError:
         return 0
 
+ACTIVE_SOURCES = {1, 2, 3, 4, 5, 6, 7, 12}
+SNAPSHOT_META_WINDOW_MS = 500
+WINDOW_STATE_FILE = "window-state.json"
+
+def last_active_scan(events: list, state: dict) -> Optional[int]:
+    """Mirror the player's buildSegments activity rules; `state` carries the
+    per-window href/nav position across chunks."""
+    nav = state.get("nav", -(10**15))
+    last = None
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        ts = e.get("timestamp")
+        if not isinstance(ts, (int, float)):
+            continue
+        kind = e.get("type")
+        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        active = False
+        if kind == 4:
+            href = data.get("href")
+            if href != state.get("href"):
+                state["href"] = href
+                nav = ts
+                active = True
+        elif kind == 2:
+            active = ts - nav <= SNAPSHOT_META_WINDOW_MS
+        elif kind == 3:
+            active = data.get("source") in ACTIVE_SOURCES
+        if active:
+            last = ts
+    state["nav"] = nav
+    return int(last) if last is not None else None
+
 def event_span(events: list) -> Optional[tuple]:
     ts = [
         e["timestamp"]
@@ -583,6 +624,8 @@ def ensure_index_schema(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
     if "attribution" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN attribution TEXT")
+    if "last_active" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN last_active INTEGER NOT NULL DEFAULT 0")
 
 def index_conn() -> sqlite3.Connection:
     global _index_conn
@@ -619,19 +662,20 @@ def index_conn() -> sqlite3.Connection:
 def pool_key(pool: Path) -> str:
     return "" if pool == DATA_DIR else pool.parent.name
 
-def index_ingest(pool, session_id, first_ts, last_ts, size, meta, interactions, device) -> None:
+def index_ingest(pool, session_id, first_ts, last_ts, active_ts, size, meta, interactions, device) -> None:
     attribution = parse_attribution(meta.get("url"))
     with _index_lock:
         conn = index_conn()
         conn.execute(
             """
             INSERT INTO sessions
-                (pool, session_id, first_seen, last_seen, chunk_count, bytes,
+                (pool, session_id, first_seen, last_seen, last_active, chunk_count, bytes,
                  visitor_id, url, interactions, device, attribution)
-            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (pool, session_id) DO UPDATE SET
                 first_seen = min(first_seen, excluded.first_seen),
                 last_seen = max(last_seen, excluded.last_seen),
+                last_active = max(coalesce(last_active, 0), excluded.last_active),
                 chunk_count = chunk_count + 1,
                 bytes = bytes + excluded.bytes,
                 visitor_id = coalesce(visitor_id, excluded.visitor_id),
@@ -641,7 +685,7 @@ def index_ingest(pool, session_id, first_ts, last_ts, size, meta, interactions, 
                 attribution = coalesce(attribution, excluded.attribution)
             """,
             (
-                pool_key(pool), session_id, first_ts, last_ts, size,
+                pool_key(pool), session_id, first_ts, last_ts, active_ts, size,
                 meta.get("visitor_id"), meta.get("url"),
                 json.dumps(interactions) if interactions else None,
                 json.dumps(device) if device else None,
@@ -676,18 +720,28 @@ def session_info(entry: Path) -> Optional[dict]:
     if not chunks:
         return None
     first = last = None
+    active = 0
+    states = {}
     for chunk in chunks:
         try:
-            span = event_span(json.loads(chunk.read_text()).get("events") or [])
+            data = json.loads(chunk.read_text())
         except Exception:
-            span = None
-        if span:
-            first = span[0] if first is None else min(first, span[0])
-            last = span[1] if last is None else max(last, span[1])
+            continue
+        events = data.get("events") or []
+        span = event_span(events)
+        if not span:
+            continue
+        first = span[0] if first is None else min(first, span[0])
+        last = span[1] if last is None else max(last, span[1])
+        window_key = str(data.get("window_id") or "default")
+        chunk_active = last_active_scan(events, states.setdefault(window_key, {}))
+        if chunk_active:
+            active = max(active, chunk_active)
     info = {
         "session_id": entry.name,
         "first_seen": first if first is not None else chunk_timestamp(chunks[0]),
         "last_seen": last if last is not None else chunk_timestamp(chunks[-1]),
+        "last_active": active,
         "chunk_count": len(chunks),
         "bytes": sum(c.stat().st_size for c in chunks),
     }
@@ -727,17 +781,35 @@ def rebuild_index(pool: Path) -> int:
     key = pool_key(pool)
     with _index_lock:
         conn = index_conn()
-        conn.execute("DELETE FROM sessions WHERE pool = ?", (key,))
+        keep = {i["session_id"] for i in infos}
+        stale = [
+            (key, sid)
+            for (sid,) in conn.execute("SELECT session_id FROM sessions WHERE pool = ?", (key,))
+            if sid not in keep
+        ]
+        conn.executemany("DELETE FROM sessions WHERE pool = ? AND session_id = ?", stale)
         conn.executemany(
             """
             INSERT INTO sessions
-                (pool, session_id, first_seen, last_seen, chunk_count, bytes,
+                (pool, session_id, first_seen, last_seen, last_active, chunk_count, bytes,
                  visitor_id, url, "order", interactions, device, attribution)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (pool, session_id) DO UPDATE SET
+                first_seen = min(first_seen, excluded.first_seen),
+                last_seen = max(last_seen, excluded.last_seen),
+                last_active = max(coalesce(last_active, 0), excluded.last_active),
+                chunk_count = max(chunk_count, excluded.chunk_count),
+                bytes = max(bytes, excluded.bytes),
+                visitor_id = coalesce(excluded.visitor_id, visitor_id),
+                url = coalesce(excluded.url, url),
+                "order" = coalesce(excluded."order", "order"),
+                interactions = coalesce(excluded.interactions, interactions),
+                device = coalesce(excluded.device, device),
+                attribution = coalesce(excluded.attribution, attribution)
             """,
             [
                 (
-                    key, i["session_id"], i["first_seen"], i["last_seen"],
+                    key, i["session_id"], i["first_seen"], i["last_seen"], i.get("last_active", 0),
                     i["chunk_count"], i["bytes"], i.get("visitor_id"), i.get("url"),
                     json.dumps(i["order"]) if "order" in i else None,
                     json.dumps(i["interactions"]) if "interactions" in i else None,
@@ -948,7 +1020,7 @@ def list_sessions(
                 raise ApiError(400, "bad cursor")
         rows = conn.execute(
             f"""
-            SELECT session_id, first_seen, last_seen, chunk_count, bytes,
+            SELECT session_id, first_seen, last_seen, last_active, chunk_count, bytes,
                    visitor_id, url, "order", interactions, device, attribution
             FROM sessions WHERE {' AND '.join(where)}
             ORDER BY last_seen DESC, session_id DESC LIMIT ?
@@ -957,11 +1029,12 @@ def list_sessions(
         ).fetchall()
     more = len(rows) > limit
     sessions = []
-    for sid, first, last, count, size, visitor, url, order, interactions, device, attribution in rows[:limit]:
+    for sid, first, last, active, count, size, visitor, url, order, interactions, device, attribution in rows[:limit]:
         info = {
             "session_id": sid,
             "first_seen": first,
             "last_seen": last,
+            "last_active": active or 0,
             "chunk_count": count,
             "bytes": size,
         }

@@ -1,4 +1,4 @@
-import { formatBytes, formatDuration, formatTime, isLive } from './format.js';
+import { formatBytes, formatDuration, formatTime, isLive, sessionDuration } from './format.js';
 
 const detailsEl = document.getElementById('session-details');
 
@@ -17,7 +17,7 @@ export function renderSessionDetails(session) {
     rows.push(['device', `${device.width < 768 ? 'mobile' : 'desktop'} · ${device.width} × ${device.height}`]);
   }
   rows.push(['started', formatTime(session.first_seen)]);
-  rows.push(['duration', isLive(session) ? 'live' : formatDuration(session.last_seen - session.first_seen)]);
+  rows.push(['duration', isLive(session) ? 'live' : formatDuration(sessionDuration(session))]);
   if (session.visitor_id) rows.push(['visitor', String(session.visitor_id).slice(0, 8)]);
   const inter = session.interactions;
   if (inter && inter.clicks) rows.push(['clicks', String(inter.clicks)]);

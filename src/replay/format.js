@@ -12,6 +12,13 @@ export function isLive(session) {
   return Date.now() - session.last_seen < 30000;
 }
 
+export function sessionDuration(session) {
+  const end = session.last_active
+    ? Math.min(session.last_seen, session.last_active + 1500)
+    : session.last_seen;
+  return end - session.first_seen;
+}
+
 export function formatDuration(ms) {
   const s = Math.round(ms / 1000);
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;

@@ -1,6 +1,6 @@
 import { currentProject, fetchJson, projectQuery, setProject } from './api.js';
 import { parseHash, writeHash } from './deeplink.js';
-import { formatBytes, formatDuration, formatTime, isLive, pagePath } from './format.js';
+import { formatBytes, formatDuration, formatTime, isLive, pagePath, sessionDuration } from './format.js';
 import { clearPlayer, loadSession, loadedSessionId, setPendingSeek } from './session-player.js';
 import { setAnalysisEnabled } from './analysis.js';
 import { setInsightsAnalysisEnabled } from './insights.js';
@@ -32,7 +32,7 @@ function sessionsUrl(cursor) {
 function sessionMeta(session) {
   const tail = isLive(session)
     ? '<span class="live">live</span>'
-    : formatDuration(session.last_seen - session.first_seen);
+    : formatDuration(sessionDuration(session));
   return `${formatTime(session.first_seen)} · ${tail}`;
 }
 
