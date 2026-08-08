@@ -32,7 +32,9 @@ function sessionsUrl(cursor) {
 function sessionMeta(session) {
   const tail = isLive(session)
     ? '<span class="live">live</span>'
-    : formatDuration(sessionDuration(session));
+    : session.windows > 1
+      ? 'multiple tabs'
+      : formatDuration(sessionDuration(session));
   return `${formatTime(session.first_seen)} · ${tail}`;
 }
 

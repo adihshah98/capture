@@ -17,7 +17,14 @@ export function renderSessionDetails(session) {
     rows.push(['device', `${device.width < 768 ? 'mobile' : 'desktop'} · ${device.width} × ${device.height}`]);
   }
   rows.push(['started', formatTime(session.first_seen)]);
-  rows.push(['duration', isLive(session) ? 'live' : formatDuration(sessionDuration(session))]);
+  rows.push([
+    'duration',
+    isLive(session)
+      ? 'live'
+      : session.windows > 1
+        ? 'multiple tabs'
+        : formatDuration(sessionDuration(session)),
+  ]);
   if (session.visitor_id) rows.push(['visitor', String(session.visitor_id).slice(0, 8)]);
   const inter = session.interactions;
   if (inter && inter.clicks) rows.push(['clicks', String(inter.clicks)]);
