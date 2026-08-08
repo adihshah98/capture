@@ -30,12 +30,18 @@ function sessionsUrl(cursor) {
 }
 
 export async function findSession(sessionId) {
-  const loaded = allSessions.find((s) => s.session_id === sessionId);
-  if (loaded) return loaded;
+  const cached = allSessions.find((s) => s.session_id === sessionId);
   try {
-    return await fetchJson(`/api/sessions/${sessionId}${projectQuery()}`);
+    const fresh = await fetchJson(`/api/sessions/${sessionId}${projectQuery()}`);
+    if (!cached) return fresh;
+    Object.assign(cached, fresh);
+    const meta = sessionListEl.querySelector(`li[data-sid="${sessionId}"] .meta`);
+    if (meta) {
+      meta.textContent = `${formatTime(cached.first_seen)} · ${formatDuration(cached.last_seen - cached.first_seen)}`;
+    }
+    return cached;
   } catch {
-    return undefined;
+    return cached;
   }
 }
 
