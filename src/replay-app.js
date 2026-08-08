@@ -9,11 +9,19 @@ addEventListener('keydown', (e) => {
     player.toggle();
   } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
     e.preventDefault();
-    player.seekBy(e.code === 'ArrowRight' ? 5000 : -5000);
+    player.seekBy(e.code === 'ArrowRight' ? 10000 : -10000);
   } else if (e.code === 'KeyF' && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
     document.getElementById('pc-fs').click();
   }
+});
+
+const themeToggleEl = document.getElementById('theme-toggle');
+themeToggleEl.addEventListener('click', () => {
+  const dark = document.documentElement.dataset.theme === 'dark';
+  document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+  localStorage.setItem('capture-theme', dark ? 'light' : 'dark');
+  dispatchEvent(new Event('capture-theme-change'));
 });
 
 document.getElementById('refresh').addEventListener('click', () => {

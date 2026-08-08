@@ -1,6 +1,16 @@
 import { currentProject, fetchJson, projectQuery, setProject } from './api.js';
 import { parseHash, writeHash } from './deeplink.js';
-import { formatBytes, formatDuration, formatTime, isLive, pagePath, sessionDuration } from './format.js';
+import {
+  formatBytes,
+  formatDuration,
+  formatTime,
+  isLive,
+  orderAmount,
+  sessionDuration,
+  sessionHeadline,
+  sessionOutcome,
+  sourceLabel,
+} from './format.js';
 import { clearPlayer, loadSession, loadedSessionId, setPendingSeek } from './session-player.js';
 import { setAnalysisEnabled } from './analysis.js';
 import { setInsightsAnalysisEnabled } from './insights.js';
@@ -29,20 +39,36 @@ function sessionsUrl(cursor) {
   return `/api/sessions?${params}`;
 }
 
+const escape = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+
 function sessionMeta(session) {
-  const tail = isLive(session)
-    ? '<span class="live">live</span>'
-    : session.windows > 1
-      ? 'multiple tabs'
-      : formatDuration(sessionDuration(session));
-  return `${formatTime(session.first_seen)} · ${tail}`;
+  const parts = [];
+  if (isLive(session)) parts.push('<span class="live">live</span>');
+  else if (session.windows > 1) parts.push(`${session.windows} tabs`);
+  else parts.push(formatDuration(sessionDuration(session)));
+  const order = session.order || {};
+  if (order.purchased_at && !isLive(session)) {
+    const amount = orderAmount(order);
+    if (amount) parts.push(`<span class="amount">${escape(amount)}</span>`);
+  }
+  parts.push(`<span class="src">${escape(sourceLabel(session))}</span>`);
+  return parts.join(' · ');
 }
 
 function updateSessionCard(session) {
   const li = sessionListEl.querySelector(`li[data-sid="${session.session_id}"]`);
   if (!li) return;
+  li.querySelector('.headline').textContent = sessionHeadline(session);
   li.querySelector('.meta').innerHTML = sessionMeta(session);
-  li.title = `${session.chunk_count} chunks · ${formatBytes(session.bytes)}`;
+  li.querySelector('.dot').className = `dot ${sessionOutcome(session)}`;
+  li.title = rowTitle(session);
+}
+
+function rowTitle(session) {
+  return (
+    `${session.session_id}\n${formatTime(session.first_seen)}\n` +
+    `${session.url || ''}\n${session.chunk_count} chunks · ${formatBytes(session.bytes)}`
+  );
 }
 
 export async function findSession(sessionId) {
@@ -109,11 +135,28 @@ async function loadProjects() {
   return true;
 }
 
+function showSkeleton() {
+  sessionListEl.innerHTML = '';
+  for (let i = 0; i < 7; i++) {
+    const li = document.createElement('li');
+    li.className = 'skeleton';
+    li.innerHTML = `
+      <span class="dot"></span>
+      <div class="info">
+        <span class="sk" style="width:${58 + ((i * 13) % 34)}%"></span>
+        <span class="sk" style="width:${32 + ((i * 7) % 20)}%;height:8px"></span>
+      </div>`;
+    li.style.animationDelay = `${i * 60}ms`;
+    sessionListEl.appendChild(li);
+  }
+}
+
 async function loadSessions({ append = false } = {}) {
   const seq = ++loadSeq;
   if (!append) {
     allSessions = [];
     nextCursor = null;
+    showSkeleton();
   }
   let body;
   try {
@@ -183,37 +226,19 @@ function renderSessionList() {
     li.dataset.sid = session.session_id;
     if (grouped) li.className = 'grouped';
     li.innerHTML = `
+      <span class="dot ${sessionOutcome(session)}"></span>
       <div class="info">
-        <span class="sid">${session.session_id.slice(0, 8)}…</span>
+        <span class="headline"></span>
         <span class="meta">${sessionMeta(session)}</span>
-        <span class="page"></span>
       </div>
-      <button class="del" title="Delete this recording">Delete</button>
+      <button class="del" title="Delete this recording" aria-label="Delete this recording">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7h16M9 7V5h6v2M6 7l1 12h10l1-12" />
+        </svg>
+      </button>
     `;
-    const page = li.querySelector('.page');
-    page.textContent = pagePath(session.url);
-    page.title = session.url || '';
-    li.title = `${session.chunk_count} chunks · ${formatBytes(session.bytes)}`;
-    const order = session.order;
-    if (order && (order.purchased_at || order.checkout_started_at)) {
-      const badge = document.createElement('span');
-      const purchased = Boolean(order.purchased_at);
-      badge.className = `order ${purchased ? 'purchased' : 'started'}`;
-      const amount =
-        typeof order.total === 'number'
-          ? ` · ${order.total.toFixed(2)}${order.currency ? ' ' + order.currency : ''}`
-          : '';
-      badge.textContent = purchased ? `Purchased${amount}` : 'Reached checkout';
-      if (order.order_id) badge.title = `Order ${order.order_id}`;
-      li.querySelector('.info').appendChild(badge);
-    }
-    const rage = session.interactions && session.interactions.rage;
-    if (rage) {
-      const badge = document.createElement('span');
-      badge.className = 'order rage';
-      badge.textContent = `${rage} rage click${rage > 1 ? 's' : ''}`;
-      li.querySelector('.info').appendChild(badge);
-    }
+    li.querySelector('.headline').textContent = sessionHeadline(session);
+    li.title = rowTitle(session);
     li.addEventListener('click', () => {
       document.querySelectorAll('#session-list li').forEach((el) => el.classList.remove('active'));
       li.classList.add('active');
@@ -231,10 +256,11 @@ function renderSessionList() {
     li.className = 'visitor-header';
     const first = Math.min(...group.map((s) => s.first_seen));
     const purchases = group.filter((s) => s.order && s.order.purchased_at).length;
+    const since = new Date(first).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     li.textContent =
-      `Visitor ${String(group[0].visitor_id).slice(0, 8)} · ${group.length} visits` +
-      ` · since ${new Date(first).toLocaleDateString()}` +
+      `Returning visitor · ${group.length} visits since ${since}` +
       (purchases ? ` · ${purchases} purchase${purchases > 1 ? 's' : ''}` : '');
+    li.title = `Visitor ${group[0].visitor_id}`;
     sessionListEl.appendChild(li);
   };
 
@@ -289,12 +315,13 @@ function renderSessionList() {
 async function deleteSession(sessionId, button) {
   if (button.dataset.armed !== 'yes') {
     button.dataset.armed = 'yes';
+    button.dataset.icon = button.innerHTML;
     button.textContent = 'Confirm?';
     button.classList.add('armed');
     setTimeout(() => {
       if (!button.isConnected || button.dataset.armed !== 'yes') return;
       delete button.dataset.armed;
-      button.textContent = 'Delete';
+      button.innerHTML = button.dataset.icon;
       button.classList.remove('armed');
     }, 4000);
     return;

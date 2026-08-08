@@ -39,6 +39,45 @@ export function pagePath(url) {
   }
 }
 
+export function sourceLabel(session) {
+  const a = session.attribution;
+  if (!a) return 'direct';
+  if (a.utm_source && a.utm_campaign) return `${a.utm_source}/${a.utm_campaign}`;
+  return a.utm_source || a.utm_medium || (a.fbclid ? 'facebook' : 'direct');
+}
+
+export function orderAmount(order) {
+  if (!order || typeof order.total !== 'number') return '';
+  return `${order.total.toFixed(2)}${order.currency ? ' ' + order.currency : ''}`;
+}
+
+export function sessionOutcome(session) {
+  const order = session.order || {};
+  if (isLive(session)) return 'live';
+  if (order.purchased_at) return 'purchased';
+  if (session.interactions && session.interactions.rage) return 'rage';
+  if (order.checkout_started_at) return 'checkout';
+  return '';
+}
+
+export function sessionHeadline(session) {
+  const order = session.order || {};
+  const rage = (session.interactions && session.interactions.rage) || 0;
+  const clicks = (session.interactions && session.interactions.clicks) || 0;
+  const path = pagePath(session.url).split('?')[0] || '/';
+  if (isLive(session)) return `Active now on ${path}`;
+  if (order.purchased_at) {
+    const amount = orderAmount(order);
+    return amount ? `Purchased — ${amount}` : 'Purchased';
+  }
+  if (rage) return `Rage-clicked ${rage}× on ${path}`;
+  if (order.checkout_started_at) return 'Reached checkout, did not buy';
+  if (sessionDuration(session) < 10000) return `Bounced from ${path}`;
+  if (session.interactions && !clicks) return `Scrolled ${path}, never clicked`;
+  if (session.windows > 1) return `Browsed ${session.windows} tabs from ${path}`;
+  return `Browsed ${path}`;
+}
+
 export function hostPath(url) {
   try {
     const u = new URL(url);

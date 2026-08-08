@@ -1,10 +1,11 @@
 import { CapturePlayer } from '../player.js';
 import { currentProject, fetchJson, projectQuery } from './api.js';
 import { writeHash } from './deeplink.js';
-import { formatBytes, hostPath } from './format.js';
+import { formatBytes, hostPath, sessionHeadline } from './format.js';
 import { clearSessionDetails, renderSessionDetails } from './session-details.js';
 import { findSession } from './session-list.js';
 import {
+  clearScrubberChrome,
   currentSpeed,
   renderScrubberChrome,
   showAssetErrors,
@@ -13,7 +14,7 @@ import {
   updatePlayState,
   updateScrubber,
 } from './scrubber.js';
-import { clearTimeline, renderTimeline, setSyncStart, syncTimeline } from './timeline.js';
+import { clearTimeline, markers, renderTimeline, setSyncStart, syncTimeline } from './timeline.js';
 import { resetAnalysis, showCachedAnalysis } from './analysis.js';
 
 const stageEl = document.getElementById('stage');
@@ -24,6 +25,23 @@ const assetErrorsEl = document.getElementById('asset-errors');
 const sessionTitleEl = document.getElementById('session-title');
 const loadProgressEl = document.getElementById('load-progress');
 const windowTabsEl = document.getElementById('window-tabs');
+const stageUrlEl = document.getElementById('stage-url');
+const stageDeviceEl = document.getElementById('stage-device');
+
+let stageNavs = [];
+
+function syncStageUrl(ms) {
+  let url = '';
+  for (const nav of stageNavs) {
+    if (nav.offset <= ms) url = nav.url;
+    else break;
+  }
+  const next = url ? hostPath(url) : '';
+  if (stageUrlEl.textContent !== next) {
+    stageUrlEl.textContent = next;
+    stageUrlEl.title = url;
+  }
+}
 
 export let player = null;
 
@@ -41,11 +59,15 @@ export function clearPlayer() {
   destroyPlayer();
   windowTabsEl.innerHTML = '';
   clearTimeline();
+  clearScrubberChrome();
   resetAnalysis(null);
   clearSessionDetails();
   loadProgressEl.textContent = '';
   sessionTitleEl.textContent = 'Select a session';
   sessionTitleEl.title = '';
+  stageNavs = [];
+  stageUrlEl.textContent = '';
+  stageDeviceEl.textContent = '';
 }
 
 function showPlayerMessage(message) {
@@ -59,13 +81,19 @@ export async function loadSession(sessionId) {
   loadedSessionId = sessionId;
   destroyPlayer();
   writeHash({ p: currentProject, s: sessionId });
-  sessionTitleEl.textContent = `Session ${sessionId}`;
+  sessionTitleEl.textContent = 'Loading session…';
   sessionTitleEl.title = '';
   showCachedAnalysis(sessionId);
 
   const session = await findSession(sessionId);
   if (seq !== loadSeq) return;
   renderSessionDetails(session);
+  if (session) {
+    sessionTitleEl.textContent = sessionHeadline(session);
+    sessionTitleEl.title = sessionId;
+    const device = session.device;
+    stageDeviceEl.textContent = device ? `${device.width}×${device.height}` : '';
+  }
 
   let manifest;
   try {
@@ -77,8 +105,8 @@ export async function loadSession(sessionId) {
   }
   if (seq !== loadSeq) return;
   if (manifest.url) {
-    sessionTitleEl.textContent = `Session ${sessionId.slice(0, 8)}… — ${hostPath(manifest.url)}`;
-    sessionTitleEl.title = manifest.url;
+    stageUrlEl.textContent = hostPath(manifest.url);
+    stageUrlEl.title = manifest.url;
   }
 
   const byWindow = new Map();
@@ -294,8 +322,11 @@ async function playWindow(sessionId, chunks, windowKey, seq, session, showOrder)
     return;
   }
 
-  setSyncStart(allEvents[0].timestamp);
+  const t0 = allEvents[0].timestamp;
+  setSyncStart(t0);
   renderTimeline(allEvents, navigations, session, showOrder);
+  stageNavs = navigations.map((n) => ({ url: n.url, offset: n.t - t0 }));
+  syncStageUrl(0);
   let lastHashWrite = 0;
   try {
     player = new CapturePlayer({
@@ -306,6 +337,7 @@ async function playWindow(sessionId, chunks, windowKey, seq, session, showOrder)
       onTime: (ms) => {
         updateScrubber(ms);
         syncTimeline(ms);
+        syncStageUrl(ms);
         const now = Date.now();
         if (now - lastHashWrite > 2000) {
           lastHashWrite = now;
@@ -322,7 +354,7 @@ async function playWindow(sessionId, chunks, windowKey, seq, session, showOrder)
     return;
   }
   controlsEl.hidden = false;
-  renderScrubberChrome(player);
+  renderScrubberChrome(player, markers);
   updateScrubber(0);
   if ('requestIdleCallback' in window) requestIdleCallback(() => preloadAssets(playable, seq));
   else setTimeout(() => preloadAssets(playable, seq), 1000);
