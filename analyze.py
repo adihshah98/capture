@@ -122,6 +122,8 @@ Give 2 to 4 specific implications for messaging, PDPs, offers, merchandising, pe
 ## Friction
 Briefly identify concrete UX issues such as failed clicks, rage clicks, confusion, backtracking, or technical problems. Do not mistake normal consideration for friction.
 
+A checkout screen that sits unchanged for a long time is NOT a technical bug. Shopify hosts checkout outside the storefront, so recording stops there and the last frames often freeze on checkout while the visitor continues on Shopify's page. Do not flag that freeze, a "stuck" checkout UI, or a long idle at checkout as a site failure or tech issue.
+
 End with:
 
 Shopper type: [description] | Intent: [low/medium/high] | Primary driver: [driver] | Main barrier: [barrier] | Outcome: [short explanation]
@@ -801,10 +803,14 @@ looking. "They all did X (9 of 9)" is a strong finding when it is true.
 
 ## Output
 
-Return a single JSON object with this exact shape. Every item in every section
-is an OBJECT with three fields — never a bare string:
+Return a single JSON object with this exact shape. Every item in journey /
+attention / intent / blockers is an OBJECT with three fields — never a bare string.
+"recommendations" and "caveats" are plain string lists.
 {
   "headline": "one sentence a marketer could put at the top of a deck: the sharpest finding, with its share and what it means",
+  "recommendations": [
+    "the concrete next steps a marketer should take, drawn from the findings below — offer, message, placement, channel, or test. 3 to 6 items. This list is what the team reads first."
+  ],
   "journey": [
     {
       "observation": "what these visitors did, with the evidence — quoted labels, [MM:SS], durations — and one hedged reading of what it suggests",
@@ -819,6 +825,12 @@ is an OBJECT with three fields — never a bare string:
 }
 
 What each section is for:
+- "recommendations" — the marketer's punch list. Plain strings only. Every
+  item must be a concrete next step (test this default, move this proof
+  point up, lead this channel with that message, fix this broken step).
+  Pull them from the actions on the findings below; do not invent steps the
+  evidence does not support. Deduplicate: one recommendation per decision.
+  Never "investigate further" or "monitor this".
 - "journey" — how they moved through the site and where they dropped off.
   Which entry points and routes worked, where each cluster stopped, and what
   that says about the landing experience.
@@ -956,17 +968,22 @@ def _given_facts(spec: dict) -> str:
     return "## Already known — never report these as findings\n\n" + "\n".join(lines)
 
 
-# Insight sections hold {observation, share, action} objects; caveats stays a
-# plain list of strings, since a sample limit has no share and no action.
+# Insight sections hold {observation, share, action} objects; recommendations
+# and caveats stay plain string lists (a punch list / sample limit has no share).
 CUT_INSIGHT_SECTIONS = ("journey", "attention", "intent", "blockers")
 CUT_SECTIONS = CUT_INSIGHT_SECTIONS + ("caveats",)
 # The prompt asks for 3-8 items; keep a little headroom so a good extra item
 # is kept rather than silently dropped.
 CUT_ITEMS_PER_SECTION = 10
+CUT_RECOMMENDATIONS_CAP = 8
 
 
 def empty_cut_analysis(error: Optional[str] = None) -> dict:
-    out = {"headline": "", **{key: [] for key in CUT_SECTIONS}}
+    out = {
+        "headline": "",
+        "recommendations": [],
+        **{key: [] for key in CUT_SECTIONS},
+    }
     if error:
         out["error"] = error
     return out
@@ -1001,6 +1018,40 @@ def _insight_item(item) -> Optional[dict]:
     }
 
 
+def _recommendation_line(item) -> str:
+    """One punch-list line: a bare string, or the action field of an object."""
+    if isinstance(item, str):
+        return _clean_text(item, 400)
+    if isinstance(item, dict):
+        for key in ("action", "recommendation", "text"):
+            line = _clean_text(item.get(key), 400)
+            if line:
+                return line
+    return ""
+
+
+def _recommendations_from_actions(out: dict) -> list:
+    """Fallback punch list: unique non-empty actions from the insight items.
+
+    Older cached cuts predate the top-level field; deriving from actions keeps
+    the Recommendations block populated without a re-ask.
+    """
+    seen = set()
+    lines = []
+    for key in CUT_INSIGHT_SECTIONS:
+        for item in out.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            line = _clean_text(item.get("action"), 400)
+            if not line or line.lower() in seen:
+                continue
+            seen.add(line.lower())
+            lines.append(line)
+            if len(lines) >= CUT_RECOMMENDATIONS_CAP:
+                return lines
+    return lines
+
+
 def normalize_cut_analysis(raw) -> dict:
     """Coerce the model's JSON into the documented shape, dropping anything else."""
     data = raw if isinstance(raw, dict) else {}
@@ -1019,6 +1070,21 @@ def normalize_cut_analysis(raw) -> dict:
             if len(clean) >= CUT_ITEMS_PER_SECTION:
                 break
         out[key] = clean
+    recs = data.get("recommendations")
+    if isinstance(recs, list):
+        clean = []
+        seen = set()
+        for item in recs:
+            line = _recommendation_line(item)
+            if not line or line.lower() in seen:
+                continue
+            seen.add(line.lower())
+            clean.append(line)
+            if len(clean) >= CUT_RECOMMENDATIONS_CAP:
+                break
+        out["recommendations"] = clean
+    if not out["recommendations"]:
+        out["recommendations"] = _recommendations_from_actions(out)
     return out
 
 

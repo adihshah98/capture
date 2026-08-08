@@ -438,6 +438,16 @@ function renderCut(body) {
     ? `<div class="cut-headline">${escapeHtml(analysis.headline)}</div>`
     : '';
 
+  // Marketer punch list sits under the headline so the team sees "what to do"
+  // before the evidence. Absent on thin/empty cuts — no empty block.
+  const recs = analysis.recommendations || [];
+  const recommendations = recs.length
+    ? `<div class="cut-block recommendations">
+        <h4>Recommendations</h4>
+        <ul>${recs.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>
+      </div>`
+    : '';
+
   const sections = CUT_SECTIONS.map(({ key, title, cls, empty }) => {
     const items = analysis[key] || [];
     // Caveats have no empty copy: an absent caveat list is not worth a block.
@@ -461,7 +471,7 @@ function renderCut(body) {
   </p>`;
 
   cutIsShowing = true;
-  cutBodyEl.innerHTML = headline + sections + meta;
+  cutBodyEl.innerHTML = headline + recommendations + sections + meta;
   syncCutRunButton();
 }
 

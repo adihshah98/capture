@@ -241,7 +241,51 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
         self.assertEqual(out["blockers"][0]["action"], "Fix the cart icon on mobile")
         # Caveats stay plain strings.
         self.assertEqual(out["caveats"], ["only 2 sessions"])
+        # No top-level recommendations → fall back to unique item actions.
+        self.assertEqual(
+            out["recommendations"],
+            ["Move the guarantee above the fold", "Fix the cart icon on mobile"],
+        )
         self.assertNotIn("extra_key", out)
+
+    def test_recommendations_are_kept_at_the_top(self):
+        out = analyze.normalize_cut_analysis(
+            {
+                "recommendations": [
+                    "  Test 30-Night as the default  ",
+                    "",
+                    {"action": "Lead Meta creative with the guarantee"},
+                    "Test 30-Night as the default",  # dedupe
+                    12,
+                    None,
+                ],
+                "journey": [
+                    {
+                        "observation": "Switched supply at [00:40]",
+                        "action": "Should not replace the explicit list",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(
+            out["recommendations"],
+            [
+                "Test 30-Night as the default",
+                "Lead Meta creative with the guarantee",
+            ],
+        )
+
+    def test_recommendations_fall_back_to_item_actions_when_absent(self):
+        """Cached cuts from before the field still get a punch list."""
+        out = analyze.normalize_cut_analysis(
+            {
+                "journey": [{"observation": "a at [00:01]", "action": "Do A"}],
+                "attention": [{"observation": "b at [00:02]", "action": "Do A"}],
+                "intent": [{"observation": "c at [00:03]", "action": "Do B"}],
+                "blockers": [{"observation": "d at [00:04]"}],
+            }
+        )
+        self.assertEqual(out["recommendations"], ["Do A", "Do B"])
 
     def test_every_insight_item_has_all_three_fields(self):
         """The renderer reads .observation/.share/.action without guarding."""
@@ -252,6 +296,7 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
             self.assertEqual(
                 set(out[key][0]), {"observation", "share", "action"}, key
             )
+        self.assertEqual(out["recommendations"], [])
 
     def test_an_item_with_no_observation_is_dropped(self):
         out = analyze.normalize_cut_analysis(
@@ -269,6 +314,7 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
 
     def test_every_documented_section_is_present(self):
         out = analyze.normalize_cut_analysis({})
+        self.assertEqual(out["recommendations"], [])
         for key in analyze.CUT_SECTIONS:
             self.assertEqual(out[key], [], key)
 
@@ -276,6 +322,7 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
         for junk in (None, [], "text", {"headline": 42}):
             out = analyze.normalize_cut_analysis(junk)
             self.assertEqual(out["headline"], "")
+            self.assertEqual(out["recommendations"], [])
             for key in analyze.CUT_SECTIONS:
                 self.assertEqual(out[key], [], key)
 
@@ -283,10 +330,12 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
         out = analyze.normalize_cut_analysis(
             {
                 "journey": [{"observation": f"item {i} at [00:0{i%10}]"} for i in range(50)],
+                "recommendations": [f"rec {i}" for i in range(50)],
                 "headline": "x" * 900,
             }
         )
         self.assertEqual(len(out["journey"]), analyze.CUT_ITEMS_PER_SECTION)
+        self.assertEqual(len(out["recommendations"]), analyze.CUT_RECOMMENDATIONS_CAP)
         self.assertEqual(len(out["headline"]), 600)
 
     def test_overlong_fields_are_truncated_not_dropped(self):
@@ -583,6 +632,7 @@ class TestCutPromptContent(unittest.TestCase):
     def test_asks_for_the_single_group_schema(self):
         prompt = analyze.CUT_PROMPT
         self.assertIn('"headline"', prompt)
+        self.assertIn('"recommendations"', prompt)
         for key in analyze.CUT_SECTIONS:
             self.assertIn(f'"{key}"', prompt)
         # Nothing should still be asking the model to contrast two sides.
