@@ -1015,18 +1015,21 @@ Rules:
 - No preamble, no markdown — JSON only."""
 
 
-def _cut_side_text(rows: list, label: str) -> str:
-    """The group's write-ups, labelled per session so the model can cite counts.
+def _cut_side_text(rows: list, label: str) -> tuple:
+    """(text, citations) — the group's write-ups, numbered for citation.
 
-    The 1-based number in each header is what the model cites as S<n>, and the
-    UI resolves it positionally against the cut's `session_ids`. Both come from
-    the same `selected` list, so this enumeration order IS the citation
-    contract — reordering rows here silently repoints every link.
+    The 1-based number in each header is what the model cites as S<n>. The
+    `citations` map returned alongside is that same numbering as data —
+    {"1": session_id, ...} — built in this loop, so the numbers the model was
+    shown and the ids the UI resolves cannot drift apart. Callers must store
+    what they get back rather than rebuilding it from the row list.
     """
     if not rows:
-        return f"### {label}\n(no sessions in this group)\n"
+        return f"### {label}\n(no sessions in this group)\n", {}
+    citations = {}
     parts = [f"### {label} — {len(rows)} session(s)\n"]
     for i, row in enumerate(rows, 1):
+        citations[str(i)] = row.get("session_id")
         attrs = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
         # Every clusterable field is stated on every session, "unknown"
         # included: a missing label reads as a difference the model would
@@ -1040,7 +1043,7 @@ def _cut_side_text(rows: list, label: str) -> str:
             bits.append("meta click id present")
         text = (row.get("text") or "").strip() or "(no write-up)"
         parts.append(f"--- {label} session {i} ({'; '.join(bits)}) ---\n{text}\n")
-    return "\n".join(parts)
+    return "\n".join(parts), citations
 
 
 def _given_facts(spec: dict, n: int) -> str:
@@ -1262,8 +1265,12 @@ async def call_gemini_cut(
     rows: list,
     label: str,
     given: str = "",
-) -> dict:
-    """One text-only pass over the group's write-ups."""
+) -> tuple:
+    """(analysis, citations) — one text-only pass over the group's write-ups.
+
+    The citation map comes back from the same call that numbered the write-ups,
+    so what the caller stores is exactly what the model was shown.
+    """
     from google import genai
     from google.genai import types
 
@@ -1272,9 +1279,10 @@ async def call_gemini_cut(
     if given:
         header += "\n" + given + "\n"
     header += "\nThe write-ups for this group follow."
+    side_text, citations = _cut_side_text(rows, "SESSIONS")
     parts = [
         types.Part.from_text(text=header),
-        types.Part.from_text(text=_cut_side_text(rows, "SESSIONS")),
+        types.Part.from_text(text=side_text),
     ]
     response = await client.aio.models.generate_content(
         model=GEMINI_MODEL,
@@ -1292,7 +1300,8 @@ async def call_gemini_cut(
             response_mime_type="application/json",
         ),
     )
-    return normalize_cut_analysis(_parse_json_object(response.text or ""), len(rows))
+    analysis = normalize_cut_analysis(_parse_json_object(response.text or ""), len(rows))
+    return analysis, citations
 
 
 async def build_cut_analysis(rows: list, slice_spec: Optional[dict]) -> dict:
@@ -1316,13 +1325,15 @@ async def build_cut_analysis(rows: list, slice_spec: Optional[dict]) -> dict:
     if not selected:
         empty = empty_cut_analysis()
         empty["headline"] = f"No analyzed sessions match {label} in this cohort."
-        return {**base, "analysis": empty}
+        return {**base, "analysis": empty, "citations": {}}
 
     given = _given_facts(spec, len(selected))
     _, model_gate = _gates()
     async with model_gate:
-        analysis = await call_gemini_cut(selected, label, given)
-    return {**base, "analysis": analysis}
+        analysis, citations = await call_gemini_cut(selected, label, given)
+    # Stored, not derived: this is the numbering the model actually saw, so a
+    # later change to row ordering cannot repoint the links in this cut.
+    return {**base, "analysis": analysis, "citations": citations}
 
 
 def sample_cohort_rows(

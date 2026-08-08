@@ -61,20 +61,39 @@ export function citationMs(stamp) {
 }
 
 /**
+ * Resolve the ordinal in "S4" to a session id.
+ *
+ * `map` is the cut's stored `citations` — {"4": "sid"} — recorded when the
+ * write-ups were numbered, so it is the authoritative answer. Cuts written
+ * before that was stored fall back to position in `session_ids`, which is
+ * the same numbering as long as nothing reordered the rows since.
+ */
+function resolveOrdinal(n, map, sessionIds) {
+  if (map && typeof map === 'object') {
+    const sid = map[String(n)];
+    // An explicit map is complete: a miss means the ordinal is not a session,
+    // not that we should guess positionally.
+    return typeof sid === 'string' && sid ? sid : null;
+  }
+  return (Array.isArray(sessionIds) && sessionIds[Number(n) - 1]) || null;
+}
+
+/**
  * Wrap each "S4" / "S4 [01:09]" in a button linking to that session.
  *
  * `escaped` MUST already be HTML-escaped: this returns markup, so linkifying
  * raw text would let a model-written observation inject HTML.
  *
  * Left as plain text when the citation cannot be trusted to point somewhere:
- * an ordinal past the end of `sessionIds`, or a stamp that is present but
+ * an ordinal that does not resolve, or a stamp that is present but
  * unparseable — a link to the wrong session is worse than no link. A stamp
  * that is merely absent is fine; the session opens at its start.
  */
-export function linkCitations(escaped, sessionIds, escapeAttr = (s) => s) {
-  if (!Array.isArray(sessionIds) || !sessionIds.length) return escaped;
+export function linkCitations(escaped, sessionIds, escapeAttr = (s) => s, map = null) {
+  const hasMap = map && typeof map === 'object' && Object.keys(map).length > 0;
+  if (!hasMap && !(Array.isArray(sessionIds) && sessionIds.length)) return escaped;
   return String(escaped).replace(CITATION_RE, (whole, n, stamp) => {
-    const sid = sessionIds[Number(n) - 1];
+    const sid = resolveOrdinal(n, hasMap ? map : null, sessionIds);
     if (!sid) return whole;
     // A written-but-malformed stamp is a signal the match is not what it
     // looks like, so decline it rather than silently seeking to 0.

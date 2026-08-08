@@ -121,6 +121,35 @@ test('a zero ordinal is not a session', () => {
   assert.doesNotMatch(linkCitations('S0 [00:05]', IDS, escapeAttr), /cut-cite/);
 });
 
+// The stored map is what the model was actually shown. It wins over
+// session_ids, so a later change to row ordering cannot repoint old links.
+test('the stored map resolves the ordinal', () => {
+  const map = { 1: 'from-map', 2: 'also-map' };
+  const out = linkCitations('S1 [00:05]', IDS, escapeAttr, map);
+  assert.match(out, /data-cite-sid="from-map"/);
+});
+
+test('the map wins over positional session_ids', () => {
+  // Deliberately conflicting: position 1 is "sid-a", the map says otherwise.
+  const map = { 1: 'authoritative' };
+  const out = linkCitations('S1', IDS, escapeAttr, map);
+  assert.match(out, /data-cite-sid="authoritative"/);
+  assert.doesNotMatch(out, /sid-a/);
+});
+
+test('an ordinal missing from the map does not fall back to position', () => {
+  // The map is complete by construction, so a miss means "not a session".
+  const map = { 1: 'only-one' };
+  assert.doesNotMatch(linkCitations('S2', IDS, escapeAttr, map), /cut-cite/);
+});
+
+test('cuts stored before the map fall back to session_ids', () => {
+  for (const empty of [null, undefined, {}]) {
+    const out = linkCitations('S2 [00:05]', IDS, escapeAttr, empty);
+    assert.match(out, /data-cite-sid="sid-b"/, String(empty));
+  }
+});
+
 test('an ordinal past the group is left as plain text', () => {
   // The bug this guards: S44 cited against a 4-session cut.
   const out = linkCitations('see S44 [00:12]', IDS, escapeAttr);

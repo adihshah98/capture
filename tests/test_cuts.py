@@ -433,7 +433,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
 
         async def fake(*args):
             calls.append(args)
-            return analyze.empty_cut_analysis()
+            return analyze.empty_cut_analysis(), {}
 
         analyze.call_gemini_cut = fake
         rows = [row("a", "purchased"), row("b", "purchased")]
@@ -450,7 +450,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
             seen["rows"] = [r["session_id"] for r in rows]
             seen["label"] = label
             seen["given"] = given
-            return analyze.normalize_cut_analysis({"headline": "they hesitate"})
+            return analyze.normalize_cut_analysis({"headline": "they hesitate"}), {"1": "p1"}
 
         analyze.call_gemini_cut = fake
         rows = [row("p1", "purchased"), row("n1"), row("n2")]
@@ -460,6 +460,8 @@ class TestBuildCutAnalysis(unittest.TestCase):
         self.assertEqual(seen["label"], "purchased")
         self.assertEqual(out["n"], 1)
         self.assertEqual(out["session_ids"], ["p1"])
+        # The map the model was shown is stored, not rebuilt from the rows.
+        self.assertEqual(out["citations"], {"1": "p1"})
         self.assertEqual(out["analysis"]["headline"], "they hesitate")
         self.assertEqual(out["cut"], analyze.cut_key({"outcome": "purchased"}))
 
@@ -470,7 +472,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
             seen["rows"] = [r["session_id"] for r in rows]
             seen["label"] = label
             seen["given"] = given
-            return analyze.empty_cut_analysis()
+            return analyze.empty_cut_analysis(), {}
 
         analyze.call_gemini_cut = fake
         rows = [row("p1", "purchased"), row("n1"), row("n2")]
@@ -485,7 +487,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
         self.assertEqual(out["label"], "all sessions")
 
     def test_side_text_labels_every_session_for_counting(self):
-        text = analyze._cut_side_text(
+        text, _ = analyze._cut_side_text(
             [row("s1", "purchased", "mobile", utm_source="meta"), row("s2", "checkout")],
             "SESSIONS",
         )
@@ -499,14 +501,14 @@ class TestBuildCutAnalysis(unittest.TestCase):
 
     def test_every_clusterable_field_is_stated_on_every_session(self):
         """A missing label would read as a difference and skew the clusters."""
-        text = analyze._cut_side_text([row("bare", "rest")], "SESSIONS")
+        text, _ = analyze._cut_side_text([row("bare", "rest")], "SESSIONS")
         self.assertIn("device: unknown", text)
         self.assertIn("page: unknown", text)
         self.assertIn("utm_source: none", text)
         self.assertIn("utm_campaign: none", text)
 
     def test_known_values_still_win_over_the_placeholders(self):
-        text = analyze._cut_side_text(
+        text, _ = analyze._cut_side_text(
             [
                 row(
                     "s1",
@@ -605,7 +607,7 @@ class TestGivenFacts(unittest.TestCase):
 
         async def fake(rows, label, given=""):
             seen["given"] = given
-            return analyze.empty_cut_analysis()
+            return analyze.empty_cut_analysis(), {}
 
         saved_enabled, saved_call = analyze.ANALYSIS_ENABLED, analyze.call_gemini_cut
         analyze.ANALYSIS_ENABLED = True
@@ -730,14 +732,29 @@ class TestCutPromptContent(unittest.TestCase):
         # The near-miss formats the UI regex would not match.
         self.assertIn('never "Session 4", "#4", or "S4 at 1:09"', flat)
 
-    def test_side_text_numbers_match_the_stored_session_ids(self):
-        """S<n> resolves positionally, so both orders must come from `selected`."""
+    def test_the_citation_map_is_the_numbering_the_model_was_shown(self):
+        """The map is emitted by the loop that writes the headers, not rebuilt."""
         rows = [row("a", "purchased"), row("b", "rest"), row("c", "rest")]
-        text = analyze._cut_side_text(rows, "SESSIONS")
-        for i, r in enumerate(rows, 1):
-            self.assertIn(f"--- SESSIONS session {i} (", text)
-        # The nth header must describe the nth session_id the cut stores.
-        self.assertEqual([r["session_id"] for r in rows], ["a", "b", "c"])
+        text, citations = analyze._cut_side_text(rows, "SESSIONS")
+        self.assertEqual(citations, {"1": "a", "2": "b", "3": "c"})
+        # Every number in the map must appear as that session's header.
+        for n, sid in citations.items():
+            self.assertIn(f"--- SESSIONS session {n} (", text)
+            self.assertIn(f"write-up for {sid}", text)
+
+    def test_reordering_rows_moves_the_map_with_them(self):
+        """The bug this design removes: numbering and ids drifting apart."""
+        rows = [row("a"), row("b"), row("c")]
+        _, forward = analyze._cut_side_text(rows, "SESSIONS")
+        _, reversed_ = analyze._cut_side_text(list(reversed(rows)), "SESSIONS")
+        self.assertEqual(forward, {"1": "a", "2": "b", "3": "c"})
+        # Not {"1": "a"} — the map follows the order the model actually saw.
+        self.assertEqual(reversed_, {"1": "c", "2": "b", "3": "a"})
+
+    def test_an_empty_group_has_an_empty_map(self):
+        text, citations = analyze._cut_side_text([], "SESSIONS")
+        self.assertEqual(citations, {})
+        self.assertIn("no sessions in this group", text)
 
     def test_is_written_for_a_marketing_audience(self):
         prompt = analyze.CUT_PROMPT

@@ -496,14 +496,14 @@ const CUT_SECTIONS = [
 ];
 
 /** Escaped observation text with each "S4 [01:09]" turned into a seek link. */
-function withCitations(text, sessionIds) {
-  return linkCitations(escapeHtml(text || ''), sessionIds, escapeAttr);
+function withCitations(text, sessionIds, citations) {
+  return linkCitations(escapeHtml(text || ''), sessionIds, escapeAttr, citations);
 }
 
 /** An insight item: observation, its share of the group, and what to do. */
-function insightItem(item, id, sessionIds) {
+function insightItem(item, id, sessionIds, citations) {
   if (typeof item === 'string') {
-    return `<li>${withCitations(item, sessionIds)}</li>`;
+    return `<li>${withCitations(item, sessionIds, citations)}</li>`;
   }
   const share = item.share
     ? `<span class="cut-share">${escapeHtml(item.share)}</span>`
@@ -512,7 +512,7 @@ function insightItem(item, id, sessionIds) {
     ? `<p class="cut-action">${escapeHtml(item.action)}</p>`
     : '';
   const idAttr = id ? ` id="${escapeAttr(id)}"` : '';
-  const observation = withCitations(item.observation, sessionIds);
+  const observation = withCitations(item.observation, sessionIds, citations);
   return `<li${idAttr} class="cut-insight">${share}${observation}${action}</li>`;
 }
 
@@ -582,9 +582,10 @@ function renderCut(body) {
     : '';
 
   const targets = actionTargets(analysis);
-  // S<n> is positional against this list — the same order _cut_side_text
-  // numbered the write-ups in.
+  // The stored map is what the model was shown; session_ids is the positional
+  // fallback for cuts written before the map was recorded.
   const sessionIds = body.session_ids || [];
+  const citations = body.citations || null;
 
   const sections = CUT_SECTIONS.map(({ key, title, cls, empty }) => {
     const items = analysis[key] || [];
@@ -600,7 +601,8 @@ function renderCut(body) {
                 insightItem(
                   item,
                   key === 'caveats' ? null : `cut-insight-${key}-${i}`,
-                  sessionIds
+                  sessionIds,
+                  citations
                 )
               )
               .join('')}</ul>`
