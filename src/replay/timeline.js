@@ -1,4 +1,5 @@
 import { formatOffset, pagePath } from './format.js';
+import { gapEntries } from './gaps.js';
 import { player } from './session-player.js';
 import { clearUrlTable, renderUrlTable } from './url-table.js';
 
@@ -37,18 +38,15 @@ export function syncTimeline(currentMs) {
 }
 
 export function renderTimeline(events, navigations, session, showOrder = true) {
-  const marker = (e) => e.type === 5 && e.data && e.data.tag;
-  const entries = [];
+  const markers = events.filter((e) => e.type === 5 && e.data && e.data.tag);
+  const end = events.length ? events[events.length - 1].timestamp : 0;
+  const entries = gapEntries(markers, end);
 
-  for (const event of events.filter(marker)) {
+  for (const event of markers) {
     const tag = event.data.tag;
     if (tag === 'capture-trigger') {
       const reason = (event.data.payload && event.data.payload.reason) || 'unknown';
       entries.push({ t: event.timestamp, kind: 'trigger', css: 'kind-trigger', detail: `kept because: ${reason}` });
-    } else if (tag === 'capture-idle') {
-      entries.push({ t: event.timestamp, kind: 'idle', css: 'kind-idle', detail: 'no interaction — recording paused' });
-    } else if (tag === 'capture-idle-end') {
-      entries.push({ t: event.timestamp, kind: 'resumed', css: 'kind-idle', detail: 'activity resumed' });
     } else if (tag === 'capture-click') {
       const payload = event.data.payload || {};
       const label = payload.text ? `“${payload.text}”` : payload.selector || '';

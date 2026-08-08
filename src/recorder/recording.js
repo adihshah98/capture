@@ -1,6 +1,7 @@
 import { record } from 'rrweb';
 import { startClickCapture } from './clicks.js';
 import { startViewportCapture } from './viewport.js';
+import { startVisibilityCapture } from './visibility.js';
 import { config } from './config.js';
 import { getSession } from './identity.js';
 import { status, setStatus, setSessionId } from './state.js';
@@ -11,8 +12,9 @@ export let stopFn = null;
 
 let stopClicks = null;
 let stopViewport = null;
+let stopVisibility = null;
 
-function stopClickListener() {
+function stopAuxCapture() {
   if (stopClicks) {
     stopClicks();
     stopClicks = null;
@@ -20,6 +22,10 @@ function stopClickListener() {
   if (stopViewport) {
     stopViewport();
     stopViewport = null;
+  }
+  if (stopVisibility) {
+    stopVisibility();
+    stopVisibility = null;
   }
 }
 
@@ -30,15 +36,15 @@ const isInteractive = (event) =>
 let idle = false;
 let lastUserActivity = Date.now();
 
-function pushMarker(tag) {
-  pushEvent({ type: 5, data: { tag, payload: {} }, timestamp: Date.now() });
+function pushMarker(tag, payload = {}, at = Date.now()) {
+  pushEvent({ type: 5, data: { tag, payload }, timestamp: at });
 }
 
 export function stopRecording(nextStatus) {
   setStatus(nextStatus);
   resetBuffer();
   stopFlushTimer();
-  stopClickListener();
+  stopAuxCapture();
   if (stopFn) {
     stopFn();
     stopFn = null;
@@ -56,7 +62,7 @@ function onSessionRotated(next) {
   if (!next.sampled) {
     setStatus('disabled');
     setTimeout(() => {
-      stopClickListener();
+      stopAuxCapture();
       if (stopFn) {
         stopFn();
         stopFn = null;
@@ -125,6 +131,10 @@ export function startRecording() {
     config
   );
   stopViewport = startViewportCapture((payload) => record.addCustomEvent('capture-viewport', payload));
+  stopVisibility = startVisibilityCapture((state, at) => {
+    pushMarker('capture-visibility', { state }, at);
+    if (state === 'hidden') flush('hidden');
+  });
   scheduleFlush();
   checkUrlTriggers();
 }

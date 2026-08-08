@@ -34,9 +34,6 @@ async function boot() {
 
   window.addEventListener('pagehide', () => flush('unload'));
   window.addEventListener('beforeunload', () => flush('unload'));
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') flush('hidden');
-  });
 }
 
 function publishConsentApi() {

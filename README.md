@@ -212,6 +212,11 @@ Optional config, before the tag (inline values win over the derived ones):
   Interaction wakes it with a `capture-idle-end` marker plus a fresh full snapshot
   so replay resumes from current reality. Only real interaction extends the
   session's lifetime — a tab left open on an animating page still rotates.
+- **Presence** — every tab records a `capture-visibility` marker for its starting
+  state and each later change between `focused`, `unfocused` (page on screen but the
+  window is not) and `hidden` (another tab, another app, phone locked). This is what
+  separates a visitor who walked away from one who sat on the page hesitating: the
+  timeline labels each idle gap accordingly instead of calling both "idle".
 - **Privacy (on by default)** — `maskAllInputs: true` (all input text becomes `*`
   before leaving the browser), `class="capture-block"` redacts an element entirely,
   `class="capture-mask"` masks text content. Verified: raw form values never appear
