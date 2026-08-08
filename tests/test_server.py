@@ -730,6 +730,28 @@ class TestCohort(ServerCase):
         qs = urllib.parse.urlencode(params)
         return f"{self.base}/api/cohorts?{qs}"
 
+    def analyze_cohort_url(self, cohort_id, **extra):
+        qs = urllib.parse.urlencode(extra) if extra else ""
+        return f"{self.base}/api/cohorts/{cohort_id}/analyze" + (f"?{qs}" if qs else "")
+
+    def create_and_analyze(self, purchased=1, all_n=0, **extra):
+        status, body = request(
+            self.create_cohort_url(purchased=purchased, all_n=all_n, **extra),
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 201, body)
+        cohort = json.loads(body)
+        # Idle until Start; already-cached write-ups may enrich straight to done.
+        self.assertIn(cohort["status"], ("idle", "done"))
+        self.assertNotEqual(cohort["status"], "running")
+        self.assertTrue(cohort.get("selection"))
+        status, body = request(
+            self.analyze_cohort_url(cohort["id"]), method="POST", data=b""
+        )
+        self.assertEqual(status, 202, body)
+        return json.loads(body)
+
     def cohorts(self):
         status, body = request(f"{self.base}/api/cohorts")
         self.assertEqual(status, 200)
@@ -778,14 +800,11 @@ class TestCohort(ServerCase):
             self.assertEqual(self.ingest(sid), 200)
             self.seed_analysis(sid)
 
-        status, body = request(
-            self.create_cohort_url(purchased=2, all_n=2), method="POST", data=b""
-        )
-        self.assertEqual(status, 202, body)
-        cohort = json.loads(body)
+        cohort = self.create_and_analyze(purchased=2, all_n=2)
         self.assertEqual(cohort["purchased_n"], 2)
         self.assertEqual(cohort["all_n"], 2)
         self.assertEqual(len(cohort["sessions"]), 4)
+        self.assertIn("purchased", cohort.get("selection", ""))
         filters = {s["filter"] for s in cohort["sessions"]}
         self.assertEqual(filters, {"purchased", "all"})
         purchased_ids = {s["session_id"] for s in cohort["sessions"] if s["filter"] == "purchased"}
@@ -822,11 +841,8 @@ class TestCohort(ServerCase):
 
         ids = []
         for _ in range(2):
-            status, body = request(
-                self.create_cohort_url(purchased=1, all_n=0), method="POST", data=b""
-            )
-            self.assertEqual(status, 202, body)
-            cohort_id = json.loads(body)["id"]
+            cohort = self.create_and_analyze(purchased=1, all_n=0)
+            cohort_id = cohort["id"]
             ids.append(cohort_id)
             self.wait_done(cohort_id)
             # Ids embed a millisecond stamp; keep the two runs distinguishable.
@@ -902,11 +918,8 @@ class TestCohort(ServerCase):
         self.assertEqual(self.ingest(sid), 200)
         self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
         self.seed_analysis(sid)
-        status, body = request(
-            self.create_cohort_url(purchased=1, all_n=0), method="POST", data=b""
-        )
-        self.assertEqual(status, 202)
-        cohort_id = json.loads(body)["id"]
+        cohort = self.create_and_analyze(purchased=1, all_n=0)
+        cohort_id = cohort["id"]
         self.wait_done(cohort_id)
         return cohort_id
 
@@ -1059,8 +1072,12 @@ class TestCutEndpoint(ServerCase):
         status, body = request(
             f"{self.base}/api/cohorts?{qs}", method="POST", data=b""
         )
-        self.assertEqual(status, 202, body)
+        self.assertEqual(status, 201, body)
         cohort_id = json.loads(body)["id"]
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}/analyze", method="POST", data=b""
+        )
+        self.assertEqual(status, 202, body)
         deadline = time.time() + 10
         while time.time() < deadline:
             _, body = request(f"{self.base}/api/cohorts/{cohort_id}")
@@ -1223,6 +1240,11 @@ class TestCutSlices(ServerCase):
         )
         status, body = request(
             f"{self.base}/api/cohorts?{qs}", method="POST", data=b""
+        )
+        self.assertEqual(status, 201, body)
+        cohort_id = json.loads(body)["id"]
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}/analyze", method="POST", data=b""
         )
         self.assertEqual(status, 202, body)
         cohort_id = json.loads(body)["id"]

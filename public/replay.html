@@ -31,9 +31,21 @@
     .insights-toolbar h2 { font-size: 14px; margin: 0; text-transform: none; letter-spacing: 0; color: #1c1e21; padding: 0; }
     .insights-toolbar .meta { font-size: 12px; color: #6b7280; }
     .insights-toolbar .spacer { flex: 1; }
-    #cohort-run { border: 1px solid #4f46e5; background: #4f46e5; color: #fff; border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
-    #cohort-run:hover:not(:disabled) { background: #4338ca; }
-    #cohort-run:disabled { background: #f0f2f5; border-color: #d0d3d8; color: #9ca3af; cursor: default; }
+    #cohort-run, #cohort-analyze, #cohort-pause {
+      border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+    }
+    #cohort-run, #cohort-analyze {
+      border: 1px solid #4f46e5; background: #4f46e5; color: #fff;
+    }
+    #cohort-run:hover:not(:disabled), #cohort-analyze:hover:not(:disabled) { background: #4338ca; }
+    #cohort-pause {
+      border: 1px solid #d0d3d8; background: #fff; color: #374151;
+    }
+    #cohort-pause:hover:not(:disabled) { background: #f8fafc; border-color: #9ca3af; }
+    #cohort-run:disabled, #cohort-analyze:disabled, #cohort-pause:disabled {
+      background: #f0f2f5; border-color: #d0d3d8; color: #9ca3af; cursor: default;
+    }
+    #cohort-selection { font-size: 12px; color: #6b7280; max-width: 520px; line-height: 1.35; }
     #cut-refresh { border: 1px solid #d0d3d8; background: #fff; color: #6b7280; border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
     #cut-refresh:hover:not(:disabled) { background: #f0f2f5; color: #1c1e21; }
     #cut-refresh:disabled { opacity: 0.45; cursor: default; }
@@ -300,7 +312,10 @@
         <select id="cohort-select"><option value="">No cohorts yet</option></select>
       </label>
       <button type="button" id="cohort-rename" class="link-btn" disabled>Rename</button>
+      <span class="meta" id="cohort-selection"></span>
       <span class="spacer"></span>
+      <button type="button" id="cohort-pause" disabled hidden>Pause analysis</button>
+      <button type="button" id="cohort-analyze" disabled>Start analysis</button>
       <button type="button" id="cohort-run" disabled>New cohort</button>
     </div>
     <div class="insights-tabs">
@@ -329,7 +344,7 @@
         <span class="meta" id="cohort-progress">No cohort yet</span>
       </div>
       <div id="cohort-table-wrap">
-        <div id="cohort-empty">Create a new cohort to sample the latest 50 purchased + 50 non-purchase ashwamag-01 sessions (≥5s). Prior cohorts stay in the dropdown. Open any row to watch it in Replay.</div>
+        <div id="cohort-empty">Create a new cohort to sample sessions, review the selection, then start analysis. Prior cohorts stay in the dropdown. Open any row to watch it in Replay.</div>
       </div>
     </section>
   </div>

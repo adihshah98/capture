@@ -1236,6 +1236,14 @@ async def _run_cohort_job(pool: Path, cohort_id: str, force: bool = False) -> No
         if not cohort:
             return
         await analyze.run_cohort_job(pool, cohort, force=force)
+    except asyncio.CancelledError:
+        cohort = analyze.read_cohort(pool, cohort_id)
+        if cohort:
+            batch_name = (cohort.get("batch") or {}).get("name")
+            if batch_name:
+                await analyze.cancel_gemini_batch(batch_name)
+            analyze.mark_cohort_paused(pool, cohort)
+        raise
     finally:
         _cohort_tasks.pop(key, None)
 
@@ -1317,6 +1325,7 @@ def list_cohorts(request: Request, project: Optional[str] = Query(None)):
             {
                 "id": live["id"],
                 "label": live.get("label") or live["id"],
+                "selection": live.get("selection"),
                 "created_at": live.get("created_at"),
                 "status": live.get("status"),
                 "progress": live.get("progress"),
@@ -1365,11 +1374,9 @@ async def create_cohort(
     all_n: int = Query(analyze.COHORT_DEFAULT_ALL_N, ge=0, le=50, alias="all"),
     min_duration_ms: int = Query(analyze.COHORT_MIN_DURATION_MS, ge=0),
     url_contains: str = Query(analyze.COHORT_URL_CONTAINS),
-    force: bool = Query(False),
 ):
-    """Sample a new cohort. Each call mints its own id — prior cohorts are kept."""
+    """Sample a new cohort only — does not start analysis. Prior cohorts are kept."""
     require_read_access(request, project)
-    _require_analysis_runtime()
     pool = resolve_pool(project)
 
     with _index_lock:
@@ -1386,14 +1393,71 @@ async def create_cohort(
     if not cohort["sessions"]:
         raise ApiError(400, "no sessions matched the purchased/all sample")
 
-    analyze.write_cohort(pool, {**cohort, "status": "running"})
-    key = _cohort_key(pool, cohort["id"])
-    task = asyncio.create_task(_run_cohort_job(pool, cohort["id"], force=force))
-    _cohort_tasks[key] = task
+    analyze.write_cohort(pool, cohort)
     return JSONResponse(
         cohort_response(pool, analyze.enrich_cohort_status(pool, cohort)),
+        status_code=201,
+    )
+
+
+@app.post("/api/cohorts/{cohort_id}/analyze")
+async def start_cohort_analysis(
+    request: Request,
+    cohort_id: str,
+    project: Optional[str] = Query(None),
+    force: bool = Query(False),
+):
+    """Start (or resume) analysis for an existing idle/paused cohort."""
+    require_read_access(request, project)
+    _require_analysis_runtime()
+    pool = resolve_pool(project)
+    cohort = _resolve_cohort_or_404(pool, cohort_id)
+
+    key = _cohort_key(pool, cohort["id"])
+    existing = _cohort_tasks.get(key)
+    if existing and not existing.done():
+        return JSONResponse(
+            cohort_response(pool, analyze.enrich_cohort_status(pool, cohort)),
+            status_code=202,
+        )
+
+    analyze.write_cohort(pool, {**cohort, "status": "running"})
+    task = asyncio.create_task(_run_cohort_job(pool, cohort["id"], force=force))
+    _cohort_tasks[key] = task
+    live = analyze.read_cohort(pool, cohort["id"]) or cohort
+    return JSONResponse(
+        cohort_response(pool, analyze.enrich_cohort_status(pool, live)),
         status_code=202,
     )
+
+
+@app.post("/api/cohorts/{cohort_id}/pause")
+async def pause_cohort_analysis(
+    request: Request,
+    cohort_id: str,
+    project: Optional[str] = Query(None),
+):
+    """Pause an in-flight cohort analysis; completed session write-ups are kept."""
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    cohort = _resolve_cohort_or_404(pool, cohort_id)
+
+    key = _cohort_key(pool, cohort["id"])
+    task = _cohort_tasks.get(key)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    else:
+        batch_name = (cohort.get("batch") or {}).get("name")
+        if batch_name:
+            await analyze.cancel_gemini_batch(batch_name)
+        analyze.mark_cohort_paused(pool, cohort)
+
+    live = analyze.read_cohort(pool, cohort_id) or cohort
+    return cohort_response(pool, analyze.enrich_cohort_status(pool, live))
 
 
 @app.post("/api/cohorts/{cohort_id}/sessions/{session_id}/retry")

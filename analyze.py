@@ -383,20 +383,43 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
             queued += 1
         sessions.append(row)
 
-    status = cohort.get("status") or "queued"
-    if status not in ("queued", "running", "done", "error"):
-        status = "queued"
-    if running or (queued and status == "running"):
-        status = "running"
-    elif errors and done + errors >= len(sessions) and not queued and not running:
-        status = "error" if done == 0 else "done"
-    elif done >= len(sessions) and sessions:
+    status = cohort.get("status") or "idle"
+    if status not in ("idle", "queued", "running", "paused", "done", "error"):
+        status = "idle"
+
+    if done >= len(sessions) and sessions:
         status = "done"
     elif not sessions:
         status = "done"
+    elif status == "idle":
+        # Stay sampled-until-started unless work is somehow already in flight.
+        if running:
+            status = "running"
+    elif status == "paused":
+        # Keep paused until the user hits Start again (even if jobs look stale).
+        if running:
+            status = "running"
+    elif running or (queued and status in ("running", "queued")):
+        status = "running"
+    elif errors and done + errors >= len(sessions) and not queued and not running:
+        status = "error" if done == 0 else "done"
+
+    selection = cohort.get("selection")
+    if not selection:
+        selection = cohort_selection_text(
+            int(cohort.get("purchased_n") or 0),
+            int(cohort.get("all_n") or 0),
+            min_duration_ms=int(
+                cohort.get("min_duration_ms")
+                if cohort.get("min_duration_ms") is not None
+                else COHORT_MIN_DURATION_MS
+            ),
+            url_contains=str(cohort.get("url_contains") or ""),
+        )
 
     return {
         **cohort,
+        "selection": selection,
         "status": status,
         "sessions": sessions,
         "progress": {
@@ -1287,6 +1310,24 @@ def sample_cohort_rows(
     return sessions
 
 
+def cohort_selection_text(
+    purchased_n: int,
+    all_n: int,
+    *,
+    min_duration_ms: int = COHORT_MIN_DURATION_MS,
+    url_contains: str = COHORT_URL_CONTAINS,
+) -> str:
+    """Human-readable sampling rule for the Insights UI."""
+    page = (url_contains or "").strip() or "any page"
+    min_s = max(0, int(min_duration_ms)) / 1000
+    min_label = f"{min_s:g}s" if min_s != int(min_s) else f"{int(min_s)}s"
+    return (
+        f"Chosen as the latest {purchased_n} purchased + {all_n} non-purchase "
+        f"sessions on {page} with duration ≥{min_label} (last_seen − first_seen), "
+        f"preferring sessions with more clicks when timestamps tie."
+    )
+
+
 def build_cohort(
     conn: sqlite3.Connection,
     pool_key: str,
@@ -1308,13 +1349,21 @@ def build_cohort(
     stamp = time.strftime("%b %-d, %H:%M", time.localtime(now / 1000))
     page = (url_contains or "").strip() or "all pages"
     min_s = max(0, int(min_duration_ms)) // 1000
+    selection = cohort_selection_text(
+        purchased_n,
+        all_n,
+        min_duration_ms=min_duration_ms,
+        url_contains=url_contains,
+    )
     return {
         "id": f"cohort-{now}",
         # Auto label; renameable once the user decides a cohort is worth keeping.
         "label": f"{purchased_n}+{all_n} · {page} · ≥{min_s}s · {stamp}",
+        "selection": selection,
         "created_at": now,
         "updated_at": now,
-        "status": "queued",
+        # Sampled only — analysis starts via POST .../analyze.
+        "status": "idle",
         "purchased_n": purchased_n,
         "all_n": all_n,
         "min_duration_ms": int(min_duration_ms),
@@ -1680,6 +1729,40 @@ async def wait_gemini_batch(job_name: str, *, poll_s: Optional[float] = None):
         await asyncio.sleep(max(1.0, interval))
 
 
+async def cancel_gemini_batch(job_name: str) -> None:
+    """Best-effort cancel of an in-flight Batch job."""
+    if not job_name:
+        return
+    from google import genai
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    try:
+        await client.aio.batches.cancel(name=job_name)
+    except Exception as exc:
+        print(f"batch cancel {job_name}: {exc}")
+
+
+def mark_cohort_paused(pool: Path, cohort: dict) -> dict:
+    """Persist paused status and return in-flight session rows to queued."""
+    for entry in cohort.get("sessions") or []:
+        session_dir = pool / entry["session_id"]
+        if read_analysis(session_dir):
+            entry["status"] = "done"
+            entry["analysis"] = ANALYSIS_FILE
+            entry.pop("error", None)
+            continue
+        if entry.get("status") in ("running", "queued") or (
+            read_job(session_dir) or {}
+        ).get("status") == "running":
+            entry["status"] = "queued"
+            entry.pop("error", None)
+            clear_job(session_dir)
+    cohort = {**cohort, "status": "paused"}
+    cohort.pop("batch", None)
+    write_cohort(pool, cohort)
+    return enrich_cohort_status(pool, cohort)
+
+
 async def extract_session_digest(
     session_dir: Path, chunk_names: list, *, force: bool = False
 ) -> dict:
@@ -1788,89 +1871,101 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
     Mutates and persists the cohort as work progresses. Returns the enriched
     final cohort dict. Never deletes or overwrites other cohorts.
     """
-    if (cohort.get("batch") or {}).get("name") and not force:
-        return await resume_cohort_batch(pool, cohort)
+    try:
+        if (cohort.get("batch") or {}).get("name") and not force:
+            return await resume_cohort_batch(pool, cohort)
 
-    cohort = {**cohort, "status": "running"}
-    cohort.pop("batch", None)
-    write_cohort(pool, cohort)
-
-    pending_entries = []
-    for entry in cohort.get("sessions") or []:
-        session_dir = pool / entry["session_id"]
-        if not force and read_analysis(session_dir):
-            entry["status"] = "done"
-            entry["analysis"] = ANALYSIS_FILE
-            entry.pop("error", None)
-            continue
-        entry["status"] = "queued"
-        entry.pop("error", None)
-        pending_entries.append(entry)
-    write_cohort(pool, cohort)
-
-    if not pending_entries:
-        return enrich_cohort_status(pool, read_cohort(pool, cohort["id"]) or cohort)
-
-    prepared = []  # (entry, digest)
-
-    async def extract_one(entry: dict) -> None:
-        session_dir = pool / entry["session_id"]
-        entry["status"] = "running"
-        write_job(session_dir, "running")
+        cohort = {**cohort, "status": "running"}
+        cohort.pop("batch", None)
         write_cohort(pool, cohort)
-        try:
-            chunks = session_chunk_names(session_dir)
-            if not chunks:
-                raise RuntimeError("no chunks to analyze")
-            if force:
-                clear_analysis(session_dir)
-            digest = await extract_session_digest(session_dir, chunks, force=True)
-            prepared.append((entry, digest))
-        except Exception as exc:
-            entry["status"] = "error"
-            entry["error"] = str(exc) or "analysis failed"
-            write_job(session_dir, "error", error=entry["error"])
+
+        pending_entries = []
+        for entry in cohort.get("sessions") or []:
+            session_dir = pool / entry["session_id"]
+            if not force and read_analysis(session_dir):
+                entry["status"] = "done"
+                entry["analysis"] = ANALYSIS_FILE
+                entry.pop("error", None)
+                continue
+            entry["status"] = "queued"
+            entry.pop("error", None)
+            pending_entries.append(entry)
+        write_cohort(pool, cohort)
+
+        if not pending_entries:
+            return enrich_cohort_status(pool, read_cohort(pool, cohort["id"]) or cohort)
+
+        prepared = []  # (entry, digest)
+
+        async def extract_one(entry: dict) -> None:
+            session_dir = pool / entry["session_id"]
+            entry["status"] = "running"
+            write_job(session_dir, "running")
             write_cohort(pool, cohort)
+            try:
+                chunks = session_chunk_names(session_dir)
+                if not chunks:
+                    raise RuntimeError("no chunks to analyze")
+                if force:
+                    clear_analysis(session_dir)
+                digest = await extract_session_digest(session_dir, chunks, force=True)
+                prepared.append((entry, digest))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                entry["status"] = "error"
+                entry["error"] = str(exc) or "analysis failed"
+                write_job(session_dir, "error", error=entry["error"])
+                write_cohort(pool, cohort)
 
-    await asyncio.gather(*(extract_one(e) for e in pending_entries), return_exceptions=True)
+        await asyncio.gather(*(extract_one(e) for e in pending_entries), return_exceptions=True)
 
-    if not prepared:
-        return enrich_cohort_status(pool, read_cohort(pool, cohort["id"]) or cohort)
+        if not prepared:
+            return enrich_cohort_status(pool, read_cohort(pool, cohort["id"]) or cohort)
 
-    use_batch = ANALYZE_BATCH and ANALYSIS_ENABLED
-    if use_batch:
-        try:
-            requests = [
-                build_inlined_session_request(
-                    entry["session_id"], digest, digest.get("frames") or []
+        use_batch = ANALYZE_BATCH and ANALYSIS_ENABLED
+        if use_batch:
+            try:
+                requests = [
+                    build_inlined_session_request(
+                        entry["session_id"], digest, digest.get("frames") or []
+                    )
+                    for entry, digest in prepared
+                ]
+                job_name = await submit_gemini_batch(
+                    requests, display_name=f"capture-{cohort['id']}"
                 )
-                for entry, digest in prepared
-            ]
-            job_name = await submit_gemini_batch(
-                requests, display_name=f"capture-{cohort['id']}"
-            )
-            cohort["batch"] = {
-                "name": job_name,
-                "submitted_at": int(time.time() * 1000),
-                "session_ids": [e["session_id"] for e, _ in prepared],
-            }
-            write_cohort(pool, cohort)
-            await apply_cohort_batch(pool, cohort, prepared, job_name=job_name)
-        except Exception as exc:
-            # Fall back to interactive calls so a Batch outage does not strand
-            # an already-extracted cohort.
-            print(f"cohort batch failed ({exc}); falling back to sync Gemini")
-            cohort.pop("batch", None)
-            write_cohort(pool, cohort)
+                cohort["batch"] = {
+                    "name": job_name,
+                    "submitted_at": int(time.time() * 1000),
+                    "session_ids": [e["session_id"] for e, _ in prepared],
+                }
+                write_cohort(pool, cohort)
+                await apply_cohort_batch(pool, cohort, prepared, job_name=job_name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Fall back to interactive calls so a Batch outage does not strand
+                # an already-extracted cohort.
+                print(f"cohort batch failed ({exc}); falling back to sync Gemini")
+                cohort.pop("batch", None)
+                write_cohort(pool, cohort)
+                await _cohort_sync_model(pool, cohort, prepared)
+        else:
             await _cohort_sync_model(pool, cohort, prepared)
-    else:
-        await _cohort_sync_model(pool, cohort, prepared)
 
-    live = read_cohort(pool, cohort["id"]) or cohort
-    live.pop("batch", None)
-    final = enrich_cohort_status(pool, live)
-    write_cohort(pool, final)
-    return final
+        live = read_cohort(pool, cohort["id"]) or cohort
+        live.pop("batch", None)
+        final = enrich_cohort_status(pool, live)
+        write_cohort(pool, final)
+        return final
+    except asyncio.CancelledError:
+        live = read_cohort(pool, cohort["id"]) or cohort
+        batch_name = (live.get("batch") or {}).get("name")
+        if batch_name:
+            await cancel_gemini_batch(batch_name)
+        mark_cohort_paused(pool, live)
+        raise
 
 
 async def apply_cohort_batch(
