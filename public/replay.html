@@ -562,17 +562,17 @@
     /* Sits inline inside an observation, so it must not break the sentence. */
     .cut-cite {
       display: inline; margin: 0; padding: 0 1px; border: 0; background: none;
-      font: inherit; font-variant-numeric: tabular-nums; color: #4338ca;
+      font: inherit; font-variant-numeric: tabular-nums; color: var(--accent);
       cursor: pointer; white-space: nowrap;
-      text-decoration: underline; text-decoration-color: #a5b4fc;
-      text-underline-offset: 2px;
+      text-decoration: underline; text-decoration-color: var(--accent-line);
+      text-underline-offset: 2px; transition: color var(--t), text-decoration-color var(--t);
     }
-    .cut-cite:hover { color: #3730a3; text-decoration-color: #6366f1; }
+    .cut-cite:hover { color: var(--accent-hover); text-decoration-color: var(--accent); }
     .cut-cite:focus-visible {
-      outline: 2px solid #6366f1; outline-offset: 1px; border-radius: 2px;
+      outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px;
     }
-    .cut-block.friction .cut-cite { color: #b91c1c; text-decoration-color: #fecaca; }
-    .cut-block.friction .cut-cite:hover { color: #991b1b; text-decoration-color: #ef4444; }
+    .cut-block.friction .cut-cite { color: var(--neg); text-decoration-color: rgb(196 52 44 / 0.4); }
+    .cut-block.friction .cut-cite:hover { color: var(--neg); text-decoration-color: var(--neg); }
     .cut-action {
       margin: 4px 0 0; padding-left: 10px; border-left: 2px solid var(--accent-line);
       font-size: 12px; line-height: 1.5; color: var(--text-dim);
