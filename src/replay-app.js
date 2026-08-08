@@ -16,6 +16,14 @@ addEventListener('keydown', (e) => {
   }
 });
 
+const analysisPanelEl = document.getElementById('analysis-panel');
+const analysisCollapseEl = document.getElementById('analysis-collapse');
+analysisCollapseEl.addEventListener('click', () => {
+  const collapsed = analysisPanelEl.classList.toggle('collapsed');
+  analysisCollapseEl.setAttribute('aria-expanded', String(!collapsed));
+  analysisCollapseEl.setAttribute('aria-label', `${collapsed ? 'Expand' : 'Collapse'} AI analysis`);
+});
+
 const themeToggleEl = document.getElementById('theme-toggle');
 themeToggleEl.addEventListener('click', () => {
   const dark = document.documentElement.dataset.theme === 'dark';

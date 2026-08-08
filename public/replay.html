@@ -300,9 +300,56 @@
 
     main {
       display: grid; grid-template-columns: minmax(0, 1fr) 330px;
-      grid-template-rows: auto minmax(0, 1fr); gap: 12px; min-width: 0; min-height: 0;
+      grid-template-rows: auto auto minmax(0, 1fr); gap: 12px; min-width: 0; min-height: 0;
     }
     .title-row { display: flex; align-items: center; gap: 10px; grid-column: 1 / -1; min-width: 0; }
+
+    #session-strip {
+      grid-column: 1 / -1; position: relative; margin-top: -6px;
+      display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+      font-size: 11.5px; color: var(--text-dim); min-height: 18px;
+    }
+    #session-strip .item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+    #session-strip .item svg { width: 13px; height: 13px; color: var(--text-faint); flex: none; }
+    #session-strip .sep { color: var(--border-strong); user-select: none; }
+    #session-strip .num { font-variant-numeric: tabular-nums; }
+    #session-strip .warnish { color: var(--warn); }
+    #session-strip .bad { color: var(--neg); font-weight: 600; }
+    #session-strip .good { color: var(--pos); font-weight: 600; }
+    #session-strip .live { color: var(--pos); font-weight: 600; }
+    #params-toggle {
+      display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
+      border: 1px solid transparent; background: var(--surface-2); color: var(--text-dim);
+      border-radius: 999px; padding: 2px 8px; font-size: 11.5px;
+      transition: background var(--t), color var(--t), border-color var(--t);
+    }
+    #params-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+    #params-toggle[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+    #params-toggle svg { width: 11px; height: 11px; transition: transform var(--t); }
+    #params-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+
+    #url-params {
+      position: absolute; top: calc(100% + 7px); left: 0; z-index: 30;
+      min-width: 300px; max-width: 480px; max-height: 340px; overflow-y: auto;
+      background: var(--surface); border: 1px solid var(--border-strong);
+      border-radius: var(--r); box-shadow: var(--shadow-lg); padding: 8px 0 10px;
+      animation: pop-in 140ms cubic-bezier(0.2, 0.6, 0.3, 1) both;
+    }
+    #url-params[hidden] { display: none !important; }
+    @keyframes pop-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+    #url-params .url {
+      font-family: var(--mono); font-size: 11.5px; color: var(--accent);
+      padding: 6px 14px 2px; overflow-wrap: anywhere;
+    }
+    #url-params table {
+      width: calc(100% - 28px); margin: 0 14px; border-collapse: collapse;
+      font-family: var(--mono); font-size: 11.5px;
+    }
+    #url-params td {
+      padding: 3px 6px 3px 0; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere;
+    }
+    #url-params tr:last-child td { border-bottom: none; }
+    #url-params td.k { color: var(--text-faint); white-space: nowrap; padding-right: 14px; }
     #session-title {
       font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -351,15 +398,12 @@
       border-radius: var(--r-lg); box-shadow: var(--shadow-sm);
       display: flex; flex-direction: column; min-height: 0; overflow: hidden;
     }
-    .devtools-tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); flex: none; }
-    .devtools-tabs button {
-      border: none; background: none; padding: 6px 10px 8px; font-size: 12px; font-weight: 500;
-      color: var(--text-dim); border-bottom: 2px solid transparent; margin-bottom: -1px;
-      transition: color var(--t), border-color var(--t);
+    .panel-head {
+      flex: none; display: flex; align-items: center; gap: 8px;
+      padding: 11px 14px; border-bottom: 1px solid var(--border);
     }
-    .devtools-tabs button:hover { color: var(--text); }
-    .devtools-tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
-    .devtools-tabs .count { font-weight: 400; color: var(--text-faint); }
+    .panel-head h2 { margin: 0; font-size: 12px; font-weight: 600; color: var(--text); letter-spacing: 0; }
+    .panel-head .count { font-weight: 400; color: var(--text-faint); }
 
     #timeline-list { list-style: none; margin: 0; padding: 4px 0; flex: 1 1 0; min-height: 0; overflow-y: auto; font-size: 12px; }
     #timeline-list li {
@@ -380,29 +424,24 @@
     #timeline-list li.current { background: var(--accent-soft); border-left-color: var(--accent); }
     .empty { color: var(--text-faint); padding: 12px 14px; font-size: 12.5px; line-height: 1.5; }
 
-    .devtools-meta { flex: 0 1 auto; min-height: 0; max-height: 55%; overflow-y: auto; border-top: 1px solid var(--border); }
-    .devtools-meta h2, .analysis-head h2 {
-      font-size: 11.5px; font-weight: 600; color: var(--text-dim);
-      padding: 12px 14px 5px; margin: 0; letter-spacing: 0;
+    #analysis-panel { flex: none; border-top: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+    #analysis-panel[hidden] { display: none !important; }
+    .analysis-head { flex: none; display: flex; align-items: center; gap: 6px; padding: 8px 12px 8px 6px; }
+    .analysis-head h2 { flex: 1; margin: 0; font-size: 12px; font-weight: 600; color: var(--text); letter-spacing: 0; }
+    .collapse {
+      display: grid; place-items: center; width: 22px; height: 22px; flex: none;
+      border: none; background: transparent; color: var(--text-faint); border-radius: var(--r-xs);
+      transition: background var(--t), color var(--t);
     }
-    #url-params { border-top: 1px solid var(--border); padding-bottom: 8px; }
-    #session-details { padding-bottom: 8px; }
-    #url-params .url { font-family: var(--mono); font-size: 11.5px; color: var(--accent); padding: 6px 14px 2px; overflow-wrap: anywhere; }
-    #url-params table, #session-details table {
-      width: calc(100% - 28px); margin: 0 14px; border-collapse: collapse;
-      font-family: var(--mono); font-size: 11.5px;
-    }
-    #url-params td, #session-details td {
-      padding: 3px 6px 3px 0; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere;
-    }
-    #url-params tr:last-child td, #session-details tr:last-child td { border-bottom: none; }
-    #url-params td.k, #session-details td.k { color: var(--text-faint); white-space: nowrap; padding-right: 14px; }
-
-    #analysis-panel { border-top: 1px solid var(--border); }
-    .analysis-head { display: flex; align-items: center; gap: 8px; padding-right: 12px; }
-    .analysis-head h2 { flex: 1; }
+    .collapse:hover { background: var(--surface-2); color: var(--text); }
+    .collapse svg { width: 14px; height: 14px; transition: transform var(--t); }
+    .collapse[aria-expanded="false"] svg { transform: rotate(-90deg); }
     #analyze-btn { flex: none; font-size: 11.5px; padding: 4px 10px; }
-    #analysis-body { padding: 0 14px 12px; font-size: 12.5px; line-height: 1.55; color: var(--text-dim); }
+    #analysis-body {
+      flex: 0 1 auto; min-height: 0; max-height: 42vh; overflow-y: auto;
+      padding: 0 14px 12px; font-size: 12.5px; line-height: 1.55; color: var(--text-dim);
+    }
+    #analysis-panel.collapsed #analysis-body { display: none; }
     #analysis-body h4 { font-size: 11.5px; font-weight: 600; color: var(--text); margin: 12px 0 4px; letter-spacing: 0; text-transform: none; }
     #analysis-body p { margin: 0 0 8px; }
     #analysis-body ul { margin: 0 0 8px; padding-left: 18px; }
@@ -610,6 +649,9 @@
         <span id="load-progress"></span>
         <span id="asset-errors" title="Resources the recorded page references could not be fetched during replay" hidden></span>
       </div>
+      <div id="session-strip">
+        <div id="url-params" hidden></div>
+      </div>
       <div id="player-host">
         <div id="stage">
           <div id="skip-note" hidden></div>
@@ -637,22 +679,21 @@
         </div>
       </div>
       <section class="devtools-panel">
-        <div class="devtools-tabs">
-          <button id="tab-timeline" class="active">Timeline <span class="count" id="timeline-count"></span></button>
+        <div class="panel-head">
+          <h2>Timeline <span class="count" id="timeline-count"></span></h2>
         </div>
         <ul id="timeline-list"><li class="empty">Clicks, triggers, idle gaps and navigations appear here.</li></ul>
-        <div class="devtools-meta">
-          <h2>Session</h2>
-          <div id="session-details"><div class="empty">Device, duration and visitor details appear here.</div></div>
-          <h2>URL &amp; params</h2>
-          <div id="url-params"><div class="empty">Page URLs and their query params appear here.</div></div>
-          <div id="analysis-panel" hidden>
-            <div class="analysis-head">
-              <h2>AI analysis</h2>
-              <button id="analyze-btn" class="btn primary" disabled>Analyze with AI</button>
-            </div>
-            <div id="analysis-body"><p class="empty">Analyze this session to see where attention went.</p></div>
+        <div id="analysis-panel" hidden>
+          <div class="analysis-head">
+            <button id="analysis-collapse" class="collapse" aria-expanded="true" aria-label="Collapse AI analysis">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </button>
+            <h2>AI analysis</h2>
+            <button id="analyze-btn" class="btn primary" disabled>Analyze with AI</button>
           </div>
+          <div id="analysis-body"><p class="empty">Analyze this session to see where attention went.</p></div>
         </div>
       </section>
     </main>
