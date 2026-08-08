@@ -2,6 +2,8 @@ import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 
+import { dwellByBand, maxDepthPct, sessionFacts } from './facts.mjs';
+
 const SCROLL_SOURCE = 3;
 const NAV_TIMEOUT_MS = 30000;
 const SETTLE_MS = 1200;
@@ -361,6 +363,14 @@ export async function extractSession({
   );
   const maxScrollPx = scroll.reduce((n, p) => Math.max(n, p.y || 0), 0);
 
+  // Tier 1 geometry: depth as a share of the scrollable page, and dwell per
+  // depth band weighted by active time. Both need pageHeight, which is only
+  // known once the replay has rendered, so they are computed here rather than
+  // alongside the raw scroll timeline.
+  const geometry = { pageHeight, viewport, t0: startTs, endMs: totalMs };
+  const maxDepth = maxDepthPct(scroll, geometry);
+  const dwellBands = dwellByBand(scroll, activeSpans(events, idle), geometry);
+
   const digest = {
     session: {
       durationMs: totalMs,
@@ -369,6 +379,8 @@ export async function extractSession({
       viewport,
       pageHeight,
       maxScrollPx,
+      maxDepthPct: maxDepth,
+      dwellByBand: dwellBands,
       urls,
       eventCount: events.length,
       frameCount: frames.length,
@@ -393,6 +405,11 @@ export async function extractSession({
 
   const digestPath = join(outDir, 'digest.json');
   writeFileSync(digestPath, JSON.stringify(digest, null, 2));
+
+  // Tier 1 facts land in their own file: the digest is prompt material and its
+  // shape follows what the model needs, while these are the numbers cohorts
+  // aggregate over and have to stay stable across changes to the prompt.
+  writeFileSync(join(outDir, 'facts.json'), JSON.stringify(sessionFacts(digest), null, 2));
   return digest;
 }
 
