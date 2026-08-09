@@ -1261,6 +1261,23 @@ def normalize_cut_analysis(raw, n: Optional[int] = None) -> dict:
     return out
 
 
+def cut_context(rows: list, label: str, given: str = "") -> tuple:
+    """(header, side_text, citations) — the evidence a group's questions run on.
+
+    Shared by the cut write-up and the chat, so the two always reason over the
+    same numbered write-ups and the same "already known" premises. Anything
+    that changes here changes both, which is the point: a chat that saw a
+    different context than the cut it sits under would answer questions about
+    a group the user is not looking at.
+    """
+    header = f"This group is: {label}\n"
+    if given:
+        header += "\n" + given + "\n"
+    header += "\nThe write-ups for this group follow."
+    side_text, citations = _cut_side_text(rows, "SESSIONS")
+    return header, side_text, citations
+
+
 async def call_gemini_cut(
     rows: list,
     label: str,
@@ -1275,11 +1292,7 @@ async def call_gemini_cut(
     from google.genai import types
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    header = f"This group is: {label}\n"
-    if given:
-        header += "\n" + given + "\n"
-    header += "\nThe write-ups for this group follow."
-    side_text, citations = _cut_side_text(rows, "SESSIONS")
+    header, side_text, citations = cut_context(rows, label, given)
     parts = [
         types.Part.from_text(text=header),
         types.Part.from_text(text=side_text),
