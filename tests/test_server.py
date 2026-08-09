@@ -972,6 +972,28 @@ class TestCohort(ServerCase):
         self.assertEqual(by_filter.get("a"), mobile)
         self.assertEqual(by_filter.get("b"), nonbuy)
 
+    def test_create_cohort_accepts_a_custom_label(self):
+        sid = "named" + "x" * 27
+        self.assertEqual(self.ingest(sid), 200)
+        self.seed_analysis(sid)
+        status, body = request(
+            f"{self.base}/api/cohorts?"
+            + urllib.parse.urlencode(
+                {
+                    "a": 1,
+                    "min_duration_ms": 0,
+                    "url_contains": "",
+                    "label": "  Checkout check  ",
+                }
+            ),
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 201, body)
+        cohort = json.loads(body)
+        self.assertEqual(cohort["label"], "Checkout check")
+        self.assertEqual(len(cohort["sessions"]), 1)
+
     def test_cohorts_accumulate_rather_than_overwrite(self):
         for i in range(2):
             sid = f"acc{i}" + "x" * 28
@@ -1030,6 +1052,29 @@ class TestCohort(ServerCase):
         )
         self.assertEqual(status, 400)
         self.assertIn("empty", json.loads(body)["error"])
+
+    def test_delete_removes_cohort_and_keeps_session_writeups(self):
+        sid = "delcoh" + "x" * 26
+        cohort_id = self._cohort_of_one(sid)
+        cuts = self.data_dir / "cohorts" / f"{cohort_id}.cuts.json"
+        cuts.write_text(json.dumps({"some-cut": {"label": "x"}}))
+        analysis = self.data_dir / "sessions" / sid / "analysis.json"
+        self.assertTrue(analysis.is_file())
+
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}", method="DELETE"
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(json.loads(body)["ok"])
+        self.assertNotIn(cohort_id, [c["id"] for c in self.cohorts()])
+        self.assertFalse((self.data_dir / "cohorts" / f"{cohort_id}.json").is_file())
+        self.assertFalse(cuts.is_file())
+        self.assertTrue(analysis.is_file())
+
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}", method="DELETE"
+        )
+        self.assertEqual(status, 404, body)
 
     def test_legacy_cohort_file_is_migrated_on_read(self):
         sid = "legacy" + "x" * 26
@@ -1726,6 +1771,40 @@ class TestCohortSampling(unittest.TestCase):
         self.assertEqual(
             [(s["session_id"], s["filter"]) for s in sampled],
             [("buy" + "x" * 29, "a"), ("rest" + "x" * 28, "b")],
+        )
+
+    def test_sample_time_window_and_earliest_order(self):
+        analyze, conn = self._conn(
+            [
+                ("", "old" + "x" * 29, 0, 10_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None, None),
+                ("", "mid" + "x" * 29, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None, None),
+                ("", "new" + "x" * 29, 0, 30_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None, None),
+            ]
+        )
+        windowed = analyze.sample_cohort_rows(
+            conn,
+            "",
+            purchased_n=0,
+            all_n=0,
+            any_n=5,
+            url_contains="",
+            start_ms=15_000,
+            end_ms=25_000,
+        )
+        self.assertEqual([s["session_id"] for s in windowed], ["mid" + "x" * 29])
+
+        earliest = analyze.sample_cohort_rows(
+            conn,
+            "",
+            purchased_n=0,
+            all_n=0,
+            any_n=2,
+            url_contains="",
+            order=analyze.COHORT_ORDER_EARLIEST,
+        )
+        self.assertEqual(
+            [s["session_id"] for s in earliest],
+            ["old" + "x" * 29, "mid" + "x" * 29],
         )
 
     def test_standout_line_prefers_what_stands_out_section(self):

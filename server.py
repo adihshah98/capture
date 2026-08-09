@@ -1372,6 +1372,39 @@ async def rename_cohort(request: Request, cohort_id: str, project: Optional[str]
     return cohort_response(pool, analyze.enrich_cohort_status(pool, renamed))
 
 
+@app.delete("/api/cohorts/{cohort_id}")
+async def delete_cohort(request: Request, cohort_id: str, project: Optional[str] = Query(None)):
+    """Delete a cohort and its cached cuts. Per-session write-ups are kept."""
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    cohort = analyze.read_cohort(pool, cohort_id)
+    if not cohort:
+        raise ApiError(404, "no such cohort")
+
+    key = _cohort_key(pool, cohort_id)
+    task = _cohort_tasks.get(key)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    else:
+        batch_name = (cohort.get("batch") or {}).get("name")
+        if batch_name:
+            await analyze.cancel_gemini_batch(batch_name)
+
+    # Drop any in-flight cut for this cohort.
+    prefix = f"{key}:"
+    for cut_key, cut_task in list(_cut_tasks.items()):
+        if cut_key.startswith(prefix) and cut_task and not cut_task.done():
+            cut_task.cancel()
+
+    if not analyze.delete_cohort(pool, cohort_id):
+        raise ApiError(404, "no such cohort")
+    return {"ok": True, "id": cohort_id}
+
+
 @app.get("/api/facets")
 def get_pool_facets(
     request: Request,
@@ -1401,6 +1434,10 @@ async def create_cohort(
     b_n: int = Query(0, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="b"),
     min_duration_ms: int = Query(analyze.COHORT_MIN_DURATION_MS, ge=0),
     url_contains: str = Query(analyze.COHORT_URL_CONTAINS),
+    start_ms: Optional[int] = Query(None, ge=0),
+    end_ms: Optional[int] = Query(None, ge=0),
+    order: str = Query(analyze.COHORT_ORDER_LATEST),
+    label: Optional[str] = Query(None, max_length=120),
     outcome: Optional[list] = Query(None),
     device: Optional[list] = Query(None),
     page: Optional[str] = Query(None),
@@ -1423,12 +1460,21 @@ async def create_cohort(
     Preferred: `a` (+ optional `b`) with independent cut-style filters for each
     group (`outcome`/`device`/… for A, `b_outcome`/`b_device`/… for B).
 
+    Optional `start_ms` / `end_ms` bound `last_seen`; `order` is latest or earliest.
+    Optional `label` sets the display name (otherwise an auto label is used).
     Legacy: `any` for one mixed pool, or `purchased` + `all` for a purchase
     split. Omitting sizes falls back to the default 50+50 purchased sample.
     Total sessions are capped at COHORT_MAX_SESSIONS (500).
     """
     require_read_access(request, project)
     pool = resolve_pool(project)
+
+    sort = (order or "").strip().lower()
+    if sort not in analyze.COHORT_ORDERS:
+        raise ApiError(400, "order must be latest or earliest")
+    if start_ms is not None and end_ms is not None and start_ms > end_ms:
+        raise ApiError(400, "start_ms must be <= end_ms")
+    chosen_label = analyze.clean_cohort_label(label)
 
     slice_a = _slice_from_params(
         outcome,
@@ -1502,6 +1548,10 @@ async def create_cohort(
             url_contains=url_contains,
             slice_spec=slice_a,
             slice_b=slice_b if use_groups and b_n > 0 else None,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            order=sort,
+            label=chosen_label or None,
         )
 
     if not cohort["sessions"]:

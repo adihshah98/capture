@@ -68,6 +68,9 @@ COHORT_MIN_DURATION_MS = 5000
 COHORT_URL_CONTAINS = "/pages/ashwamag-01"
 # How many newest index rows to scan when applying cut-style slice filters.
 COHORT_CANDIDATE_CAP = 5000
+COHORT_ORDER_LATEST = "latest"
+COHORT_ORDER_EARLIEST = "earliest"
+COHORT_ORDERS = (COHORT_ORDER_LATEST, COHORT_ORDER_EARLIEST)
 
 # Cohort write-ups go through Gemini Batch (≈50% cheaper). Single-session
 # Analyze stays on the interactive API. Set ANALYZE_BATCH=0 to force sync.
@@ -424,6 +427,9 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
             url_contains=str(cohort.get("url_contains") or ""),
             slice_spec=cohort.get("slice"),
             slice_b=cohort.get("slice_b"),
+            start_ms=cohort.get("start_ms"),
+            end_ms=cohort.get("end_ms"),
+            order=str(cohort.get("order") or COHORT_ORDER_LATEST),
         )
 
     return {
@@ -1650,8 +1656,14 @@ def _cohort_where(
     *,
     min_duration_ms: int,
     url_contains: str,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
 ) -> Tuple[str, List]:
-    """Shared WHERE clause for cohort sampling."""
+    """Shared WHERE clause for cohort sampling.
+
+    Time bounds use `last_seen` so a window means “sessions that were active
+    (or finished) in this period,” matching the recency sort key.
+    """
     where = [
         "pool = ?",
         "chunk_count > 0",
@@ -1662,7 +1674,20 @@ def _cohort_where(
     if needle:
         where.append("url LIKE ?")
         params.append(f"%{needle}%")
+    if start_ms is not None:
+        where.append("last_seen >= ?")
+        params.append(int(start_ms))
+    if end_ms is not None:
+        where.append("last_seen <= ?")
+        params.append(int(end_ms))
     return " AND ".join(where), params
+
+
+def _cohort_order_sql(order: str) -> str:
+    activity = "coalesce(json_extract(interactions, '$.clicks'), 0)"
+    if order == COHORT_ORDER_EARLIEST:
+        return f"last_seen ASC, {activity} DESC, session_id ASC"
+    return f"last_seen DESC, {activity} DESC, session_id DESC"
 
 
 def _sample_candidates(
@@ -1672,25 +1697,32 @@ def _sample_candidates(
     min_duration_ms: int,
     url_contains: str,
     limit: int,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+    order: str = COHORT_ORDER_LATEST,
 ) -> list:
-    """Newest index rows (with slice facts) that clear the base duration/path gates."""
-    activity = "coalesce(json_extract(interactions, '$.clicks'), 0)"
+    """Index rows (with slice facts) that clear the base duration/path/time gates."""
     where_sql, base_params = _cohort_where(
-        pool, min_duration_ms=min_duration_ms, url_contains=url_contains
+        pool,
+        min_duration_ms=min_duration_ms,
+        url_contains=url_contains,
+        start_ms=start_ms,
+        end_ms=end_ms,
     )
+    order_sql = _cohort_order_sql(order if order in COHORT_ORDERS else COHORT_ORDER_LATEST)
     rows = conn.execute(
         f"""
         SELECT session_id, url, "order", device, attribution
         FROM sessions
         WHERE {where_sql}
-        ORDER BY last_seen DESC, {activity} DESC, session_id DESC
+        ORDER BY {order_sql}
         LIMIT ?
         """,
         (*base_params, max(0, int(limit))),
     ).fetchall()
     out = []
-    for sid, url, order, device, attr in rows:
-        fact = index_row_facts(url, order, device, attr)
+    for sid, url, order_raw, device, attr in rows:
+        fact = index_row_facts(url, order_raw, device, attr)
         fact["session_id"] = sid
         out.append(fact)
     return out
@@ -1706,8 +1738,11 @@ def _sample_matching_rows(
     slice_spec: Optional[dict],
     exclude_ids: Optional[set] = None,
     tag: str = "a",
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+    order: str = COHORT_ORDER_LATEST,
 ) -> list:
-    """Newest sessions matching a cut-style slice, tagged for the sample arm."""
+    """Sessions matching a cut-style slice, tagged for the sample arm."""
     if n <= 0:
         return []
     spec = normalize_slice(slice_spec)
@@ -1723,6 +1758,9 @@ def _sample_matching_rows(
         min_duration_ms=min_duration_ms,
         url_contains=path_needle,
         limit=candidate_limit,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        order=order,
     )
     out = []
     for row in candidates:
@@ -1750,27 +1788,36 @@ def sample_cohort_rows(
     url_contains: str = COHORT_URL_CONTAINS,
     slice_spec: Optional[dict] = None,
     slice_b: Optional[dict] = None,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+    order: str = COHORT_ORDER_LATEST,
 ) -> list:
-    """Newest sessions that match the filters and optional cut-style slice.
+    """Sessions that match the filters and optional cut-style slice.
 
     Preferred: `a_n` (+ optional `b_n`) with independent slices for groups A/B.
     Legacy: `any_n` for one mixed pool, or `purchased_n` + `all_n` for a
     purchase vs non-purchase split (still tagged purchased/all).
 
-    Prefers sessions with recorded clicks when breaking ties on recency.
-    Duration is wall-clock (`last_seen - first_seen`). Empty `url_contains`
-    disables the path substring filter; `slice_spec.page` is an exact landing
-    path (same as cuts).
+    `order` is latest (default) or earliest by `last_seen`. Optional `start_ms` /
+    `end_ms` bound that same clock. Prefers sessions with more clicks when
+    timestamps tie.
     """
+    sort = order if order in COHORT_ORDERS else COHORT_ORDER_LATEST
+    sample_kw = dict(
+        min_duration_ms=min_duration_ms,
+        url_contains=url_contains,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        order=sort,
+    )
     if a_n > 0 or b_n > 0:
         sessions = _sample_matching_rows(
             conn,
             pool,
             a_n,
-            min_duration_ms=min_duration_ms,
-            url_contains=url_contains,
             slice_spec=slice_spec,
             tag="a",
+            **sample_kw,
         )
         if b_n > 0:
             sessions.extend(
@@ -1778,17 +1825,15 @@ def sample_cohort_rows(
                     conn,
                     pool,
                     b_n,
-                    min_duration_ms=min_duration_ms,
-                    url_contains=url_contains,
                     slice_spec=slice_b if slice_b is not None else slice_spec,
                     exclude_ids={s["session_id"] for s in sessions},
                     tag="b",
+                    **sample_kw,
                 )
             )
         return sessions
 
     spec = normalize_slice(slice_spec)
-    # Legacy purchased/non-purchase sampling owns the outcome split.
     filter_spec = dict(spec)
     if any_n <= 0:
         filter_spec.pop("outcome", None)
@@ -1805,6 +1850,9 @@ def sample_cohort_rows(
         min_duration_ms=min_duration_ms,
         url_contains=path_needle,
         limit=candidate_limit,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        order=sort,
     )
     matched = [row for row in candidates if row_matches_slice(row, filter_spec)]
 
@@ -1843,6 +1891,22 @@ def _slice_scope_text(spec: dict, url_contains: str) -> str:
     return ", ".join(parts) if parts else "any page"
 
 
+def _format_cohort_clock(ms: Optional[int]) -> str:
+    if ms is None:
+        return ""
+    return time.strftime("%b %-d %H:%M", time.localtime(int(ms) / 1000))
+
+
+def _time_window_text(start_ms: Optional[int], end_ms: Optional[int]) -> str:
+    if start_ms is None and end_ms is None:
+        return ""
+    if start_ms is not None and end_ms is not None:
+        return f" between {_format_cohort_clock(start_ms)} and {_format_cohort_clock(end_ms)}"
+    if start_ms is not None:
+        return f" after {_format_cohort_clock(start_ms)}"
+    return f" before {_format_cohort_clock(end_ms)}"
+
+
 def cohort_selection_text(
     purchased_n: int,
     all_n: int,
@@ -1854,36 +1918,105 @@ def cohort_selection_text(
     url_contains: str = COHORT_URL_CONTAINS,
     slice_spec: Optional[dict] = None,
     slice_b: Optional[dict] = None,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+    order: str = COHORT_ORDER_LATEST,
 ) -> str:
     """Human-readable sampling rule for the Insights UI."""
     spec = normalize_slice(slice_spec)
     spec_b = normalize_slice(slice_b)
     min_s = max(0, int(min_duration_ms)) / 1000
     min_label = f"{min_s:g}s" if min_s != int(min_s) else f"{int(min_s)}s"
+    sort = order if order in COHORT_ORDERS else COHORT_ORDER_LATEST
+    rank = "latest" if sort == COHORT_ORDER_LATEST else "earliest"
+    window = _time_window_text(start_ms, end_ms)
 
     if a_n > 0 or b_n > 0:
         a_scope = _slice_scope_text(spec, url_contains)
         if b_n > 0:
             b_scope = _slice_scope_text(spec_b, url_contains)
-            who = f"latest {a_n} for A ({a_scope}) + {b_n} for B ({b_scope})"
+            who = f"{rank} {a_n} for A ({a_scope}) + {b_n} for B ({b_scope})"
         else:
-            who = f"latest {a_n} for A ({a_scope})"
+            who = f"{rank} {a_n} for A ({a_scope})"
         return (
-            f"Chosen as the {who} sessions with duration ≥{min_label} "
+            f"Chosen as the {who} sessions{window} with duration ≥{min_label} "
             f"(last_seen − first_seen), preferring sessions with more clicks when "
             f"timestamps tie."
         )
 
     if any_n > 0:
-        who = f"latest {any_n} matching"
+        who = f"{rank} {any_n} matching"
     else:
-        who = f"latest {purchased_n} purchased + {all_n} non-purchase"
+        who = f"{rank} {purchased_n} purchased + {all_n} non-purchase"
     scope = _slice_scope_text(spec, url_contains)
     return (
-        f"Chosen as the {who} sessions on {scope} with duration ≥{min_label} "
+        f"Chosen as the {who} sessions on {scope}{window} with duration ≥{min_label} "
         f"(last_seen − first_seen), preferring sessions with more clicks when "
         f"timestamps tie."
     )
+
+
+def _slice_label_bits(spec: Optional[dict], url_contains: str = "") -> list:
+    """Compact filter tokens for cohort display names."""
+    bits = []
+    clean = normalize_slice(spec)
+    outcome = clean.get("outcome") or []
+    if outcome:
+        keys = set(outcome)
+        if keys == {"purchased", "checkout"}:
+            bits.append("reached checkout")
+        elif keys == {"checkout", "rest"}:
+            bits.append("non-purchase")
+        else:
+            bits.append(" or ".join(OUTCOME_LABELS.get(o, o) for o in outcome))
+    for field in ("device", "page", "utm_source", "utm_campaign"):
+        value = clean.get(field)
+        if not value:
+            continue
+        if isinstance(value, (list, tuple)):
+            bits.append(" or ".join(str(v) for v in value))
+        else:
+            bits.append(str(value))
+    if not clean.get("page"):
+        needle = (url_contains or "").strip()
+        if needle:
+            bits.append(needle)
+    return bits
+
+
+def _auto_cohort_label(
+    *,
+    stamp: str,
+    purchased_n: int,
+    all_n: int,
+    any_n: int,
+    a_n: int,
+    b_n: int,
+    url_contains: str,
+    spec: dict,
+    spec_b: dict,
+) -> str:
+    """Date/time first, then whatever filters were set."""
+    parts = [stamp]
+    if a_n > 0 or b_n > 0:
+        a_bits = _slice_label_bits(spec, url_contains)
+        if b_n > 0:
+            b_bits = _slice_label_bits(spec_b, url_contains)
+            if a_bits or b_bits:
+                parts.append(
+                    f"A {' '.join(a_bits) if a_bits else 'any'} / "
+                    f"B {' '.join(b_bits) if b_bits else 'any'}"
+                )
+        else:
+            parts.extend(a_bits)
+    elif any_n > 0 or purchased_n or all_n:
+        parts.extend(_slice_label_bits(spec, url_contains))
+    return " · ".join(parts)[:120]
+
+
+def clean_cohort_label(label: Optional[str]) -> str:
+    """Trim and cap a cohort display name. Empty string means “use auto label”."""
+    return str(label or "").strip()[:120]
 
 
 def build_cohort(
@@ -1899,10 +2032,15 @@ def build_cohort(
     url_contains: str = COHORT_URL_CONTAINS,
     slice_spec: Optional[dict] = None,
     slice_b: Optional[dict] = None,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+    order: str = COHORT_ORDER_LATEST,
+    label: Optional[str] = None,
 ) -> dict:
     now = int(time.time() * 1000)
     spec = normalize_slice(slice_spec)
     spec_b = normalize_slice(slice_b)
+    sort = order if order in COHORT_ORDERS else COHORT_ORDER_LATEST
     sessions = sample_cohort_rows(
         conn,
         pool_key,
@@ -1915,9 +2053,11 @@ def build_cohort(
         url_contains=url_contains,
         slice_spec=spec,
         slice_b=spec_b,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        order=sort,
     )
-    stamp = time.strftime("%b %-d, %H:%M", time.localtime(now / 1000))
-    min_s = max(0, int(min_duration_ms)) // 1000
+    stamp = time.strftime("%b %-d, %-I:%M %p", time.localtime(now / 1000))
     selection = cohort_selection_text(
         purchased_n,
         all_n,
@@ -1928,23 +2068,26 @@ def build_cohort(
         url_contains=url_contains,
         slice_spec=spec,
         slice_b=spec_b,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        order=sort,
     )
-    if a_n > 0 or b_n > 0:
-        if b_n > 0:
-            label = f"A{a_n}+B{b_n} · ≥{min_s}s · {stamp}"
-        else:
-            page_bit = spec.get("page") or (url_contains or "").strip() or "all pages"
-            label = f"A{a_n} · {page_bit} · ≥{min_s}s · {stamp}"
-    elif any_n > 0:
-        page_bit = spec.get("page") or (url_contains or "").strip() or "all pages"
-        label = f"{any_n} any · {page_bit} · ≥{min_s}s · {stamp}"
-    else:
-        page_bit = spec.get("page") or (url_contains or "").strip() or "all pages"
-        label = f"{purchased_n}+{all_n} · {page_bit} · ≥{min_s}s · {stamp}"
+    auto_label = _auto_cohort_label(
+        stamp=stamp,
+        purchased_n=purchased_n,
+        all_n=all_n,
+        any_n=any_n,
+        a_n=a_n,
+        b_n=b_n,
+        url_contains=url_contains,
+        spec=spec,
+        spec_b=spec_b,
+    )
+    chosen = clean_cohort_label(label) or auto_label
     return {
         "id": f"cohort-{now}",
-        # Auto label; renameable once the user decides a cohort is worth keeping.
-        "label": label,
+        # Chosen name, or auto label when none was provided.
+        "label": chosen,
         "selection": selection,
         "created_at": now,
         "updated_at": now,
@@ -1957,6 +2100,9 @@ def build_cohort(
         "b_n": int(b_n),
         "min_duration_ms": int(min_duration_ms),
         "url_contains": (url_contains or "").strip(),
+        "start_ms": int(start_ms) if start_ms is not None else None,
+        "end_ms": int(end_ms) if end_ms is not None else None,
+        "order": sort,
         "slice": spec,
         "slice_b": spec_b if b_n > 0 else {},
         "sessions": sessions,
@@ -1968,10 +2114,24 @@ def rename_cohort(pool: Path, cohort_id: str, label: str) -> Optional[dict]:
     cohort = read_cohort(pool, cohort_id)
     if not cohort:
         return None
-    clean = str(label or "").strip()[:120]
+    clean = clean_cohort_label(label)
     if not clean:
         raise ValueError("label cannot be empty")
     return write_cohort(pool, {**cohort, "label": clean})
+
+
+def delete_cohort(pool: Path, cohort_id: str) -> bool:
+    """Remove a cohort and its cached cuts. Session write-ups on disk stay."""
+    try:
+        path = cohort_path(pool, cohort_id)
+        cuts = cuts_path(pool, cohort_id)
+    except ValueError:
+        return False
+    if not path.is_file():
+        return False
+    path.unlink(missing_ok=True)
+    cuts.unlink(missing_ok=True)
+    return True
 
 
 async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> dict:

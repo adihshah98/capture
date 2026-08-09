@@ -15,7 +15,12 @@ const analyzeBtn = document.getElementById('cohort-analyze');
 const pauseBtn = document.getElementById('cohort-pause');
 const cohortSelectEl = document.getElementById('cohort-select');
 const renameBtn = document.getElementById('cohort-rename');
-const selectionEl = document.getElementById('cohort-selection');
+const deleteBtn = document.getElementById('cohort-delete');
+const viewBtn = document.getElementById('cohort-view');
+const viewDialog = document.getElementById('cohort-view-dialog');
+const viewTitleEl = document.getElementById('cohort-view-title');
+const viewSelectionEl = document.getElementById('cohort-view-selection');
+const viewCloseBtn = document.getElementById('cohort-view-close');
 const labelEl = document.getElementById('cohort-label');
 const progressEl = document.getElementById('cohort-progress');
 const cutLabelEl = document.getElementById('cut-label');
@@ -37,12 +42,20 @@ const chatClearEl = document.getElementById('cut-chat-clear');
 const createDialog = document.getElementById('cohort-create-dialog');
 const createForm = document.getElementById('cohort-create-form');
 const createCancelBtn = document.getElementById('cohort-create-cancel');
+const createSubmitBtn = document.getElementById('cohort-create-submit');
+const createErrorEl = document.getElementById('cohort-create-error');
 const aNInput = document.getElementById('cohort-a-n');
 const bNInput = document.getElementById('cohort-b-n');
 const addBInput = document.getElementById('cohort-add-b');
 const groupBEl = document.getElementById('cohort-group-b');
 const splitHintEl = document.getElementById('cohort-split-hint');
 const minSInput = document.getElementById('cohort-min-s');
+const nameInput = document.getElementById('cohort-name');
+const startInput = document.getElementById('cohort-start');
+const endInput = document.getElementById('cohort-end');
+const orderInput = document.getElementById('cohort-order');
+const limitRangeInput = document.getElementById('cohort-limit-range');
+const timeRangeEl = document.getElementById('cohort-time-range');
 const createFacetsAEl = document.getElementById('cohort-create-facets-a');
 const createFacetsBEl = document.getElementById('cohort-create-facets-b');
 const timeHintEl = document.getElementById('cohort-time-hint');
@@ -50,6 +63,7 @@ const timeHintEl = document.getElementById('cohort-time-hint');
 let createFacets = null;
 let createSliceA = { outcome: '', device: '', page: '', utm_source: '', utm_campaign: '' };
 let createSliceB = { outcome: '', device: '', page: '', utm_source: '', utm_campaign: '' };
+let samplingCohort = false;
 
 let analysisEnabled = false;
 let pollTimer = null;
@@ -87,25 +101,39 @@ function cohortCanAnalyze() {
 
 function syncRunButtons() {
   // Creating a cohort always adds a new one — never replaces the selected cohort.
-  runBtn.disabled = false;
-  runBtn.title =
-    'Choose group A filters (and optional group B), then sample. Does not start analysis.';
-  runBtn.textContent = 'New cohort';
-  renameBtn.disabled = !cohortId;
+  runBtn.disabled = samplingCohort;
+  runBtn.title = samplingCohort ? 'Sampling…' : 'New cohort';
+  runBtn.setAttribute('aria-label', 'New cohort');
+  runBtn.textContent = samplingCohort ? '…' : '+';
+  renameBtn.disabled = !cohortId || samplingCohort;
+  renameBtn.title = cohortId ? 'Rename cohort' : 'Select a cohort to rename';
+  renameBtn.textContent = '✎';
+  if (viewBtn) {
+    viewBtn.disabled = !cohortId || samplingCohort;
+    viewBtn.title = cohortId ? 'View cohort settings' : 'Select a cohort to view';
+  }
+  if (deleteBtn) {
+    deleteBtn.disabled = !cohortId || samplingCohort;
+    deleteBtn.title = cohortId ? 'Delete cohort' : 'Select a cohort to delete';
+    deleteBtn.textContent = '🗑';
+  }
 
   if (analyzeBtn) {
     const can = cohortCanAnalyze();
+    const running = cohortIsRunning();
+    const done = cohort && cohort.status === 'done';
     analyzeBtn.disabled = !can;
-    analyzeBtn.hidden = false;
+    // Lives under the Sessions heading; hide while a run is in flight (Pause
+    // takes over) or when every session already has a write-up.
+    analyzeBtn.hidden = !cohortId || running || done;
     if (!analysisEnabled) {
       analyzeBtn.title = 'Analysis is not configured on this server';
       analyzeBtn.disabled = true;
+      analyzeBtn.hidden = false;
+      analyzeBtn.textContent = 'Start analysis';
     } else if (!cohortId) {
       analyzeBtn.title = 'Create or select a cohort first';
-    } else if (cohortIsRunning()) {
-      analyzeBtn.title = 'Analysis is already running';
-    } else if (cohort && cohort.status === 'done') {
-      analyzeBtn.title = 'This cohort is fully analyzed';
+      analyzeBtn.textContent = 'Start analysis';
     } else if (cohort && cohort.status === 'paused') {
       analyzeBtn.title = 'Resume analysis for remaining sessions';
       analyzeBtn.textContent = 'Resume analysis';
@@ -119,6 +147,7 @@ function syncRunButtons() {
     const running = cohortIsRunning();
     pauseBtn.hidden = !running;
     pauseBtn.disabled = !running;
+    pauseBtn.textContent = 'Pause';
     pauseBtn.title = running
       ? 'Stop after the current step; finished write-ups are kept'
       : '';
@@ -136,23 +165,28 @@ function syncCutRunButton() {
   if (!cutRunBtn) return;
   const ready = analysisEnabled && analyzedCount() > 0 && !cutPollTimer;
   cutRunBtn.disabled = !ready;
-  if (!analysisEnabled) {
-    cutRunBtn.title = 'Analysis is not configured on this server';
-  } else if (!analyzedCount()) {
-    cutRunBtn.title = 'Analyze a cohort first';
-  } else if (sliceIsEmpty(slice)) {
-    cutRunBtn.title = 'No filters set — this reads every analyzed session in the cohort';
+  cutRunBtn.hidden = false;
+  if (cutIsShowing) {
+    cutRunBtn.textContent = 'Run analysis again';
+    cutRunBtn.title = ready
+      ? 'Discard this cached answer and ask the model again'
+      : !analyzedCount()
+        ? 'Analyze sessions on the Sessions tab first'
+        : cutRunBtn.title;
   } else {
-    cutRunBtn.title = '';
+    cutRunBtn.textContent = 'Analyze';
+    if (!analysisEnabled) {
+      cutRunBtn.title = 'Analysis is not configured on this server';
+    } else if (!analyzedCount()) {
+      cutRunBtn.title = 'Start analysis on the Sessions tab first';
+    } else if (sliceIsEmpty(slice)) {
+      cutRunBtn.title = 'No filters set — this reads every analyzed session in the cohort';
+    } else {
+      cutRunBtn.title = 'Ask the model what this filtered group has in common';
+    }
   }
-  if (!cutRefreshBtn) return;
-  // Offered only over a result: with nothing cached, "Analyze this group"
-  // already does the same work under a clearer name.
-  cutRefreshBtn.hidden = !cutIsShowing;
-  cutRefreshBtn.disabled = !ready;
-  cutRefreshBtn.title = ready
-    ? 'Discard this cached answer and ask the model again'
-    : cutRunBtn.title;
+  // Legacy second button — keep hidden if the markup still has it.
+  if (cutRefreshBtn) cutRefreshBtn.hidden = true;
 }
 
 function withProject(params) {
@@ -178,13 +212,27 @@ function appendSliceParams(params, sampleSlice, prefix = '') {
   }
 }
 
-function createCohortUrl({ a, b, minDurationMs, sliceA, sliceB }) {
+function createCohortUrl({
+  a,
+  b,
+  minDurationMs,
+  sliceA,
+  sliceB,
+  startMs,
+  endMs,
+  order,
+  label,
+}) {
   const params = withProject(new URLSearchParams());
   params.set('a', String(a));
   if (b > 0) params.set('b', String(b));
   params.set('min_duration_ms', String(minDurationMs));
   // Exact page / utm / device filters replace the old url_contains default.
   params.set('url_contains', '');
+  params.set('order', order || 'latest');
+  if (label) params.set('label', label);
+  if (startMs != null) params.set('start_ms', String(startMs));
+  if (endMs != null) params.set('end_ms', String(endMs));
   appendSliceParams(params, sliceA);
   if (b > 0) appendSliceParams(params, sliceB, 'b_');
   return `/api/cohorts?${params.toString()}`;
@@ -200,6 +248,12 @@ function clampGroupSize(raw, fallback = 100) {
   const n = Math.round(Number(raw) || 0);
   if (n < 1) return fallback;
   return Math.min(COHORT_MAX_SESSIONS, n);
+}
+
+function localDateTimeMs(value) {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
 }
 
 function readCreateForm() {
@@ -219,12 +273,29 @@ function readCreateForm() {
     COHORT_MIN_DURATION_S,
     Math.round(Number(minSInput?.value) || COHORT_MIN_DURATION_S)
   );
+  let startMs = null;
+  let endMs = null;
+  if (limitRangeInput && limitRangeInput.checked) {
+    startMs = localDateTimeMs(startInput?.value);
+    endMs = localDateTimeMs(endInput?.value);
+    if (startMs != null && endMs != null && startMs > endMs) {
+      const swap = startMs;
+      startMs = endMs;
+      endMs = swap;
+    }
+  }
+  const order = orderInput?.value === 'earliest' ? 'earliest' : 'latest';
+  const label = (nameInput?.value || '').trim().slice(0, 120);
   return {
     a,
     b,
     addB,
     total: a + b,
     minDurationMs: minS * 1000,
+    startMs,
+    endMs,
+    order,
+    label,
     sliceA: { ...createSliceA },
     sliceB: { ...createSliceB },
   };
@@ -283,10 +354,61 @@ function renderCreateFacets() {
   }
 }
 
+function formatCreateOutcome(value) {
+  if (value === 'all') return 'non-purchase';
+  if (value === 'purchased') return 'purchased';
+  if (value === 'checkout') return 'checkout';
+  return value || '';
+}
+
+function sliceNameBits(sliceState) {
+  if (!sliceState) return [];
+  const bits = [];
+  for (const field of SLICE_FIELDS) {
+    const value = sliceState[field];
+    if (!value) continue;
+    bits.push(field === 'outcome' ? formatCreateOutcome(value) : String(value));
+  }
+  return bits;
+}
+
+function suggestCohortName(opts) {
+  const stamp = new Date().toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  const parts = [stamp];
+  if (opts.addB) {
+    const aBits = sliceNameBits(opts.sliceA);
+    const bBits = sliceNameBits(opts.sliceB);
+    if (aBits.length || bBits.length) {
+      parts.push(
+        `A ${aBits.length ? aBits.join(' ') : 'any'} / B ${
+          bBits.length ? bBits.join(' ') : 'any'
+        }`
+      );
+    }
+  } else {
+    parts.push(...sliceNameBits(opts.sliceA));
+  }
+  return parts.join(' · ').slice(0, 120);
+}
+
 function syncCreateFormHints() {
   if (!splitHintEl || !timeHintEl) return;
   if (groupBEl) groupBEl.hidden = !(addBInput && addBInput.checked);
+  if (timeRangeEl) {
+    timeRangeEl.hidden = !(limitRangeInput && limitRangeInput.checked);
+  }
   const opts = readCreateForm();
+  if (nameInput && nameInput.dataset.autofill !== '0') {
+    const suggestion = suggestCohortName(opts);
+    if (nameInput.value !== suggestion) {
+      nameInput.value = suggestion;
+    }
+  }
   if (opts.addB) {
     splitHintEl.textContent = `${opts.a} in A + ${opts.b} in B (${opts.total} total, max ${COHORT_MAX_SESSIONS})`;
   } else {
@@ -302,16 +424,6 @@ function syncCreateFormHints() {
     `before Gemini finishes. Already-analyzed sessions are skipped.`;
 }
 
-function preferDefaultPage(sliceState) {
-  if (
-    !sliceState.page &&
-    createFacets &&
-    (createFacets.page || []).some((i) => i.value === '/pages/ashwamag-01')
-  ) {
-    sliceState.page = '/pages/ashwamag-01';
-  }
-}
-
 async function loadCreateFacets() {
   const minS = Math.max(
     COHORT_MIN_DURATION_S,
@@ -319,8 +431,6 @@ async function loadCreateFacets() {
   );
   try {
     createFacets = await fetchJson(poolFacetsUrl(minS * 1000));
-    preferDefaultPage(createSliceA);
-    preferDefaultPage(createSliceB);
   } catch {
     createFacets = {
       n: 0,
@@ -331,7 +441,21 @@ async function loadCreateFacets() {
       utm_campaign: [],
     };
   }
-  renderCreateFacets();
+  syncCreateFormHints();
+}
+
+function setCreateError(message) {
+  if (createErrorEl) createErrorEl.textContent = message || '';
+}
+
+function setCreateBusy(busy) {
+  samplingCohort = !!busy;
+  if (createSubmitBtn) {
+    createSubmitBtn.disabled = samplingCohort;
+    createSubmitBtn.textContent = samplingCohort ? 'Sampling…' : 'Sample cohort';
+  }
+  if (createCancelBtn) createCancelBtn.disabled = samplingCohort;
+  syncRunButtons();
 }
 
 function openCreateDialog() {
@@ -340,21 +464,41 @@ function openCreateDialog() {
       a: 100,
       b: 0,
       minDurationMs: COHORT_MIN_DURATION_S * 1000,
-      sliceA: { ...emptySlice(), page: '/pages/ashwamag-01' },
+      order: 'latest',
+      startMs: null,
+      endMs: null,
+      label: 'New cohort',
+      sliceA: emptySlice(),
       sliceB: emptySlice(),
     });
     return;
   }
+  if (samplingCohort) return;
   if (aNInput) aNInput.value = aNInput.value || '100';
   if (bNInput) bNInput.value = bNInput.value || '100';
   if (addBInput) addBInput.checked = false;
+  if (orderInput) orderInput.value = 'latest';
+  if (limitRangeInput) limitRangeInput.checked = false;
+  if (timeRangeEl) timeRangeEl.hidden = true;
+  if (startInput) startInput.value = '';
+  if (endInput) endInput.value = '';
+  if (nameInput) {
+    nameInput.dataset.autofill = '1';
+    nameInput.value = '';
+  }
   if (minSInput && Number(minSInput.value) < COHORT_MIN_DURATION_S) {
     minSInput.value = String(COHORT_MIN_DURATION_S);
   }
   createSliceA = emptySlice();
   createSliceB = emptySlice();
+  setCreateError('');
+  setCreateBusy(false);
   syncCreateFormHints();
   createDialog.showModal();
+  if (nameInput) {
+    nameInput.focus();
+    nameInput.select();
+  }
   loadCreateFacets();
 }
 
@@ -489,6 +633,147 @@ function escapeAttr(s) {
   return escapeHtml(s).replace(/'/g, '&#39;');
 }
 
+function formatViewClock(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n)) return '';
+  try {
+    return new Date(n).toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  } catch {
+    return String(n);
+  }
+}
+
+function formatViewFacet(field, value) {
+  if (!value) return '';
+  if (field === 'outcome') {
+    if (value === 'all') return 'did not purchase';
+    if (value === 'purchased') return 'purchased';
+    if (value === 'checkout') return 'reached checkout';
+  }
+  return String(value);
+}
+
+function viewSettingRows(body) {
+  const rows = [];
+  const push = (label, value) => {
+    if (value == null || value === '') return;
+    rows.push({ label, value: String(value) });
+  };
+  const pushGroup = (title) => rows.push({ group: title });
+
+  push('Name', body.label || body.id || '');
+
+  const aN = Number(body.a_n || 0);
+  const bN = Number(body.b_n || 0);
+  const anyN = Number(body.any_n || 0);
+  const purchasedN = Number(body.purchased_n || 0);
+  const allN = Number(body.all_n || 0);
+  const minMs = Number(
+    body.min_duration_ms != null ? body.min_duration_ms : COHORT_MIN_DURATION_S * 1000
+  );
+  const minS = Math.max(0, Math.round(minMs / 1000));
+  const order = body.order === 'earliest' ? 'Earliest sessions' : 'Latest sessions';
+  const sliceA = body.slice && typeof body.slice === 'object' ? body.slice : {};
+  const sliceB = body.slice_b && typeof body.slice_b === 'object' ? body.slice_b : {};
+
+  if (aN > 0 || bN > 0) {
+    push('Group A', `${aN} session${aN === 1 ? '' : 's'}`);
+    if (bN > 0) push('Group B', `${bN} session${bN === 1 ? '' : 's'}`);
+  } else if (anyN > 0) {
+    push('Sessions', String(anyN));
+  } else if (purchasedN || allN) {
+    push('Purchased', String(purchasedN));
+    push('Non-purchase', String(allN));
+  }
+
+  push('Min duration', `≥${minS}s`);
+  push('Choose from', order);
+
+  if (body.start_ms != null || body.end_ms != null) {
+    const from = body.start_ms != null ? formatViewClock(body.start_ms) : '—';
+    const to = body.end_ms != null ? formatViewClock(body.end_ms) : '—';
+    push('Date range', `${from} → ${to}`);
+  }
+
+  const hasAFacets = SLICE_FIELDS.some((f) => sliceA[f]);
+  const hasBFacets = bN > 0 && SLICE_FIELDS.some((f) => sliceB[f]);
+  const urlFallback = (body.url_contains || '').trim();
+
+  if (aN > 0 || bN > 0) {
+    if (hasAFacets || urlFallback) {
+      pushGroup(bN > 0 ? 'Group A filters' : 'Filters');
+      for (const field of SLICE_FIELDS) {
+        const label = FACET_LABELS[field] || field;
+        push(
+          label.charAt(0).toUpperCase() + label.slice(1),
+          formatViewFacet(field, sliceA[field])
+        );
+      }
+      if (!sliceA.page && urlFallback) push('Page', urlFallback);
+    }
+    if (hasBFacets) {
+      pushGroup('Group B filters');
+      for (const field of SLICE_FIELDS) {
+        const label = FACET_LABELS[field] || field;
+        push(
+          label.charAt(0).toUpperCase() + label.slice(1),
+          formatViewFacet(field, sliceB[field])
+        );
+      }
+    }
+  } else {
+    const hasFacets = SLICE_FIELDS.some((f) => sliceA[f]) || urlFallback;
+    if (hasFacets) {
+      pushGroup('Filters');
+      for (const field of SLICE_FIELDS) {
+        const label = FACET_LABELS[field] || field;
+        push(
+          label.charAt(0).toUpperCase() + label.slice(1),
+          formatViewFacet(field, sliceA[field])
+        );
+      }
+      if (!sliceA.page && urlFallback) push('Page', urlFallback);
+    }
+  }
+
+  return rows;
+}
+
+function renderViewSettings(body) {
+  if (!viewSelectionEl) return;
+  const rows = viewSettingRows(body || {});
+  if (!rows.length) {
+    viewSelectionEl.innerHTML =
+      '<div class="view-group">No sampling details saved for this cohort.</div>';
+    return;
+  }
+  viewSelectionEl.innerHTML = rows
+    .map((row) => {
+      if (row.group) {
+        return `<div class="view-group">${escapeHtml(row.group)}</div>`;
+      }
+      return `<div class="view-row"><span class="k">${escapeHtml(
+        row.label
+      )}</span><span class="v">${escapeHtml(row.value)}</span></div>`;
+    })
+    .join('');
+}
+
+function openViewCohort() {
+  if (!cohortId || !cohort || !viewDialog) return;
+  if (viewTitleEl) {
+    viewTitleEl.textContent = cohort.label || 'Cohort settings';
+  }
+  renderViewSettings(cohort);
+  viewDialog.showModal();
+}
+
 function progressText(body) {
   const prog = body.progress || {};
   const batch = body.batch ? ' · Gemini batch queued' : '';
@@ -505,11 +790,6 @@ function progressText(body) {
     (prog.error ? ` · ${prog.error} failed` : '') +
     batch
   );
-}
-
-function renderSelection(body) {
-  if (!selectionEl) return;
-  selectionEl.textContent = (body && body.selection) || '';
 }
 
 function renderEmpty(message) {
@@ -787,7 +1067,7 @@ function scrollToInsight(id) {
 function renderCut(body) {
   const analysis = body.analysis || {};
   const n = body.n || 0;
-  cutLabelEl.textContent = body.label || 'Sessions';
+  cutLabelEl.textContent = body.label || 'Analysis';
 
   // Small groups are the norm here; say so rather than letting counts imply rigour.
   const thin = n > 0 && n < 3 ? '<span class="cut-thin">thin evidence</span>' : '';
@@ -842,7 +1122,7 @@ function renderCut(body) {
     Read from ${n} analyzed session write-up(s) in this cohort.
     Written by ${escapeHtml(body.model || 'the model')}.
     Cohort membership is fixed, so this cut is cached and served without another
-    model call — use Re-analyze to ask again.
+    model call — use Run analysis again to ask once more.
   </p>`;
 
   cutIsShowing = true;
@@ -889,8 +1169,8 @@ function showCutOffer() {
   cutProgressEl.textContent = n ? 'Not analyzed yet' : 'No analyzed sessions';
   renderCutPlaceholder(
     n
-      ? 'This group has not been analyzed yet. Click "Analyze this group" to have the model read these write-ups.'
-      : 'Analyze a cohort first, then pick a group.'
+      ? 'This group has not been analyzed yet. Click Analyze to have the model read these write-ups.'
+      : 'Start analysis on the Sessions tab first, then pick a group.'
   );
 }
 
@@ -1168,7 +1448,6 @@ function renderCohort(body) {
   const text = progressText(body);
   labelEl.textContent = body.label || 'Sessions';
   progressEl.textContent = text;
-  renderSelection(body);
   syncRunButtons();
   renderQueue(body);
   updatePickerCounts();
@@ -1193,16 +1472,15 @@ function resetEmptyState() {
   slice = emptySlice();
   if (pickerEl) pickerEl.style.display = 'none';
   labelEl.textContent = 'Sessions';
-  cutLabelEl.textContent = 'Sessions';
+  cutLabelEl.textContent = 'Analysis';
   progressEl.textContent = 'No cohort yet';
   cutProgressEl.textContent = 'No cohort yet';
-  renderSelection(null);
   syncRunButtons();
   renderCutPlaceholder(
     'Analyze a cohort, then pick a group to see what those sessions have in common.'
   );
   renderEmpty(
-    'Create a new cohort to sample sessions, review the selection, then start analysis. Prior cohorts stay in the dropdown. Open any row to watch it in Replay.'
+    'Create a new cohort to sample sessions, then start analysis. Prior cohorts stay in the dropdown. Open any row to watch it in Replay.'
   );
 }
 
@@ -1244,21 +1522,33 @@ export async function refreshCohort() {
 }
 
 async function runCohort(opts) {
-  if (runBtn.disabled) return;
+  if (samplingCohort) return;
   const sample = opts || readCreateForm();
+  if (!sample.label) {
+    setCreateError('Name this cohort before sampling.');
+    return;
+  }
   autoSwitchedForRun = false;
-  runBtn.disabled = true;
-  runBtn.textContent = 'Sampling…';
+  setCreateError('');
+  setCreateBusy(true);
   progressEl.textContent = 'Sampling a new cohort (existing cohorts kept)…';
   try {
     const body = await fetchJson(createCohortUrl(sample), { method: 'POST' });
+    if (createDialog && createDialog.open) createDialog.close();
     cohortId = body.id;
     renderCohort(body);
     setTab('queue');
     await refreshCohorts();
   } catch (err) {
-    progressEl.textContent = err.message;
-    syncRunButtons();
+    const message = err.message || 'Could not sample this cohort.';
+    setCreateError(message);
+    progressEl.textContent = message;
+    // Keep the dialog open so the filters/error stay visible.
+    if (createDialog && !createDialog.open && typeof createDialog.showModal === 'function') {
+      createDialog.showModal();
+    }
+  } finally {
+    setCreateBusy(false);
   }
 }
 
@@ -1288,7 +1578,7 @@ async function pauseCohortAnalysis() {
   } catch (err) {
     progressEl.textContent = err.message;
   } finally {
-    if (pauseBtn) pauseBtn.textContent = 'Pause analysis';
+    if (pauseBtn) pauseBtn.textContent = 'Pause';
     syncRunButtons();
   }
 }
@@ -1312,6 +1602,24 @@ async function renameCohort() {
   }
 }
 
+async function deleteCohort() {
+  if (!cohortId || !cohort || !deleteBtn) return;
+  const name = cohort.label || cohortId;
+  if (!window.confirm(`Delete cohort “${name}”? Session write-ups are kept.`)) {
+    return;
+  }
+  deleteBtn.disabled = true;
+  try {
+    await fetchJson(cohortUrl(cohortId), { method: 'DELETE' });
+    cohortId = null;
+    cohort = null;
+    await refreshCohorts();
+  } catch (err) {
+    progressEl.textContent = err.message;
+    syncRunButtons();
+  }
+}
+
 export function initInsights() {
   modeButtons.forEach((btn) => {
     btn.addEventListener('click', () => setMode(btn.dataset.mode));
@@ -1330,34 +1638,44 @@ export function initInsights() {
   if (createForm) {
     createForm.addEventListener('submit', (event) => {
       event.preventDefault();
+      if (samplingCohort) return;
       if (minSInput && Number(minSInput.value) < COHORT_MIN_DURATION_S) {
         minSInput.value = String(COHORT_MIN_DURATION_S);
       }
       const opts = readCreateForm();
+      if (!opts.label) {
+        setCreateError('Name this cohort before sampling.');
+        if (nameInput) {
+          nameInput.focus();
+          nameInput.reportValidity?.();
+        }
+        return;
+      }
       if (aNInput) aNInput.value = String(opts.a);
       if (bNInput && opts.addB) bNInput.value = String(opts.b);
-      if (createDialog && createDialog.open) createDialog.close();
       runCohort(opts);
     });
   }
-  [aNInput, bNInput].forEach((el) => {
+  if (nameInput) {
+    nameInput.addEventListener('input', () => {
+      nameInput.dataset.autofill = '0';
+    });
+  }
+  [aNInput, bNInput, startInput, endInput, orderInput].forEach((el) => {
     if (!el) return;
     el.addEventListener('input', syncCreateFormHints);
     el.addEventListener('change', syncCreateFormHints);
   });
   if (addBInput) {
     addBInput.addEventListener('change', () => {
-      if (addBInput.checked) {
-        // Seed B from A's traffic/page filters so comparison starts aligned.
-        const bEmpty = SLICE_FIELDS.every((field) => !createSliceB[field]);
-        if (bEmpty) {
-          createSliceB = { ...createSliceA };
-        }
-        preferDefaultPage(createSliceB);
-        if (!createSliceA.outcome) createSliceA.outcome = 'purchased';
-        if (!createSliceB.outcome || createSliceB.outcome === createSliceA.outcome) {
-          createSliceB.outcome = 'all';
-        }
+      syncCreateFormHints();
+    });
+  }
+  if (limitRangeInput) {
+    limitRangeInput.addEventListener('change', () => {
+      if (!limitRangeInput.checked) {
+        if (startInput) startInput.value = '';
+        if (endInput) endInput.value = '';
       }
       syncCreateFormHints();
     });
@@ -1372,9 +1690,13 @@ export function initInsights() {
   if (analyzeBtn) analyzeBtn.addEventListener('click', startCohortAnalysis);
   if (pauseBtn) pauseBtn.addEventListener('click', pauseCohortAnalysis);
   renameBtn.addEventListener('click', renameCohort);
-  if (cutRunBtn) cutRunBtn.addEventListener('click', () => runCut());
-  if (cutRefreshBtn) {
-    cutRefreshBtn.addEventListener('click', () => runCut({ refresh: true }));
+  if (viewBtn) viewBtn.addEventListener('click', openViewCohort);
+  if (viewCloseBtn && viewDialog) {
+    viewCloseBtn.addEventListener('click', () => viewDialog.close());
+  }
+  if (deleteBtn) deleteBtn.addEventListener('click', deleteCohort);
+  if (cutRunBtn) {
+    cutRunBtn.addEventListener('click', () => runCut({ refresh: cutIsShowing }));
   }
   cutBodyEl.addEventListener('click', (e) => {
     const cite = e.target.closest('.cut-cite');
