@@ -560,6 +560,56 @@
     #cut-picker .hint [data-hint-text]:not(:empty) + .n { margin-left: 4px; }
     #cut-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px 18px; }
 
+    /* Chat sits under the cut, sharing its filter. Capped height so a long
+       thread scrolls internally instead of pushing the composer off screen. */
+    #cut-chat {
+      flex: none; border-top: 1px solid var(--border); background: var(--bg);
+      display: flex; flex-direction: column; max-height: 46%;
+    }
+    #cut-chat-head {
+      display: flex; align-items: center; gap: 8px; flex: none;
+      padding: 9px 16px 8px; font-size: 11px;
+    }
+    #cut-chat-head .title { font-weight: 600; color: var(--text-dim); }
+    /* The denominator every answer is counted against — always visible, so a
+       share in the text can never be read against the wrong group. */
+    #cut-chat-head .scope { color: var(--text-faint); }
+    #cut-chat-head .spacer { flex: 1; }
+    #cut-chat-log {
+      flex: 1; min-height: 0; overflow: auto; padding: 0 16px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    #cut-chat-log:empty { display: none; }
+    .chat-turn { font-size: 12.5px; line-height: 1.55; }
+    .chat-turn.user {
+      align-self: flex-end; max-width: 82%; padding: 7px 11px;
+      background: var(--accent-soft); border: 1px solid var(--accent-line);
+      border-radius: var(--r); color: var(--text);
+    }
+    .chat-turn.model { color: var(--text); max-width: 100%; }
+    .chat-turn.model p { margin: 0 0 8px; }
+    .chat-turn.model p:last-child { margin-bottom: 0; }
+    .chat-turn.model ul { margin: 0 0 8px; padding-left: 18px; }
+    .chat-turn.model li { margin-bottom: 4px; }
+    .chat-turn.model code {
+      font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 3px; padding: 0 3px;
+    }
+    .chat-turn.error { color: var(--neg); font-size: 12px; }
+    /* Marks the answer as still arriving; removed when the stream closes. */
+    .chat-turn.streaming::after {
+      content: '▌'; color: var(--text-faint); margin-left: 1px;
+    }
+    #cut-chat-form { flex: none; display: flex; gap: 8px; padding: 10px 16px 12px; }
+    #cut-chat-input {
+      flex: 1; min-width: 0; padding: 7px 10px; font: inherit; font-size: 12.5px;
+      color: var(--text); background: var(--surface);
+      border: 1px solid var(--border-strong); border-radius: var(--r);
+    }
+    #cut-chat-input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+    #cut-chat-input::placeholder { color: var(--text-faint); }
+
     .cut-headline {
       margin: 0 0 14px; padding: 12px 14px; background: var(--accent-soft);
       border: 1px solid var(--accent-line); border-radius: var(--r);
@@ -782,6 +832,24 @@
       </div>
       <div id="cut-body">
         <div class="insights-placeholder">Analyze a cohort, then pick a group to see what those sessions have in common.</div>
+      </div>
+      <div id="cut-chat" hidden>
+        <div id="cut-chat-head">
+          <span class="title">Ask about these sessions</span>
+          <span class="scope" id="cut-chat-scope"></span>
+          <span class="spacer"></span>
+          <button type="button" id="cut-chat-clear" class="btn" hidden>Clear</button>
+        </div>
+        <div id="cut-chat-log"></div>
+        <form id="cut-chat-form">
+          <input
+            id="cut-chat-input"
+            type="text"
+            autocomplete="off"
+            placeholder="e.g. what did the ones who left have in common?"
+          />
+          <button type="submit" id="cut-chat-send" class="btn primary">Ask</button>
+        </form>
       </div>
     </section>
     <section class="insights-panel" id="insights-queue" hidden>
