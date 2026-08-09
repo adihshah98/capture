@@ -1,4 +1,5 @@
 import { currentProject, fetchJson, setProject } from './api.js';
+import { parseFrames, splitSettled } from './chat-stream.js';
 import { linkCitations } from './citations.js';
 import { writeHash } from './deeplink.js';
 import { loadSession, setPendingSeek } from './session-player.js';
@@ -24,6 +25,13 @@ const tableWrapEl = document.getElementById('cohort-table-wrap');
 const pickerEl = document.getElementById('cut-picker');
 const queuePanelEl = document.getElementById('insights-queue');
 const cutPanelEl = document.getElementById('insights-cut');
+const chatEl = document.getElementById('cut-chat');
+const chatScopeEl = document.getElementById('cut-chat-scope');
+const chatLogEl = document.getElementById('cut-chat-log');
+const chatFormEl = document.getElementById('cut-chat-form');
+const chatInputEl = document.getElementById('cut-chat-input');
+const chatSendEl = document.getElementById('cut-chat-send');
+const chatClearEl = document.getElementById('cut-chat-clear');
 
 let analysisEnabled = false;
 let pollTimer = null;
@@ -467,6 +475,8 @@ function rowMatches(row, spec) {
 function onSliceChanged() {
   renderPicker();
   stopCutPolling();
+  // A thread about one group answers nothing about the next one.
+  clearChat();
   loadCut().catch(() => {});
 }
 
@@ -484,6 +494,8 @@ function renderCutPlaceholder(message) {
   cutIsShowing = false;
   cutBodyEl.innerHTML = `<div class="insights-placeholder">${escapeHtml(message)}</div>`;
   syncCutRunButton();
+  // No cut on screen means no group to ask about.
+  if (chatEl) chatEl.hidden = true;
 }
 
 /** Section order mirrors the prompt: journey, attention, intent, blockers. */
@@ -633,6 +645,14 @@ function renderCut(body) {
   cutIsShowing = true;
   cutBodyEl.innerHTML = headline + sections + recommendations + meta;
   syncCutRunButton();
+  // The cut and the chat under it describe the same group, so seed the chat's
+  // scope from the cut until the first answer's meta frame refines it.
+  showChat({
+    label: body.label || 'Sessions',
+    n,
+    session_ids: sessionIds,
+    citations,
+  });
 }
 
 async function pollCut() {
@@ -726,6 +746,192 @@ async function runCut({ refresh = false } = {}) {
     renderCutPlaceholder(err.message);
   } finally {
     syncCutRunButton();
+  }
+}
+
+// ---- Chat -------------------------------------------------------------
+//
+// Scoped to the cut on screen: the same filter, the same group. History lives
+// in this tab only — a thread about mobile buyers means nothing once the
+// filter moves, so changing the cut clears it.
+
+let chatTurns = [];
+let chatMeta = null;
+let chatBusy = false;
+let chatAbort = null;
+
+function chatUrl(id) {
+  const params = withProject(new URLSearchParams());
+  for (const field of SLICE_FIELDS) {
+    if (slice[field]) params.set(field, slice[field]);
+  }
+  const qs = params.toString();
+  return `/api/cohorts/${encodeURIComponent(id)}/chat${qs ? `?${qs}` : ''}`;
+}
+
+/** Answers linkify S<N> against the map the model was actually shown. */
+function chatCitations(text) {
+  return linkCitations(
+    escapeHtml(text || ''),
+    (chatMeta && chatMeta.session_ids) || [],
+    escapeAttr,
+    (chatMeta && chatMeta.citations) || null
+  );
+}
+
+/** Minimal markdown: paragraphs, `-` bullets, inline code. */
+function chatMarkdown(html) {
+  const blocks = html.split(/\n{2,}/);
+  return blocks
+    .map((block) => {
+      const lines = block.split('\n').filter((l) => l.trim());
+      if (!lines.length) return '';
+      if (lines.every((l) => /^\s*[-*]\s+/.test(l))) {
+        const items = lines
+          .map((l) => `<li>${l.replace(/^\s*[-*]\s+/, '')}</li>`)
+          .join('');
+        return `<ul>${items}</ul>`;
+      }
+      return `<p>${lines.join('<br>')}</p>`;
+    })
+    .join('');
+}
+
+function chatInline(html) {
+  return html.replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+/**
+ * Render one model turn.
+ *
+ * `settled` is linkified; `pending` is the tail that could still grow into a
+ * citation, so it stays plain text until the next chunk (or the end of the
+ * stream) resolves it.
+ */
+function renderChatAnswer(el, text, { done = false } = {}) {
+  const [settled, pending] = done ? [text, ''] : splitSettled(text);
+  const body = chatInline(chatMarkdown(chatCitations(settled)));
+  el.innerHTML = pending ? body + escapeHtml(pending) : body;
+  el.classList.toggle('streaming', !done);
+}
+
+function appendChatTurn(role, text) {
+  const el = document.createElement('div');
+  el.className = `chat-turn ${role}`;
+  if (role === 'user') el.textContent = text;
+  chatLogEl.appendChild(el);
+  chatLogEl.scrollTop = chatLogEl.scrollHeight;
+  return el;
+}
+
+function syncChatControls() {
+  const ready = Boolean(cohortId) && analysisEnabled;
+  chatInputEl.disabled = !ready || chatBusy;
+  chatSendEl.disabled = !ready || chatBusy;
+  chatSendEl.textContent = chatBusy ? 'Asking…' : 'Ask';
+  chatClearEl.hidden = chatTurns.length === 0;
+}
+
+/** Chat is only meaningful once a cut is on screen — same group, same filter. */
+function showChat(meta) {
+  chatEl.hidden = !cutIsShowing;
+  if (meta) {
+    chatMeta = meta;
+    chatScopeEl.textContent = `${meta.label} · ${meta.n} session${
+      meta.n === 1 ? '' : 's'
+    }`;
+  }
+  syncChatControls();
+}
+
+function clearChat() {
+  if (chatAbort) chatAbort.abort();
+  chatAbort = null;
+  chatBusy = false;
+  chatTurns = [];
+  chatMeta = null;
+  chatLogEl.innerHTML = '';
+  chatScopeEl.textContent = '';
+  syncChatControls();
+}
+
+async function askChat(question) {
+  if (!cohortId || chatBusy) return;
+  chatBusy = true;
+  chatTurns.push({ role: 'user', content: question });
+  appendChatTurn('user', question);
+  const answerEl = appendChatTurn('model', '');
+  answerEl.classList.add('streaming');
+  syncChatControls();
+
+  chatAbort = new AbortController();
+  let answer = '';
+  try {
+    const res = await fetch(chatUrl(cohortId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: chatTurns }),
+      signal: chatAbort.signal,
+    });
+    if (!res.ok) {
+      let message = `Server returned ${res.status}.`;
+      try {
+        const body = await res.json();
+        if (body && body.error) message = body.error;
+      } catch {
+        /* keep the status message */
+      }
+      throw new Error(message);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let failed = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const [frames, rest] = parseFrames(buffer);
+      buffer = rest;
+      for (const { event, data } of frames) {
+        if (event === 'meta') {
+          showChat(data);
+        } else if (event === 'delta') {
+          answer += data.text || '';
+          renderChatAnswer(answerEl, answer);
+          chatLogEl.scrollTop = chatLogEl.scrollHeight;
+        } else if (event === 'error') {
+          failed = data.error || 'Chat failed.';
+        }
+      }
+      if (failed) break;
+    }
+    if (failed) throw new Error(failed);
+
+    renderChatAnswer(answerEl, answer, { done: true });
+    // Only a completed answer joins the history the next turn is built on.
+    chatTurns.push({ role: 'assistant', content: answer });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      answerEl.remove();
+      chatTurns.pop();
+    } else if (answer) {
+      // Keep what arrived, and say the rest did not.
+      renderChatAnswer(answerEl, answer, { done: true });
+      const note = appendChatTurn('error', '');
+      note.textContent = err.message;
+      chatTurns.pop();
+    } else {
+      answerEl.className = 'chat-turn error';
+      answerEl.textContent = err.message;
+      chatTurns.pop();
+    }
+  } finally {
+    chatBusy = false;
+    chatAbort = null;
+    syncChatControls();
+    chatLogEl.scrollTop = chatLogEl.scrollHeight;
   }
 }
 
@@ -932,9 +1138,28 @@ export function initInsights() {
     const id = btn.dataset.scrollTo;
     if (id) scrollToInsight(id);
   });
+  chatFormEl.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const question = chatInputEl.value.trim();
+    if (!question || chatBusy) return;
+    chatInputEl.value = '';
+    askChat(question).catch(() => {});
+  });
+  chatClearEl.addEventListener('click', () => {
+    clearChat();
+    // Cleared by hand, so the cut is still on screen — keep the scope header.
+    if (cutIsShowing) showChat(null);
+  });
+  chatLogEl.addEventListener('click', (e) => {
+    const cite = e.target.closest('.cut-cite');
+    if (cite && chatLogEl.contains(cite)) {
+      openSession(cite.dataset.citeSid, Number(cite.dataset.citeT) || 0);
+    }
+  });
   cohortSelectEl.addEventListener('change', () => {
     cohortId = cohortSelectEl.value || null;
     stopCutPolling();
+    clearChat();
     // A different cohort has different facet values, so reset the picker.
     slice = emptySlice();
     refreshCohort()
