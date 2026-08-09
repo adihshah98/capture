@@ -1349,6 +1349,198 @@ async def build_cut_analysis(rows: list, slice_spec: Optional[dict]) -> dict:
     return {**base, "analysis": analysis, "citations": citations}
 
 
+CHAT_PROMPT = """You answer a marketer's questions about a group of recorded web
+sessions, working only from the per-session write-ups you are given.
+
+Each write-up is one session's analysis, already grounded in that session's
+replay. They are the ONLY evidence you have. You cannot see the recordings, the
+page, the analytics, or anything outside this group.
+
+## What you can and cannot answer
+
+You know what the write-ups say. You do not know anything else.
+
+When a question asks for something the write-ups do not cover, say so plainly
+and distinguish WHICH kind of "no" it is — this matters more than anything else
+you will do here, because the two are easy to confuse and mean opposite things:
+
+  "The write-ups don't mention scroll depth"     ← absent from the EVIDENCE
+  "None of these sessions scrolled past the fold" ← absent from the SESSIONS
+
+The first means you cannot tell. The second is a finding. Never let the first
+read as the second. If a write-up simply does not discuss something, the honest
+answer is that it was not recorded in the write-up — not that it did not happen.
+
+You also cannot answer questions about:
+- Sessions outside this group. The group is the whole world here.
+- Precise metrics — session duration, click counts, scroll pixels, revenue —
+  unless a write-up states the number. You are reading prose, not a database.
+- Trends over time, or comparisons to other periods, cohorts or benchmarks.
+- What would happen if something changed. You can say what these visitors did;
+  you cannot run the experiment.
+
+Say "the write-ups don't tell us" and, where you can, name what would answer it.
+A clean "I can't tell you that" beats a confident guess every time.
+
+## Counting
+
+You can see every write-up in the group, so counting claims are exact — make
+them. Give the percentage first with the raw count in brackets: "44% (4 of 9)".
+Round to whole numbers. Below 5 sessions use "4 of 9 sessions" with no
+percentage and say the evidence is directional.
+
+The group size is stated under "Already known" below. It is the ONLY total you
+may use. Never cite a denominator that is not the group size.
+
+## The filter is not a finding
+
+The group was SELECTED by a filter, stated below as "This group is". Anything
+entailed by that filter is already known: if the group is "purchased", that they
+bought is the definition, not a discovery. Answer what was actually asked
+instead of restating the selection criteria back.
+
+## Citing sessions
+
+Each write-up is headed "--- SESSIONS session N ---". Cite as S<N>, optionally
+followed by a timestamp from THAT session's write-up: "S4 [01:09]". The format
+must be exact — never "Session 4", "#4", or "S4 at 1:09". The UI turns these
+into links that open the replay at that moment.
+
+- Only cite an N that appears below. Never invent one, never exceed the group
+  size, never renumber.
+- A [MM:SS] must come from that session's own write-up. Do not carry a stamp
+  from one session to another.
+- Include a stamp when the claim is about a moment. For counting claims a bare
+  "S1, S2, S4" is correct — do not invent a timestamp to decorate it.
+- Cite the sessions a claim rests on. Citations are evidence, not the answer:
+  a bare list of ordinals is not a response.
+
+## How to answer
+
+Answer the question that was asked, at the length it deserves — a counting
+question takes a sentence, an open-ended one may take several paragraphs. No
+preamble, no restating the question, no closing offer of further help.
+
+Write for a marketer: what these visitors did, what it suggests, and where it
+points. Lead with the answer, then the evidence.
+
+Separate what you observed from what you infer. The write-ups describe what was
+on screen, not where anyone looked, so say "reached", "was shown", "scrolled
+past", "sat 40s on" — never "read" or "noticed" as if it were fact. You may
+then infer, hedged: "suggests", "may indicate", "appears to". One reading per
+claim is plenty; an answer that is all inference and no evidence is worthless.
+
+Markdown is fine — short paragraphs, bullets where they help. No headings
+unless the answer genuinely has sections."""
+
+# A turn is one call, so history is the only thing that grows. Cap it: a long
+# thread would otherwise re-send the whole write-up block plus an unbounded
+# transcript on every question.
+CHAT_MAX_TURNS = 12
+CHAT_MAX_MESSAGE_CHARS = 4000
+
+
+def clean_chat_messages(messages) -> list:
+    """Trim history to the recent turns, as {role, content} with role user/model.
+
+    The client owns the transcript, so this is untrusted input: anything that is
+    not a usable turn is dropped rather than forwarded to the model.
+    """
+    if not isinstance(messages, list):
+        return []
+    clean = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        # The UI speaks in assistant/user; Gemini wants model/user.
+        if role in ("assistant", "model"):
+            role = "model"
+        elif role != "user":
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        clean.append({"role": role, "content": content.strip()[:CHAT_MAX_MESSAGE_CHARS]})
+    # Keep the most recent turns; the question is always the last one.
+    return clean[-CHAT_MAX_TURNS:]
+
+
+async def stream_gemini_chat(rows: list, label: str, given: str, messages: list):
+    """Yield answer text chunks for the latest question in `messages`.
+
+    The evidence goes in as the first user turn with a canned acknowledgement
+    after it, so the conversation that follows is ordinary chat over a context
+    the model has already "read". That keeps the write-up block a stable prefix
+    across turns, which is what makes implicit caching possible.
+    """
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    header, side_text, _ = cut_context(rows, label, given)
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(text=header),
+                types.Part.from_text(text=side_text),
+            ],
+        ),
+        types.Content(
+            role="model",
+            parts=[
+                types.Part.from_text(
+                    text=(
+                        f"I have read the {len(rows)} write-up(s) for this group. "
+                        "Ask me anything about them."
+                    )
+                )
+            ],
+        ),
+    ]
+    for message in messages:
+        contents.append(
+            types.Content(
+                role=message["role"],
+                parts=[types.Part.from_text(text=message["content"])],
+            )
+        )
+
+    stream = await client.aio.models.generate_content_stream(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=CHAT_PROMPT,
+            # Answers are prose, not five sections of insight objects, so this
+            # sits well below the cut's ceiling. Thinking still gets room to
+            # count across the write-ups before answering.
+            max_output_tokens=4096,
+            thinking_config=types.ThinkingConfig(thinking_budget=2048),
+            temperature=0.2,
+        ),
+    )
+    async for chunk in stream:
+        text = getattr(chunk, "text", None)
+        if text:
+            yield text
+
+
+async def chat_context(rows: list, slice_spec: Optional[dict]) -> tuple:
+    """(selected_rows, label, given, citations) for a group — the chat's scope.
+
+    Mirrors build_cut_analysis's setup so a chat answers about exactly the group
+    the cut above it describes.
+    """
+    if not ANALYSIS_ENABLED:
+        raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
+    selected, spec = select_rows_by_cut(rows, slice_spec)
+    label = slice_label(spec) if spec else "all sessions"
+    given = _given_facts(spec, len(selected))
+    _, _, citations = cut_context(selected, label, given)
+    return selected, label, given, citations
+
+
 def sample_cohort_rows(
     conn: sqlite3.Connection,
     pool: str,
