@@ -22,7 +22,13 @@ from typing import Optional
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 # Load .env before importing anything that reads configuration at import time.
@@ -1662,6 +1668,119 @@ async def get_cut(
     _cut_tasks[task_key] = task
     return JSONResponse(
         {"status": "running", "cut": key, "cohort_id": cohort_id}, status_code=202
+    )
+
+
+def _sse(event: str, data: dict) -> str:
+    """One SSE frame. Newlines in the payload are JSON-escaped, so the data
+    line stays a single line and the frame cannot be split by model output."""
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+@app.post("/api/cohorts/{cohort_id}/chat")
+async def post_cohort_chat(
+    request: Request,
+    cohort_id: str,
+    project: Optional[str] = Query(None),
+    # Same group selection as /cut — the chat answers about the cut on screen.
+    outcome: Optional[list] = Query(None),
+    device: Optional[list] = Query(None),
+    page: Optional[str] = Query(None),
+    utm_source: Optional[str] = Query(None),
+    utm_medium: Optional[str] = Query(None),
+    utm_campaign: Optional[str] = Query(None),
+    utm_content: Optional[str] = Query(None),
+    fbclid: Optional[str] = Query(None),
+):
+    """Ask a question about one group's write-ups. Streams the answer as SSE.
+
+    Unlike a cut, nothing is cached: the question is open-ended, so every turn
+    is a fresh call. Text-only, so this needs the model but not the headless
+    reconstruction runtime a per-session analysis does.
+    """
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    cohort = _resolve_cohort_or_404(pool, cohort_id)
+    cohort_id = cohort["id"]
+
+    if not analyze.ANALYSIS_ENABLED:
+        raise ApiError(503, "analysis is not configured on this server")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise ApiError(400, "expected a JSON body")
+    messages = analyze.clean_chat_messages(
+        (payload or {}).get("messages") if isinstance(payload, dict) else None
+    )
+    if not messages:
+        raise ApiError(400, "no question to answer")
+    if messages[-1]["role"] != "user":
+        raise ApiError(400, "the last message must be the user's question")
+
+    slice_spec = (
+        _slice_from_params(
+            outcome,
+            device,
+            page,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_content,
+            fbclid,
+        )
+        or None
+    )
+
+    live = analyze.enrich_cohort_status(pool, cohort)
+    rows = _cut_rows(pool, live)
+    if not rows:
+        raise ApiError(400, "no analyzed sessions in this cohort yet")
+
+    selected, label, given, citations = await analyze.chat_context(rows, slice_spec)
+    if not selected:
+        raise ApiError(400, f"no analyzed sessions match {label} in this cohort")
+
+    async def events():
+        # The client needs the group's size and citation map before any text,
+        # so it can render the denominator and resolve S<N> as answers stream.
+        yield _sse(
+            "meta",
+            {
+                "cohort_id": cohort_id,
+                "label": label,
+                "n": len(selected),
+                "session_ids": [r.get("session_id") for r in selected],
+                "citations": citations,
+                "model": analyze.GEMINI_MODEL,
+            },
+        )
+        try:
+            _, model_gate = analyze._gates()
+            async with model_gate:
+                async for chunk in analyze.stream_gemini_chat(
+                    selected, label, given, messages
+                ):
+                    yield _sse("delta", {"text": chunk})
+        except asyncio.CancelledError:
+            # The reader hung up. Nothing to report to — let the task unwind.
+            raise
+        except Exception as exc:
+            # The response is already 200 with frames sent, so a failure has to
+            # travel as an event rather than a status code.
+            yield _sse("error", {"error": str(exc) or "chat failed"})
+            return
+        yield _sse("done", {})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            # Nginx buffers proxied responses by default, which would hold the
+            # whole answer back and defeat streaming entirely.
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
