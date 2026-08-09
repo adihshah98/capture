@@ -832,6 +832,146 @@ class TestCohort(ServerCase):
         for entry in saved["sessions"]:
             self.assertNotIn("text", entry)
 
+    def test_rejects_cohorts_over_500_and_supports_any_sample(self):
+        for i in range(3):
+            sid = f"any{i}" + "x" * 28
+            self.assertEqual(self.ingest(sid), 200)
+            if i == 0:
+                self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
+            self.seed_analysis(sid)
+
+        status, body = request(
+            self.create_cohort_url(purchased=300, all_n=250),
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("500", json.loads(body)["error"])
+
+        status, body = request(
+            f"{self.base}/api/cohorts?"
+            + urllib.parse.urlencode(
+                {"any": 2, "min_duration_ms": 0, "url_contains": ""}
+            ),
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 201, body)
+        cohort = json.loads(body)
+        self.assertEqual(cohort["any_n"], 2)
+        self.assertEqual(len(cohort["sessions"]), 2)
+        self.assertIn("matching", cohort.get("selection", ""))
+
+    def test_pool_facets_and_slice_filtered_create(self):
+        mobile = "facetm" + "x" * 26
+        desktop = "facetd" + "x" * 26
+        nonbuy = "facetn" + "x" * 26
+        self.assertEqual(
+            self.ingest(
+                mobile,
+                {
+                    "events": [
+                        {"type": 4, "data": {"width": 390, "height": 844}},
+                    ],
+                    "url": "https://brand.example/pages/ashwamag-01?utm_source=google",
+                },
+            ),
+            200,
+        )
+        self.assertEqual(self.order(mobile, {"event": "checkout_completed"}), 200)
+        self.assertEqual(
+            self.ingest(
+                desktop,
+                {
+                    "events": [
+                        {"type": 4, "data": {"width": 1280, "height": 800}},
+                    ],
+                    "url": "https://brand.example/pages/ashwamag-01?utm_source=google",
+                },
+            ),
+            200,
+        )
+        self.assertEqual(self.order(desktop, {"event": "checkout_completed"}), 200)
+        self.assertEqual(
+            self.ingest(
+                nonbuy,
+                {
+                    "events": [
+                        {"type": 4, "data": {"width": 390, "height": 844}},
+                    ],
+                    "url": "https://brand.example/pages/ashwamag-01?utm_source=google",
+                },
+            ),
+            200,
+        )
+        self.seed_analysis(mobile)
+        self.seed_analysis(desktop)
+        self.seed_analysis(nonbuy)
+
+        status, body = request(
+            f"{self.base}/api/facets?"
+            + urllib.parse.urlencode({"min_duration_ms": 0})
+        )
+        self.assertEqual(status, 200, body)
+        facets = json.loads(body)
+        self.assertGreaterEqual(facets["n"], 2)
+        self.assertTrue(any(i["value"] == "mobile" for i in facets.get("device") or []))
+        self.assertTrue(
+            any(i["value"] == "/pages/ashwamag-01" for i in facets.get("page") or [])
+        )
+
+        status, body = request(
+            f"{self.base}/api/cohorts?"
+            + urllib.parse.urlencode(
+                {
+                    "any": 5,
+                    "min_duration_ms": 0,
+                    "url_contains": "",
+                    "device": "mobile",
+                    "utm_source": "google",
+                    "page": "/pages/ashwamag-01",
+                }
+            ),
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 201, body)
+        cohort = json.loads(body)
+        self.assertEqual(
+            set(s["session_id"] for s in cohort["sessions"]),
+            {mobile, nonbuy},
+        )
+        self.assertEqual(cohort.get("slice", {}).get("device"), ["mobile"])
+
+        status, body = request(
+            f"{self.base}/api/cohorts?"
+            + urllib.parse.urlencode(
+                {
+                    "a": 1,
+                    "b": 1,
+                    "min_duration_ms": 0,
+                    "url_contains": "",
+                    "outcome": "purchased",
+                    "device": "mobile",
+                    "page": "/pages/ashwamag-01",
+                    "utm_source": "google",
+                    "b_outcome": "all",
+                    "b_device": "mobile",
+                    "b_page": "/pages/ashwamag-01",
+                    "b_utm_source": "google",
+                }
+            ),
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 201, body)
+        cohort = json.loads(body)
+        self.assertEqual(cohort["a_n"], 1)
+        self.assertEqual(cohort["b_n"], 1)
+        by_filter = {s["filter"]: s["session_id"] for s in cohort["sessions"]}
+        self.assertEqual(by_filter.get("a"), mobile)
+        self.assertEqual(by_filter.get("b"), nonbuy)
+
     def test_cohorts_accumulate_rather_than_overwrite(self):
         for i in range(2):
             sid = f"acc{i}" + "x" * 28
@@ -1409,12 +1549,12 @@ class TestCohortSampling(unittest.TestCase):
             CREATE TABLE sessions (
                 pool TEXT, session_id TEXT, first_seen INTEGER, last_seen INTEGER,
                 chunk_count INTEGER, bytes INTEGER, visitor_id TEXT, url TEXT,
-                "order" TEXT, interactions TEXT, device TEXT
+                "order" TEXT, interactions TEXT, device TEXT, attribution TEXT
             )
             """
         )
         conn.executemany(
-            'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+            'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
             rows,
         )
         return analyze, conn
@@ -1422,11 +1562,11 @@ class TestCohortSampling(unittest.TestCase):
     def test_sample_prefers_newest_and_splits_filters(self):
         analyze, conn = self._conn(
             [
-                ("", "oldbuy" + "x" * 26, 0, 10_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 1}), None, None),
-                ("", "newbuy" + "x" * 26, 0, 30_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 2}), json.dumps({"clicks": 3}), None),
-                ("", "oldall" + "x" * 26, 0, 5_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None),
-                ("", "newall" + "x" * 26, 0, 40_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, json.dumps({"clicks": 2}), None),
-                ("", "nochunk" + "x" * 25, 0, 50_000, 0, 0, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 3}), None, None),
+                ("", "oldbuy" + "x" * 26, 0, 10_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 1}), None, None, None),
+                ("", "newbuy" + "x" * 26, 0, 30_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 2}), json.dumps({"clicks": 3}), None, None),
+                ("", "oldall" + "x" * 26, 0, 5_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None, None),
+                ("", "newall" + "x" * 26, 0, 40_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, json.dumps({"clicks": 2}), None, None),
+                ("", "nochunk" + "x" * 25, 0, 50_000, 0, 0, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 3}), None, None, None),
             ]
         )
         sampled = analyze.sample_cohort_rows(conn, "", purchased_n=1, all_n=1)
@@ -1438,16 +1578,154 @@ class TestCohortSampling(unittest.TestCase):
     def test_sample_requires_ashwamag_path_and_min_duration(self):
         analyze, conn = self._conn(
             [
-                ("", "short" + "x" * 27, 0, 4_999, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 1}), None, None),
-                ("", "other" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/other", json.dumps({"purchased_at": 1}), None, None),
-                ("", "okbuy" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01?x=1", json.dumps({"purchased_at": 1}), None, None),
-                ("", "okall" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None),
+                ("", "short" + "x" * 27, 0, 4_999, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 1}), None, None, None),
+                ("", "other" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/other", json.dumps({"purchased_at": 1}), None, None, None),
+                ("", "okbuy" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01?x=1", json.dumps({"purchased_at": 1}), None, None, None),
+                ("", "okall" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None, None),
             ]
         )
         sampled = analyze.sample_cohort_rows(conn, "", purchased_n=5, all_n=5)
         self.assertEqual(
             {(s["session_id"], s["filter"]) for s in sampled},
             {("okbuy" + "x" * 27, "purchased"), ("okall" + "x" * 27, "all")},
+        )
+
+    def test_sample_any_mixes_outcomes_up_to_limit(self):
+        analyze, conn = self._conn(
+            [
+                ("", "buy1" + "x" * 28, 0, 30_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 1}), json.dumps({"clicks": 2}), None, None),
+                ("", "rest1" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, json.dumps({"clicks": 1}), None, None),
+                ("", "buy2" + "x" * 28, 0, 10_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 2}), None, None, None),
+            ]
+        )
+        sampled = analyze.sample_cohort_rows(conn, "", purchased_n=0, all_n=0, any_n=2)
+        self.assertEqual(
+            [(s["session_id"], s["filter"]) for s in sampled],
+            [("buy1" + "x" * 28, "purchased"), ("rest1" + "x" * 27, "all")],
+        )
+
+    def test_sample_honors_cut_style_slice_filters(self):
+        analyze, conn = self._conn(
+            [
+                (
+                    "",
+                    "mob" + "x" * 29,
+                    0,
+                    40_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01?utm_source=google",
+                    json.dumps({"purchased_at": 1}),
+                    None,
+                    json.dumps({"width": 390}),
+                    json.dumps({"utm_source": "google"}),
+                ),
+                (
+                    "",
+                    "desk" + "x" * 28,
+                    0,
+                    50_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01?utm_source=google",
+                    json.dumps({"purchased_at": 2}),
+                    None,
+                    json.dumps({"width": 1280}),
+                    json.dumps({"utm_source": "google"}),
+                ),
+                (
+                    "",
+                    "fb" + "x" * 30,
+                    0,
+                    60_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01?utm_source=facebook",
+                    None,
+                    None,
+                    json.dumps({"width": 390}),
+                    json.dumps({"utm_source": "facebook"}),
+                ),
+            ]
+        )
+        sampled = analyze.sample_cohort_rows(
+            conn,
+            "",
+            purchased_n=0,
+            all_n=0,
+            any_n=5,
+            url_contains="",
+            slice_spec={"device": ["mobile"], "utm_source": "google", "page": "/pages/ashwamag-01"},
+        )
+        self.assertEqual(
+            [s["session_id"] for s in sampled],
+            ["mob" + "x" * 29],
+        )
+
+    def test_sample_groups_a_and_b_with_independent_slices(self):
+        analyze, conn = self._conn(
+            [
+                (
+                    "",
+                    "buy" + "x" * 29,
+                    0,
+                    50_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    json.dumps({"purchased_at": 1}),
+                    None,
+                    json.dumps({"width": 390}),
+                    None,
+                ),
+                (
+                    "",
+                    "rest" + "x" * 28,
+                    0,
+                    40_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    None,
+                    json.dumps({"width": 390}),
+                    None,
+                ),
+                (
+                    "",
+                    "other" + "x" * 27,
+                    0,
+                    30_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/other",
+                    None,
+                    None,
+                    json.dumps({"width": 390}),
+                    None,
+                ),
+            ]
+        )
+        sampled = analyze.sample_cohort_rows(
+            conn,
+            "",
+            purchased_n=0,
+            all_n=0,
+            a_n=1,
+            b_n=1,
+            url_contains="",
+            slice_spec={"outcome": ["purchased"], "page": "/pages/ashwamag-01"},
+            slice_b={"outcome": ["checkout", "rest"], "page": "/pages/ashwamag-01"},
+        )
+        self.assertEqual(
+            [(s["session_id"], s["filter"]) for s in sampled],
+            [("buy" + "x" * 29, "a"), ("rest" + "x" * 28, "b")],
         )
 
     def test_standout_line_prefers_what_stands_out_section(self):

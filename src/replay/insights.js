@@ -5,6 +5,8 @@ import { writeHash } from './deeplink.js';
 import { loadSession, setPendingSeek } from './session-player.js';
 
 const POLL_MS = 2000;
+const COHORT_MAX_SESSIONS = 500;
+const COHORT_MIN_DURATION_S = 5;
 
 const modeButtons = document.querySelectorAll('#mode-switch button');
 const tabButtons = document.querySelectorAll('.insights-tabs button[data-insights-tab]');
@@ -32,6 +34,22 @@ const chatFormEl = document.getElementById('cut-chat-form');
 const chatInputEl = document.getElementById('cut-chat-input');
 const chatSendEl = document.getElementById('cut-chat-send');
 const chatClearEl = document.getElementById('cut-chat-clear');
+const createDialog = document.getElementById('cohort-create-dialog');
+const createForm = document.getElementById('cohort-create-form');
+const createCancelBtn = document.getElementById('cohort-create-cancel');
+const aNInput = document.getElementById('cohort-a-n');
+const bNInput = document.getElementById('cohort-b-n');
+const addBInput = document.getElementById('cohort-add-b');
+const groupBEl = document.getElementById('cohort-group-b');
+const splitHintEl = document.getElementById('cohort-split-hint');
+const minSInput = document.getElementById('cohort-min-s');
+const createFacetsAEl = document.getElementById('cohort-create-facets-a');
+const createFacetsBEl = document.getElementById('cohort-create-facets-b');
+const timeHintEl = document.getElementById('cohort-time-hint');
+
+let createFacets = null;
+let createSliceA = { outcome: '', device: '', page: '', utm_source: '', utm_campaign: '' };
+let createSliceB = { outcome: '', device: '', page: '', utm_source: '', utm_campaign: '' };
 
 let analysisEnabled = false;
 let pollTimer = null;
@@ -71,7 +89,7 @@ function syncRunButtons() {
   // Creating a cohort always adds a new one — never replaces the selected cohort.
   runBtn.disabled = false;
   runBtn.title =
-    'Sample latest 50 purchased + 50 non-purchase ashwamag-01 sessions (≥5s) into a new cohort. Does not start analysis. Existing cohorts stay in the list.';
+    'Choose group A filters (and optional group B), then sample. Does not start analysis.';
   runBtn.textContent = 'New cohort';
   renameBtn.disabled = !cohortId;
 
@@ -152,13 +170,192 @@ function cohortUrl(id) {
   return `/api/cohorts/${encodeURIComponent(id)}${qs ? `?${qs}` : ''}`;
 }
 
-function createCohortUrl() {
+function appendSliceParams(params, sampleSlice, prefix = '') {
+  for (const field of SLICE_FIELDS) {
+    if (sampleSlice && sampleSlice[field]) {
+      params.set(`${prefix}${field}`, sampleSlice[field]);
+    }
+  }
+}
+
+function createCohortUrl({ a, b, minDurationMs, sliceA, sliceB }) {
   const params = withProject(new URLSearchParams());
-  params.set('purchased', '50');
-  params.set('all', '50');
-  params.set('min_duration_ms', '5000');
-  params.set('url_contains', '/pages/ashwamag-01');
+  params.set('a', String(a));
+  if (b > 0) params.set('b', String(b));
+  params.set('min_duration_ms', String(minDurationMs));
+  // Exact page / utm / device filters replace the old url_contains default.
+  params.set('url_contains', '');
+  appendSliceParams(params, sliceA);
+  if (b > 0) appendSliceParams(params, sliceB, 'b_');
   return `/api/cohorts?${params.toString()}`;
+}
+
+function poolFacetsUrl(minDurationMs) {
+  const params = withProject(new URLSearchParams());
+  params.set('min_duration_ms', String(minDurationMs));
+  return `/api/facets?${params.toString()}`;
+}
+
+function clampGroupSize(raw, fallback = 100) {
+  const n = Math.round(Number(raw) || 0);
+  if (n < 1) return fallback;
+  return Math.min(COHORT_MAX_SESSIONS, n);
+}
+
+function readCreateForm() {
+  const addB = !!(addBInput && addBInput.checked);
+  let a = clampGroupSize(aNInput?.value, 100);
+  let b = addB ? clampGroupSize(bNInput?.value, 100) : 0;
+  if (a + b > COHORT_MAX_SESSIONS) {
+    if (addB) {
+      const half = Math.floor(COHORT_MAX_SESSIONS / 2);
+      a = half;
+      b = COHORT_MAX_SESSIONS - half;
+    } else {
+      a = COHORT_MAX_SESSIONS;
+    }
+  }
+  const minS = Math.max(
+    COHORT_MIN_DURATION_S,
+    Math.round(Number(minSInput?.value) || COHORT_MIN_DURATION_S)
+  );
+  return {
+    a,
+    b,
+    addB,
+    total: a + b,
+    minDurationMs: minS * 1000,
+    sliceA: { ...createSliceA },
+    sliceB: { ...createSliceB },
+  };
+}
+
+function createFacetRow(field, items, selected, dataAttr) {
+  if (!items || !items.length) {
+    if (field !== 'outcome') return '';
+  }
+  const extras =
+    field === 'outcome'
+      ? `<option value="all"${
+          selected === 'all' ? ' selected' : ''
+        }>did not purchase</option>`
+      : '';
+  const options = (items || [])
+    .map(
+      (i) =>
+        `<option value="${escapeAttr(i.value)}"${
+          selected === i.value ? ' selected' : ''
+        }>${escapeHtml(i.label || i.value)} (${i.count})</option>`
+    )
+    .join('');
+  return `<label class="facet">
+    <span>${escapeHtml(FACET_LABELS[field] || field)}</span>
+    <select data-${dataAttr}="${field}">
+      <option value="">any</option>
+      ${extras}
+      ${options}
+    </select>
+  </label>`;
+}
+
+function renderCreateFacetHost(host, sliceState, dataAttr) {
+  if (!host) return;
+  if (!createFacets) {
+    host.innerHTML =
+      '<span class="time-hint">Loading filters from recorded sessions…</span>';
+    return;
+  }
+  host.innerHTML = SLICE_FIELDS.map((field) =>
+    createFacetRow(field, createFacets[field], sliceState[field], dataAttr)
+  ).join('');
+  host.querySelectorAll(`select[data-${dataAttr}]`).forEach((sel) => {
+    sel.addEventListener('change', () => {
+      sliceState[sel.getAttribute(`data-${dataAttr}`)] = sel.value;
+      syncCreateFormHints();
+    });
+  });
+}
+
+function renderCreateFacets() {
+  renderCreateFacetHost(createFacetsAEl, createSliceA, 'create-a');
+  if (addBInput && addBInput.checked) {
+    renderCreateFacetHost(createFacetsBEl, createSliceB, 'create-b');
+  }
+}
+
+function syncCreateFormHints() {
+  if (!splitHintEl || !timeHintEl) return;
+  if (groupBEl) groupBEl.hidden = !(addBInput && addBInput.checked);
+  const opts = readCreateForm();
+  if (opts.addB) {
+    splitHintEl.textContent = `${opts.a} in A + ${opts.b} in B (${opts.total} total, max ${COHORT_MAX_SESSIONS})`;
+  } else {
+    splitHintEl.textContent = `${opts.a} session(s) in group A`;
+  }
+  renderCreateFacets();
+  const coldHoursLow = Math.max(1, Math.round((opts.total * 1.5) / 60));
+  const coldHoursHigh = Math.max(coldHoursLow + 1, Math.round((opts.total * 3) / 60));
+  timeHintEl.textContent =
+    `Sessions under ${COHORT_MIN_DURATION_S}s are never included. Sampling is instant; ` +
+    `analysis reconstructs each page first (often ~1–3 min/session when cold), so ` +
+    `${opts.total} new sessions can take roughly ${coldHoursLow}–${coldHoursHigh} hours ` +
+    `before Gemini finishes. Already-analyzed sessions are skipped.`;
+}
+
+function preferDefaultPage(sliceState) {
+  if (
+    !sliceState.page &&
+    createFacets &&
+    (createFacets.page || []).some((i) => i.value === '/pages/ashwamag-01')
+  ) {
+    sliceState.page = '/pages/ashwamag-01';
+  }
+}
+
+async function loadCreateFacets() {
+  const minS = Math.max(
+    COHORT_MIN_DURATION_S,
+    Math.round(Number(minSInput?.value) || COHORT_MIN_DURATION_S)
+  );
+  try {
+    createFacets = await fetchJson(poolFacetsUrl(minS * 1000));
+    preferDefaultPage(createSliceA);
+    preferDefaultPage(createSliceB);
+  } catch {
+    createFacets = {
+      n: 0,
+      outcome: [],
+      device: [],
+      page: [],
+      utm_source: [],
+      utm_campaign: [],
+    };
+  }
+  renderCreateFacets();
+}
+
+function openCreateDialog() {
+  if (!createDialog || typeof createDialog.showModal !== 'function') {
+    runCohort({
+      a: 100,
+      b: 0,
+      minDurationMs: COHORT_MIN_DURATION_S * 1000,
+      sliceA: { ...emptySlice(), page: '/pages/ashwamag-01' },
+      sliceB: emptySlice(),
+    });
+    return;
+  }
+  if (aNInput) aNInput.value = aNInput.value || '100';
+  if (bNInput) bNInput.value = bNInput.value || '100';
+  if (addBInput) addBInput.checked = false;
+  if (minSInput && Number(minSInput.value) < COHORT_MIN_DURATION_S) {
+    minSInput.value = String(COHORT_MIN_DURATION_S);
+  }
+  createSliceA = emptySlice();
+  createSliceB = emptySlice();
+  syncCreateFormHints();
+  createDialog.showModal();
+  loadCreateFacets();
 }
 
 function analyzeCohortUrl(id) {
@@ -328,8 +525,14 @@ function renderQueue(body) {
 
   const rows = sessions
     .map((entry) => {
-      const filterClass = entry.filter === 'purchased' ? 'purchased' : 'all';
-      const filterLabel = entry.filter === 'purchased' ? 'Purchased' : 'All';
+      const filter =
+        entry.filter === 'purchased'
+          ? { className: 'purchased', label: 'Purchased' }
+          : entry.filter === 'a'
+            ? { className: 'a', label: 'A' }
+            : entry.filter === 'b'
+              ? { className: 'b', label: 'B' }
+              : { className: 'all', label: entry.filter === 'all' ? 'All' : String(entry.filter || 'All') };
       const status = entry.status || 'queued';
       const campaign =
         (entry.attribution && entry.attribution.utm_campaign) ||
@@ -347,7 +550,7 @@ function renderQueue(body) {
       return `
         <tr class="openable" data-sid="${escapeAttr(entry.session_id)}">
           <td class="sid">${escapeHtml(entry.session_id.slice(0, 8))}…</td>
-          <td><span class="badge ${filterClass}">${filterLabel}</span></td>
+          <td><span class="badge ${filter.className}">${escapeHtml(filter.label)}</span></td>
           <td>${escapeHtml(String(campaign))}</td>
           <td>
             <span class="badge ${escapeAttr(status)}">${escapeHtml(status)}</span>
@@ -1040,14 +1243,15 @@ export async function refreshCohort() {
   }
 }
 
-async function runCohort() {
+async function runCohort(opts) {
   if (runBtn.disabled) return;
+  const sample = opts || readCreateForm();
   autoSwitchedForRun = false;
   runBtn.disabled = true;
   runBtn.textContent = 'Sampling…';
   progressEl.textContent = 'Sampling a new cohort (existing cohorts kept)…';
   try {
-    const body = await fetchJson(createCohortUrl(), { method: 'POST' });
+    const body = await fetchJson(createCohortUrl(sample), { method: 'POST' });
     cohortId = body.id;
     renderCohort(body);
     setTab('queue');
@@ -1119,7 +1323,52 @@ export function initInsights() {
       setTab(btn.dataset.insightsTab);
     });
   });
-  runBtn.addEventListener('click', runCohort);
+  runBtn.addEventListener('click', openCreateDialog);
+  if (createCancelBtn && createDialog) {
+    createCancelBtn.addEventListener('click', () => createDialog.close());
+  }
+  if (createForm) {
+    createForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (minSInput && Number(minSInput.value) < COHORT_MIN_DURATION_S) {
+        minSInput.value = String(COHORT_MIN_DURATION_S);
+      }
+      const opts = readCreateForm();
+      if (aNInput) aNInput.value = String(opts.a);
+      if (bNInput && opts.addB) bNInput.value = String(opts.b);
+      if (createDialog && createDialog.open) createDialog.close();
+      runCohort(opts);
+    });
+  }
+  [aNInput, bNInput].forEach((el) => {
+    if (!el) return;
+    el.addEventListener('input', syncCreateFormHints);
+    el.addEventListener('change', syncCreateFormHints);
+  });
+  if (addBInput) {
+    addBInput.addEventListener('change', () => {
+      if (addBInput.checked) {
+        // Seed B from A's traffic/page filters so comparison starts aligned.
+        const bEmpty = SLICE_FIELDS.every((field) => !createSliceB[field]);
+        if (bEmpty) {
+          createSliceB = { ...createSliceA };
+        }
+        preferDefaultPage(createSliceB);
+        if (!createSliceA.outcome) createSliceA.outcome = 'purchased';
+        if (!createSliceB.outcome || createSliceB.outcome === createSliceA.outcome) {
+          createSliceB.outcome = 'all';
+        }
+      }
+      syncCreateFormHints();
+    });
+  }
+  if (minSInput) {
+    minSInput.addEventListener('input', syncCreateFormHints);
+    minSInput.addEventListener('change', () => {
+      syncCreateFormHints();
+      if (createDialog && createDialog.open) loadCreateFacets();
+    });
+  }
   if (analyzeBtn) analyzeBtn.addEventListener('click', startCohortAnalysis);
   if (pauseBtn) pauseBtn.addEventListener('click', pauseCohortAnalysis);
   renameBtn.addEventListener('click', renameCohort);

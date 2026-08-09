@@ -1372,32 +1372,140 @@ async def rename_cohort(request: Request, cohort_id: str, project: Optional[str]
     return cohort_response(pool, analyze.enrich_cohort_status(pool, renamed))
 
 
+@app.get("/api/facets")
+def get_pool_facets(
+    request: Request,
+    project: Optional[str] = Query(None),
+    min_duration_ms: int = Query(analyze.COHORT_MIN_DURATION_MS, ge=0),
+):
+    """Facet values available in the pool — same fields as the Insights cut picker."""
+    require_read_access(request, project)
+    pool = resolve_pool(project)
+    with _index_lock:
+        facets = analyze.pool_facets(
+            index_conn(),
+            pool_key(pool),
+            min_duration_ms=min_duration_ms,
+        )
+    return facets
+
+
 @app.post("/api/cohorts")
 async def create_cohort(
     request: Request,
     project: Optional[str] = Query(None),
-    purchased: int = Query(analyze.COHORT_DEFAULT_PURCHASED_N, ge=0, le=50),
-    all_n: int = Query(analyze.COHORT_DEFAULT_ALL_N, ge=0, le=50, alias="all"),
+    purchased: Optional[int] = Query(None, ge=0, le=analyze.COHORT_MAX_SESSIONS),
+    all_n: Optional[int] = Query(None, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="all"),
+    any_n: int = Query(0, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="any"),
+    a_n: int = Query(0, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="a"),
+    b_n: int = Query(0, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="b"),
     min_duration_ms: int = Query(analyze.COHORT_MIN_DURATION_MS, ge=0),
     url_contains: str = Query(analyze.COHORT_URL_CONTAINS),
+    outcome: Optional[list] = Query(None),
+    device: Optional[list] = Query(None),
+    page: Optional[str] = Query(None),
+    utm_source: Optional[str] = Query(None),
+    utm_medium: Optional[str] = Query(None),
+    utm_campaign: Optional[str] = Query(None),
+    utm_content: Optional[str] = Query(None),
+    fbclid: Optional[str] = Query(None),
+    b_outcome: Optional[list] = Query(None),
+    b_device: Optional[list] = Query(None),
+    b_page: Optional[str] = Query(None),
+    b_utm_source: Optional[str] = Query(None),
+    b_utm_medium: Optional[str] = Query(None),
+    b_utm_campaign: Optional[str] = Query(None),
+    b_utm_content: Optional[str] = Query(None),
+    b_fbclid: Optional[str] = Query(None),
 ):
-    """Sample a new cohort only — does not start analysis. Prior cohorts are kept."""
+    """Sample a new cohort only — does not start analysis. Prior cohorts are kept.
+
+    Preferred: `a` (+ optional `b`) with independent cut-style filters for each
+    group (`outcome`/`device`/… for A, `b_outcome`/`b_device`/… for B).
+
+    Legacy: `any` for one mixed pool, or `purchased` + `all` for a purchase
+    split. Omitting sizes falls back to the default 50+50 purchased sample.
+    Total sessions are capped at COHORT_MAX_SESSIONS (500).
+    """
     require_read_access(request, project)
     pool = resolve_pool(project)
+
+    slice_a = _slice_from_params(
+        outcome,
+        device,
+        page,
+        utm_source,
+        utm_medium,
+        utm_campaign,
+        utm_content,
+        fbclid,
+    )
+    slice_b = _slice_from_params(
+        b_outcome,
+        b_device,
+        b_page,
+        b_utm_source,
+        b_utm_medium,
+        b_utm_campaign,
+        b_utm_content,
+        b_fbclid,
+    )
+
+    use_groups = a_n > 0 or b_n > 0
+    if use_groups:
+        if any_n or purchased is not None or all_n is not None:
+            raise ApiError(400, "use either a/b groups or purchased/all/any, not both")
+        if a_n < 1:
+            raise ApiError(400, "group A needs at least one session")
+        purchased_n = 0
+        all_count = 0
+        any_count = 0
+        total = a_n + b_n
+    elif any_n > 0:
+        if purchased is not None or all_n is not None:
+            raise ApiError(400, "use either any=N or purchased/all, not both")
+        purchased_n = 0
+        all_count = 0
+        any_count = any_n
+        total = any_n
+    else:
+        purchased_n = (
+            analyze.COHORT_DEFAULT_PURCHASED_N if purchased is None else purchased
+        )
+        all_count = analyze.COHORT_DEFAULT_ALL_N if all_n is None else all_n
+        # If only one side was set, the other defaults to 0 (not the 50/50 preset).
+        if purchased is not None and all_n is None:
+            all_count = 0
+        if all_n is not None and purchased is None:
+            purchased_n = 0
+        any_count = 0
+        total = purchased_n + all_count
+        # Legacy purchased/non-purchase arms own the outcome split.
+        slice_a.pop("outcome", None)
+
+    if total < 1:
+        raise ApiError(400, "request at least one session")
+    if total > analyze.COHORT_MAX_SESSIONS:
+        raise ApiError(400, f"cohort size capped at {analyze.COHORT_MAX_SESSIONS} sessions")
 
     with _index_lock:
         conn = index_conn()
         cohort = analyze.build_cohort(
             conn,
             pool_key(pool),
-            purchased,
-            all_n,
+            purchased_n,
+            all_count,
+            any_n=any_count,
+            a_n=a_n if use_groups else 0,
+            b_n=b_n if use_groups else 0,
             min_duration_ms=min_duration_ms,
             url_contains=url_contains,
+            slice_spec=slice_a,
+            slice_b=slice_b if use_groups and b_n > 0 else None,
         )
 
     if not cohort["sessions"]:
-        raise ApiError(400, "no sessions matched the purchased/all sample")
+        raise ApiError(400, "no sessions matched the sample filters")
 
     analyze.write_cohort(pool, cohort)
     return JSONResponse(
@@ -1897,51 +2005,7 @@ def cohort_facets(pool: Path, cohort: dict) -> dict:
     can reason over — offering a filter that would select zero write-ups is
     worse than not offering it.
     """
-    rows = _cut_rows(pool, cohort)
-    counts = {
-        "outcome": {},
-        "device": {},
-        "page": {},
-        "utm_source": {},
-        "utm_campaign": {},
-    }
-    for row in rows:
-        counts["outcome"][row.get("outcome") or "rest"] = (
-            counts["outcome"].get(row.get("outcome") or "rest", 0) + 1
-        )
-        if row.get("device"):
-            counts["device"][row["device"]] = counts["device"].get(row["device"], 0) + 1
-        if row.get("page"):
-            counts["page"][row["page"]] = counts["page"].get(row["page"], 0) + 1
-        attrs = row.get("attribution") or {}
-        for key in ("utm_source", "utm_campaign"):
-            value = str(attrs.get(key) or "").strip().lower()
-            if value:
-                counts[key][value] = counts[key].get(value, 0) + 1
-
-    def _listed(field, order=None):
-        items = counts[field]
-        keys = order if order else sorted(items, key=lambda k: (-items[k], k))
-        return [
-            {"value": k, "count": items[k], "label": _facet_label(field, k)}
-            for k in keys
-            if items.get(k)
-        ]
-
-    return {
-        "n": len(rows),
-        "outcome": _listed("outcome", order=analyze.OUTCOME_VALUES),
-        "device": _listed("device", order=analyze.DEVICE_VALUES),
-        "page": _listed("page"),
-        "utm_source": _listed("utm_source"),
-        "utm_campaign": _listed("utm_campaign"),
-    }
-
-
-def _facet_label(field: str, value: str) -> str:
-    if field == "outcome":
-        return analyze.OUTCOME_LABELS.get(value, value)
-    return value
+    return analyze.facets_from_rows(_cut_rows(pool, cohort))
 
 
 def _parse_fbclid_flag(raw: Optional[str]) -> Optional[bool]:

@@ -495,10 +495,10 @@
     .seg-badges { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
 
     .badge { display: inline-block; font-size: 10.5px; padding: 1.5px 7px; border-radius: 999px; font-weight: 600; }
-    .badge.purchased, .badge.done { background: var(--pos-soft); color: var(--pos); }
+    .badge.purchased, .badge.a, .badge.done { background: var(--pos-soft); color: var(--pos); }
     .badge.started, .badge.running { background: var(--warn-soft); color: var(--warn); }
     .badge.error { background: var(--neg-soft); color: var(--neg); }
-    .badge.all { background: var(--accent-soft); color: var(--accent); }
+    .badge.all, .badge.b { background: var(--accent-soft); color: var(--accent); }
     .badge.queued { background: var(--surface-2); color: var(--text-faint); }
 
     .insights-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -507,6 +507,55 @@
     .link-btn:hover:not(:disabled) { background: var(--accent-soft); }
     .link-btn:disabled { color: var(--text-faint); cursor: default; }
     #cohort-selection { font-size: 12px; color: var(--text-faint); max-width: 520px; line-height: 1.4; }
+
+    #cohort-create-dialog {
+      border: 1px solid var(--border); border-radius: var(--r-lg); padding: 0;
+      background: var(--surface); color: var(--text); box-shadow: var(--shadow);
+      width: min(420px, calc(100vw - 32px));
+    }
+    #cohort-create-dialog::backdrop { background: rgb(16 18 27 / 0.35); }
+    #cohort-create-dialog form { display: flex; flex-direction: column; gap: 14px; padding: 18px 18px 16px; }
+    #cohort-create-dialog h2 { margin: 0; font-size: 15px; font-weight: 600; }
+    #cohort-create-dialog .field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--text-dim); }
+    #cohort-create-dialog .field input[type="number"],
+    #cohort-create-dialog .field input[type="text"] {
+      font: inherit; color: var(--text); background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--r-sm); padding: 7px 10px;
+    }
+    #cohort-create-dialog .check {
+      display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--text);
+      line-height: 1.4;
+    }
+    #cohort-create-dialog .check input { margin-top: 2px; }
+    #cohort-create-dialog .split-hint,
+    #cohort-create-dialog .time-hint {
+      margin: -4px 0 0; font-size: 12px; color: var(--text-faint); line-height: 1.45;
+    }
+    #cohort-create-dialog .create-group {
+      display: flex; flex-direction: column; gap: 10px;
+      padding: 12px; background: var(--surface-2); border-radius: var(--r-sm);
+    }
+    #cohort-create-dialog .create-group h3 {
+      margin: 0; font-size: 12px; font-weight: 600; color: var(--text);
+      letter-spacing: 0.02em;
+    }
+    #cohort-create-dialog .create-group[hidden] { display: none !important; }
+    #cohort-create-dialog .create-facets {
+      display: flex; flex-wrap: wrap; gap: 10px 14px;
+    }
+    #cohort-create-dialog .create-facets .facet {
+      display: flex; flex-direction: column; gap: 4px; min-width: 120px; flex: 1 1 120px;
+    }
+    #cohort-create-dialog .create-facets .facet > span {
+      font-size: 10.5px; font-weight: 500; color: var(--text-faint);
+    }
+    #cohort-create-dialog .create-facets select {
+      font: inherit; font-size: 12.5px; color: var(--text); background: var(--surface);
+      border: 1px solid var(--border); border-radius: var(--r-sm); padding: 6px 8px;
+    }
+    #cohort-create-dialog .actions {
+      display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px;
+    }
 
     .insights-tabs { display: flex; gap: 2px; padding: 2px; background: var(--surface-2); border-radius: var(--r-sm); align-self: flex-start; }
     .insights-tabs button {
@@ -814,6 +863,41 @@
       <button type="button" id="cohort-analyze" class="btn primary" disabled>Start analysis</button>
       <button type="button" id="cohort-run" class="btn" disabled>New cohort</button>
     </div>
+    <dialog id="cohort-create-dialog">
+      <form id="cohort-create-form" method="dialog">
+        <h2>New cohort</h2>
+        <label class="field">
+          Min duration (seconds)
+          <input id="cohort-min-s" name="min_s" type="number" min="5" step="1" value="5" required />
+        </label>
+        <div class="create-group" id="cohort-group-a">
+          <h3>Group A</h3>
+          <label class="field">
+            Sessions
+            <input id="cohort-a-n" name="a_n" type="number" min="1" max="500" value="100" required />
+          </label>
+          <div class="create-facets" id="cohort-create-facets-a"></div>
+        </div>
+        <label class="check">
+          <input id="cohort-add-b" name="add_b" type="checkbox" />
+          <span>Add group B for comparison</span>
+        </label>
+        <div class="create-group" id="cohort-group-b" hidden>
+          <h3>Group B</h3>
+          <label class="field">
+            Sessions
+            <input id="cohort-b-n" name="b_n" type="number" min="1" max="500" value="100" />
+          </label>
+          <div class="create-facets" id="cohort-create-facets-b"></div>
+        </div>
+        <p class="split-hint" id="cohort-split-hint"></p>
+        <p class="time-hint" id="cohort-time-hint"></p>
+        <div class="actions">
+          <button type="button" class="btn" id="cohort-create-cancel">Cancel</button>
+          <button type="submit" class="btn primary" id="cohort-create-submit">Sample cohort</button>
+        </div>
+      </form>
+    </dialog>
     <div class="insights-tabs">
       <button type="button" data-insights-tab="cut" class="active">Insights</button>
       <button type="button" data-insights-tab="queue">Sessions</button>
