@@ -457,6 +457,59 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
     }
 
 
+# Computed for the API response and never written to the cohort file.
+# `progress` is a tally of `sessions`, so persisting it leaves a second copy
+# that any other writer updates out from under.
+COHORT_VIEW_ONLY_FIELDS = ("progress",)
+# Per-session fields the response layers on: write-ups from analysis.json
+# (attach_cohort_insights) and facts from the index (server.stamp_cohort_
+# attribution). enrich_cohort_status already pops these on the way in; stripping
+# them again on the way out means the guard holds whatever ran before it.
+COHORT_VIEW_ONLY_SESSION_FIELDS = (
+    "text",
+    "standout",
+    "model",
+    "frame_count",
+    "attribution",
+    "device",
+    "outcome",
+)
+
+
+def persistable_cohort(enriched: dict, stored: Optional[dict] = None) -> dict:
+    """Strip an enriched cohort back to what belongs on disk.
+
+    The status refresh itself is a durable fact — a crashed runner leaves rows
+    saying "running" that only a re-read of analysis.json corrects — so callers
+    do need to write it back. What they must not write is the view laid over it.
+
+    `selection` is the trap. enrich backfills it from whatever sampling fields
+    are present, so for a cohort sampled by any_n / a_n (where purchased_n and
+    all_n are 0) the guess reads "latest 0 purchased + 0 non-purchase". Since
+    the backfill only fires when the field is missing, writing that guess makes
+    it permanent — in the one field that records how the cohort was built.
+    `stored` is the cohort as it exists on disk: it says whether `selection`
+    was genuinely recorded (keep it) or invented by this pass (drop it, and let
+    each read re-derive from live fields).
+    """
+    out = {k: v for k, v in enriched.items() if k not in COHORT_VIEW_ONLY_FIELDS}
+    if stored is not None and not stored.get("selection"):
+        out.pop("selection", None)
+    sessions = out.get("sessions")
+    if isinstance(sessions, list):
+        out["sessions"] = [
+            {
+                k: v
+                for k, v in row.items()
+                if k not in COHORT_VIEW_ONLY_SESSION_FIELDS
+            }
+            if isinstance(row, dict)
+            else row
+            for row in sessions
+        ]
+    return out
+
+
 def standout_line(text: str) -> str:
     """First useful line under ## What stands out, else the first non-heading line."""
     if not text:
@@ -3100,7 +3153,7 @@ async def resume_cohort_batch(pool: Path, cohort: dict) -> dict:
     live = read_cohort(pool, cohort["id"]) or cohort
     live.pop("batch", None)
     final = enrich_cohort_status(pool, live)
-    write_cohort(pool, final)
+    write_cohort(pool, persistable_cohort(final, live))
     return final
 
 
@@ -3201,7 +3254,7 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
         live = read_cohort(pool, cohort["id"]) or cohort
         live.pop("batch", None)
         final = enrich_cohort_status(pool, live)
-        write_cohort(pool, final)
+        write_cohort(pool, persistable_cohort(final, live))
         return final
     except asyncio.CancelledError:
         live = read_cohort(pool, cohort["id"]) or cohort

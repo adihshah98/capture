@@ -1093,8 +1093,10 @@ def get_cohort(request: Request, cohort_id: str, project: Optional[str] = Query(
     cohort = _resolve_cohort_or_404(pool, cohort_id)
     live = analyze.enrich_cohort_status(pool, cohort)
     # Persist refreshed status so a crashed runner still shows accurate counts.
+    # Status only — persistable_cohort drops the derived view enrich lays over
+    # it, so a poll cannot freeze a guessed `selection` into the file.
     if live.get("sessions") != cohort.get("sessions") or live.get("status") != cohort.get("status"):
-        analyze.write_cohort(pool, live)
+        analyze.write_cohort(pool, analyze.persistable_cohort(live, cohort))
     return cohort_response(pool, live)
 
 
@@ -1435,7 +1437,12 @@ async def _retry_cohort_session_job(
         except Exception as exc:
             row["status"] = "error"
             row["error"] = getattr(exc, "message", None) or str(exc) or "analysis failed"
-        analyze.write_cohort(pool, analyze.enrich_cohort_status(pool, cohort))
+        analyze.write_cohort(
+            pool,
+            analyze.persistable_cohort(
+                analyze.enrich_cohort_status(pool, cohort), cohort
+            ),
+        )
     finally:
         _cohort_tasks.pop(key, None)
 

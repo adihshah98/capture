@@ -147,5 +147,87 @@ class TestCohortBatch(unittest.TestCase):
         self.assertEqual(out["s2"]["error"], "nope")
 
 
+class TestPersistableCohort(unittest.TestCase):
+    """enrich_cohort_status is a read-time view; only part of it belongs on disk."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.pool = Path(self.tmp.name) / "sessions"
+        self.pool.mkdir(parents=True)
+        self.addCleanup(self.tmp.cleanup)
+
+    def store(self, **fields) -> dict:
+        cohort = {
+            "id": "cohort-1",
+            "created_at": 1,
+            "status": "idle",
+            "sessions": [{"session_id": "s1", "status": "queued"}],
+            **fields,
+        }
+        analyze.write_cohort(self.pool, cohort)
+        return analyze.read_cohort(self.pool, "cohort-1")
+
+    def round_trip(self, stored: dict) -> tuple:
+        """(response, persisted) for one enrich-then-write cycle."""
+        live = analyze.enrich_cohort_status(self.pool, stored)
+        analyze.write_cohort(self.pool, analyze.persistable_cohort(live, stored))
+        return live, analyze.read_cohort(self.pool, "cohort-1")
+
+    def test_progress_is_returned_but_never_stored(self):
+        live, saved = self.round_trip(self.store())
+        self.assertEqual(live["progress"]["total"], 1)
+        self.assertNotIn("progress", saved)
+
+    def test_a_guessed_selection_is_not_frozen_into_the_file(self):
+        # No sampling fields at all: the backfill can only guess, and the guess
+        # ("latest 0 purchased + 0 non-purchase") would be permanent once
+        # written, because enrich only backfills a missing selection.
+        stored = self.store(purchased_n=0, all_n=0, any_n=0, a_n=0, b_n=0)
+        live, saved = self.round_trip(stored)
+        self.assertIn("0 purchased + 0 non-purchase", live["selection"])
+        self.assertIsNone(saved.get("selection"))
+
+    def test_a_real_selection_survives(self):
+        text = "Chosen as the latest 50 purchased + 50 non-purchase sessions on /x"
+        _, saved = self.round_trip(self.store(selection=text))
+        self.assertEqual(saved["selection"], text)
+
+    def test_refreshed_status_is_still_persisted(self):
+        # The whole reason callers write after enriching: a crashed runner
+        # leaves rows claiming "running" that only a re-read corrects.
+        session_dir = self.pool / "s1"
+        session_dir.mkdir()
+        (session_dir / analyze.ANALYSIS_FILE).write_text(
+            json.dumps({"status": "done", "text": "write-up"})
+        )
+        stored = self.store(sessions=[{"session_id": "s1", "status": "running"}])
+        _, saved = self.round_trip(stored)
+        self.assertEqual(saved["status"], "done")
+        self.assertEqual(saved["sessions"][0]["status"], "done")
+
+    def test_write_ups_are_still_kept_out_of_the_file(self):
+        session_dir = self.pool / "s1"
+        session_dir.mkdir()
+        (session_dir / analyze.ANALYSIS_FILE).write_text(
+            json.dumps({"status": "done", "text": "write-up", "model": "m"})
+        )
+        stored = self.store()
+        enriched = analyze.attach_cohort_insights(
+            self.pool, analyze.enrich_cohort_status(self.pool, stored)
+        )
+        analyze.write_cohort(
+            self.pool, analyze.persistable_cohort(enriched, stored)
+        )
+        saved = analyze.read_cohort(self.pool, "cohort-1")
+        self.assertNotIn("text", saved["sessions"][0])
+        self.assertNotIn("progress", saved)
+
+    def test_without_a_stored_cohort_it_only_drops_the_derived_view(self):
+        live = analyze.enrich_cohort_status(self.pool, self.store())
+        out = analyze.persistable_cohort(live)
+        self.assertNotIn("progress", out)
+        self.assertIn("selection", out)
+
+
 if __name__ == "__main__":
     unittest.main()
