@@ -1132,6 +1132,219 @@ def _given_facts(spec: dict, n: int) -> str:
     return "## Already known — never report these as findings\n\n" + "\n".join(lines)
 
 
+# --- Measured splits -------------------------------------------------------
+#
+# The model is unreliable at counting across dozens of write-ups: it invents
+# plausible shares and, per the note in _given_facts, has attached a
+# cohort-wide total to a nine-session group. Rather than instruct against
+# that, compute the splits here and hand over exact numbers to quote.
+#
+# Only pairings a marketing team can act on are crossed. The full product of
+# five dimensions is ten pairs, and at cohort sizes of 9-50 most cells land at
+# n=1 — precisely the noise the floor below exists to suppress.
+CROSS_TAB_PAIRS = (
+    ("utm_source", "outcome"),
+    ("utm_campaign", "outcome"),
+    ("page", "outcome"),
+    ("device", "outcome"),
+    ("utm_source", "device"),
+    ("page", "utm_source"),
+)
+
+# A cell must clear all three gates. Count alone lets 3-of-200 through;
+# coverage alone lets a large but unremarkable cell through; lift alone lets a
+# two-session fluke through.
+CROSS_TAB_MIN_CELL = 3
+CROSS_TAB_MIN_COVERAGE = 0.20
+CROSS_TAB_MIN_LIFT_PTS = 15.0
+
+CROSS_TAB_DIMENSIONS = {
+    "outcome": "outcome",
+    "device": "device",
+    "page": "landing page",
+    "utm_source": "traffic source",
+    "utm_campaign": "campaign",
+}
+
+
+def _dimension_value(row: dict, dimension: str) -> Optional[str]:
+    """One row's value on a cross-tab dimension, or None when unknown.
+
+    Unknown is not a value: a session with no utm_source may be direct,
+    organic or untagged, and bucketing those together would invent a segment.
+    """
+    if dimension in ("utm_source", "utm_campaign"):
+        attrs = row.get("attribution")
+        attrs = attrs if isinstance(attrs, dict) else {}
+        value = attrs.get(dimension)
+        if not value and dimension == "utm_source" and attrs.get("fbclid"):
+            # An fbclid with no utm_source is still unambiguously Meta.
+            return "meta (fbclid)"
+        return str(value).strip().lower() or None if value else None
+    if dimension == "outcome":
+        return OUTCOME_LABELS.get(row.get("outcome") or "rest")
+    value = row.get(dimension)
+    return str(value).strip() or None if value else None
+
+
+def _coverage(rows: list, dimension: str) -> tuple:
+    """(known_count, total) for a dimension across the group."""
+    known = sum(1 for row in rows if _dimension_value(row, dimension))
+    return known, len(rows)
+
+
+def _purchase_rate(rows: list) -> Optional[float]:
+    """Share of rows that purchased, as a percentage, or None for no rows."""
+    if not rows:
+        return None
+    bought = sum(1 for row in rows if (row.get("outcome") or "rest") == "purchased")
+    return 100.0 * bought / len(rows)
+
+
+def cross_tab_cells(rows: list, left: str, right: str) -> dict:
+    """Measured split of `rows` by `left`, reported against `right`.
+
+    Returns {"baseline", "kept", "suppressed", "coverage"}. `kept` holds only
+    cells clearing every gate; `suppressed` counts what the gates removed, so
+    the prompt can say a dimension was examined rather than leave the model to
+    read silence as uniformity.
+    """
+    known, total = _coverage(rows, left)
+    out = {
+        "left": left,
+        "right": right,
+        "coverage": (known, total),
+        "baseline": _purchase_rate(rows),
+        "kept": [],
+        "suppressed": 0,
+    }
+    if not rows or not known:
+        return out
+
+    buckets: dict = {}
+    for row in rows:
+        value = _dimension_value(row, left)
+        if value:
+            buckets.setdefault(value, []).append(row)
+
+    baseline = out["baseline"]
+    for value, bucket in sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        n = len(bucket)
+        coverage = n / total if total else 0.0
+        rate = _purchase_rate(bucket)
+        lift = None if rate is None or baseline is None else rate - baseline
+        if (
+            n < CROSS_TAB_MIN_CELL
+            or coverage < CROSS_TAB_MIN_COVERAGE
+            or lift is None
+            or abs(lift) < CROSS_TAB_MIN_LIFT_PTS
+        ):
+            out["suppressed"] += 1
+            continue
+        breakdown = {}
+        for member in bucket:
+            key = _dimension_value(member, right) or "unknown"
+            breakdown[key] = breakdown.get(key, 0) + 1
+        out["kept"].append(
+            {
+                "value": value,
+                "n": n,
+                "share": 100.0 * coverage,
+                "rate": rate,
+                "lift": lift,
+                "breakdown": breakdown,
+            }
+        )
+    return out
+
+
+def _pct(value: float) -> str:
+    return f"{value:.0f}%"
+
+
+def cross_tab_block(rows: list, spec: Optional[dict] = None) -> str:
+    """Exact, pre-computed splits for the group — empty when nothing clears.
+
+    Dimensions pinned by the filter are skipped: they are constant across the
+    group and cannot separate anything, which is the same reasoning
+    _given_facts applies to the premises.
+    """
+    spec = spec or {}
+    if len(rows) < CROSS_TAB_MIN_CELL:
+        return ""
+
+    pinned = {key for key in CROSS_TAB_DIMENSIONS if spec.get(key)}
+    if spec.get("fbclid") is not None:
+        pinned.add("utm_source")
+
+    lines: list = []
+    notes: list = []
+    for left, right in CROSS_TAB_PAIRS:
+        if left in pinned or right in pinned:
+            continue
+        result = cross_tab_cells(rows, left, right)
+        known, total = result["coverage"]
+        title = f"{CROSS_TAB_DIMENSIONS[left]} × {CROSS_TAB_DIMENSIONS[right]}"
+        if not known:
+            notes.append(f"- {title}: no session in this group carries a {left}.")
+            continue
+        if known < total:
+            coverage_note = f" ({known} of {total} sessions carry a {left})"
+        else:
+            coverage_note = ""
+        if not result["kept"]:
+            notes.append(
+                f"- {title}{coverage_note}: examined, nothing clears the "
+                f"reporting floor."
+            )
+            continue
+        baseline = result["baseline"]
+        lines.append(
+            f"\n{title}{coverage_note} — group baseline "
+            f"{_pct(baseline)} purchased ({len(rows)} sessions)"
+        )
+        for cell in result["kept"]:
+            sign = "+" if cell["lift"] >= 0 else "−"
+            parts = ", ".join(
+                f"{k} {v}" for k, v in sorted(cell["breakdown"].items(), key=lambda kv: -kv[1])
+            )
+            lines.append(
+                f"  {cell['value']}: {cell['n']} sessions "
+                f"({_pct(cell['share'])} of the group) · "
+                f"{_pct(cell['rate'])} purchased · "
+                f"{sign}{abs(cell['lift']):.0f}pts vs baseline · {parts}"
+            )
+        if result["suppressed"]:
+            lines.append(
+                f"  (below the floor, not shown: {result['suppressed']} more)"
+            )
+
+    if not lines and not notes:
+        return ""
+
+    header = (
+        "## Measured splits — computed, not inferred\n\n"
+        "These counts were calculated directly from the group's session "
+        "labels. They are EXACT. Quote them as given; never recompute, round "
+        "differently, or contradict them. Where your reading of the write-ups "
+        "disagrees with a number here, the number is right.\n\n"
+        f"Only splits meeting all of: at least {CROSS_TAB_MIN_CELL} sessions, "
+        f"at least {_pct(CROSS_TAB_MIN_COVERAGE * 100)} of the group, and at "
+        f"least {CROSS_TAB_MIN_LIFT_PTS:.0f} points away from the group's "
+        "purchase rate. A split absent here is one the data does not support "
+        "— do not assert it from the write-ups alone.\n\n"
+        "A row below tells you WHAT differs, never WHY. The reason lives in "
+        "the write-ups: pair each number with what those sessions actually "
+        "did on the page, and never restate a row as a finding on its own."
+    )
+    body = "\n".join(lines)
+    if notes:
+        # Named either way: silence would let the model read "no split shown"
+        # as "the group is uniform on that dimension".
+        body += "\n\nExamined and not reported:\n" + "\n".join(notes)
+    return f"{header}\n{body}".strip()
+
+
 # Insight sections hold {observation, share, action} objects; recommendations
 # and caveats stay plain string lists (a punch list / sample limit has no share).
 CUT_INSIGHT_SECTIONS = ("journey", "attention", "intent", "blockers")
@@ -1282,18 +1495,23 @@ def normalize_cut_analysis(raw, n: Optional[int] = None) -> dict:
     return out
 
 
-def cut_context(rows: list, label: str, given: str = "") -> tuple:
+def cut_context(
+    rows: list, label: str, given: str = "", spec: Optional[dict] = None
+) -> tuple:
     """(header, side_text, citations) — the evidence a group's questions run on.
 
     Shared by the cut write-up and the chat, so the two always reason over the
-    same numbered write-ups and the same "already known" premises. Anything
-    that changes here changes both, which is the point: a chat that saw a
-    different context than the cut it sits under would answer questions about
-    a group the user is not looking at.
+    same numbered write-ups, the same "already known" premises and the same
+    measured splits. Anything that changes here changes both, which is the
+    point: a chat that saw a different context than the cut it sits under
+    would answer questions about a group the user is not looking at.
     """
     header = f"This group is: {label}\n"
     if given:
         header += "\n" + given + "\n"
+    measured = cross_tab_block(rows, spec)
+    if measured:
+        header += "\n" + measured + "\n"
     header += "\nThe write-ups for this group follow."
     side_text, citations = _cut_side_text(rows, "SESSIONS")
     return header, side_text, citations
@@ -1303,6 +1521,7 @@ async def call_gemini_cut(
     rows: list,
     label: str,
     given: str = "",
+    spec: Optional[dict] = None,
 ) -> tuple:
     """(analysis, citations) — one text-only pass over the group's write-ups.
 
@@ -1313,7 +1532,7 @@ async def call_gemini_cut(
     from google.genai import types
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    header, side_text, citations = cut_context(rows, label, given)
+    header, side_text, citations = cut_context(rows, label, given, spec)
     parts = [
         types.Part.from_text(text=header),
         types.Part.from_text(text=side_text),
@@ -1364,7 +1583,7 @@ async def build_cut_analysis(rows: list, slice_spec: Optional[dict]) -> dict:
     given = _given_facts(spec, len(selected))
     _, model_gate = _gates()
     async with model_gate:
-        analysis, citations = await call_gemini_cut(selected, label, given)
+        analysis, citations = await call_gemini_cut(selected, label, given, spec)
     # Stored, not derived: this is the numbering the model actually saw, so a
     # later change to row ordering cannot repoint the links in this cut.
     return {**base, "analysis": analysis, "citations": citations}
@@ -1487,7 +1706,9 @@ def clean_chat_messages(messages) -> list:
     return clean[-CHAT_MAX_TURNS:]
 
 
-async def stream_gemini_chat(rows: list, label: str, given: str, messages: list):
+async def stream_gemini_chat(
+    rows: list, label: str, given: str, messages: list, spec: Optional[dict] = None
+):
     """Yield answer text chunks for the latest question in `messages`.
 
     The evidence goes in as the first user turn with a canned acknowledgement
@@ -1499,7 +1720,7 @@ async def stream_gemini_chat(rows: list, label: str, given: str, messages: list)
     from google.genai import types
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    header, side_text, _ = cut_context(rows, label, given)
+    header, side_text, _ = cut_context(rows, label, given, spec)
     contents = [
         types.Content(
             role="user",
@@ -1548,18 +1769,20 @@ async def stream_gemini_chat(rows: list, label: str, given: str, messages: list)
 
 
 async def chat_context(rows: list, slice_spec: Optional[dict]) -> tuple:
-    """(selected_rows, label, given, citations) for a group — the chat's scope.
+    """(selected_rows, label, given, citations, spec) for a group.
 
     Mirrors build_cut_analysis's setup so a chat answers about exactly the group
-    the cut above it describes.
+    the cut above it describes. `spec` comes back so the caller can hand it to
+    stream_gemini_chat: without it the chat would rebuild its context without
+    the measured splits and answer from a thinner view than the cut on screen.
     """
     if not ANALYSIS_ENABLED:
         raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
     selected, spec = select_rows_by_cut(rows, slice_spec)
     label = slice_label(spec) if spec else "all sessions"
     given = _given_facts(spec, len(selected))
-    _, _, citations = cut_context(selected, label, given)
-    return selected, label, given, citations
+    _, _, citations = cut_context(selected, label, given, spec)
+    return selected, label, given, citations, spec
 
 
 def _parse_index_json(raw) -> Optional[dict]:

@@ -68,7 +68,7 @@ class TestChatContext(unittest.TestCase):
             row("b", outcome="rest", device="mobile"),
             row("c", outcome="purchased", device="desktop"),
         ]
-        selected, label, given, citations = asyncio.run(
+        selected, label, given, citations, _ = asyncio.run(
             analyze.chat_context(rows, {"outcome": ["purchased"]})
         )
         self.assertEqual([r["session_id"] for r in selected], ["a", "c"])
@@ -77,7 +77,7 @@ class TestChatContext(unittest.TestCase):
 
     def test_the_premises_state_the_filtered_group_size(self):
         rows = [row(str(i), device="mobile") for i in range(5)] + [row("x", device="desktop")]
-        selected, _, given, _ = asyncio.run(
+        selected, _, given, _, _ = asyncio.run(
             analyze.chat_context(rows, {"device": ["mobile"]})
         )
         self.assertEqual(len(selected), 5)
@@ -87,13 +87,13 @@ class TestChatContext(unittest.TestCase):
 
     def test_an_empty_filter_selects_everyone(self):
         rows = [row("a"), row("b")]
-        selected, label, _, _ = asyncio.run(analyze.chat_context(rows, None))
+        selected, label, _, _, _ = asyncio.run(analyze.chat_context(rows, None))
         self.assertEqual(len(selected), 2)
         self.assertEqual(label, "all sessions")
 
     def test_a_filter_matching_nobody_yields_an_empty_group(self):
         # The endpoint turns this into a 400 rather than spending a call.
-        selected, _, _, citations = asyncio.run(
+        selected, _, _, citations, _ = asyncio.run(
             analyze.chat_context([row("a", device="mobile")], {"device": ["desktop"]})
         )
         self.assertEqual(selected, [])
@@ -209,7 +209,7 @@ class TestChatEndpoint(unittest.TestCase):
         analyze.stream_gemini_chat = self._stream
 
     def ask(self, messages, chunks=("hello ", "world")):
-        async def fake(rows, label, given, msgs):
+        async def fake(rows, label, given, msgs, spec=None):
             for c in chunks:
                 yield c
 
@@ -238,7 +238,7 @@ class TestChatEndpoint(unittest.TestCase):
         self.assertIn('data: {"text":"one\\ntwo"}', res.text)
 
     def test_a_mid_stream_failure_arrives_as_an_error_event(self):
-        async def boom(rows, label, given, msgs):
+        async def boom(rows, label, given, msgs, spec=None):
             raise RuntimeError("gemini exploded")
             yield  # pragma: no cover
 
@@ -290,7 +290,7 @@ class TestChatEndpoint(unittest.TestCase):
     def test_a_filter_matching_nobody_does_not_spend_a_call(self):
         called = False
 
-        async def fake(rows, label, given, msgs):
+        async def fake(rows, label, given, msgs, spec=None):
             nonlocal called
             called = True
             yield "x"
@@ -306,7 +306,7 @@ class TestChatEndpoint(unittest.TestCase):
     def test_the_filter_narrows_the_group_the_chat_reads(self):
         seen = {}
 
-        async def fake(rows, label, given, msgs):
+        async def fake(rows, label, given, msgs, spec=None):
             seen["ids"] = [r["session_id"] for r in rows]
             yield "ok"
 

@@ -1895,7 +1895,7 @@ async def post_cohort_chat(
     if not rows:
         raise ApiError(400, "no analyzed sessions in this cohort yet")
 
-    selected, label, given, citations = await analyze.chat_context(rows, slice_spec)
+    selected, label, given, citations, spec = await analyze.chat_context(rows, slice_spec)
     if not selected:
         raise ApiError(400, f"no analyzed sessions match {label} in this cohort")
 
@@ -1917,7 +1917,7 @@ async def post_cohort_chat(
             _, model_gate = analyze._gates()
             async with model_gate:
                 async for chunk in analyze.stream_gemini_chat(
-                    selected, label, given, messages
+                    selected, label, given, messages, spec
                 ):
                     yield _sse("delta", {"text": chunk})
         except asyncio.CancelledError:

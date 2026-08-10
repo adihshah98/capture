@@ -446,7 +446,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
     def test_a_filtered_group_calls_the_model_and_records_membership(self):
         seen = {}
 
-        async def fake(rows, label, given=""):
+        async def fake(rows, label, given="", spec=None):
             seen["rows"] = [r["session_id"] for r in rows]
             seen["label"] = label
             seen["given"] = given
@@ -468,7 +468,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
     def test_an_unfiltered_group_reads_the_whole_cohort(self):
         seen = {}
 
-        async def fake(rows, label, given=""):
+        async def fake(rows, label, given="", spec=None):
             seen["rows"] = [r["session_id"] for r in rows]
             seen["label"] = label
             seen["given"] = given
@@ -605,7 +605,7 @@ class TestGivenFacts(unittest.TestCase):
     def test_build_passes_the_given_facts_to_the_model(self):
         seen = {}
 
-        async def fake(rows, label, given=""):
+        async def fake(rows, label, given="", spec=None):
             seen["given"] = given
             return analyze.empty_cut_analysis(), {}
 
@@ -874,6 +874,141 @@ class TestCutCache(unittest.TestCase):
         analyze.clear_cut(self.pool, "cohort-1", key)
         analyze.write_cut(self.pool, "cohort-1", key, {"n": 4})
         self.assertEqual(analyze.read_cut(self.pool, "cohort-1", key)["n"], 4)
+
+
+def split_rows(converting=8, flat=8, untagged=0):
+    """A group that splits hard on source: meta buys, google does not."""
+    rows = [
+        row(f"m{i}", "purchased" if i < converting - 3 else "rest",
+            device="mobile", page="/p/cream", utm_source="meta")
+        for i in range(converting)
+    ]
+    rows += [
+        row(f"g{i}", "rest", device="desktop", page="/p/cream", utm_source="google")
+        for i in range(flat)
+    ]
+    rows += [row(f"u{i}", "rest", device="mobile", page="/p/other") for i in range(untagged)]
+    return rows
+
+
+class TestCrossTabFloor(unittest.TestCase):
+    """The floor is what keeps a two-session fluke out of a marketing deck."""
+
+    def test_a_real_split_is_reported_with_exact_counts(self):
+        block = analyze.cross_tab_block(split_rows(), {})
+        self.assertIn("traffic source × outcome", block)
+        self.assertIn("meta: 8 sessions", block)
+        self.assertIn("google: 8 sessions", block)
+
+    def test_a_cell_below_the_session_floor_is_suppressed(self):
+        # Two meta sessions cannot be a pattern however lopsided they look.
+        rows = [row(f"g{i}", "rest", device="desktop", utm_source="google") for i in range(10)]
+        rows += [row(f"m{i}", "purchased", device="mobile", utm_source="meta") for i in range(2)]
+        block = analyze.cross_tab_block(rows, {})
+        self.assertNotIn("meta:", block)
+
+    def test_a_cell_below_the_coverage_floor_is_suppressed(self):
+        # 3 sessions clears the count floor but is only 8% of the group.
+        rows = [row(f"g{i}", "rest", device="desktop", utm_source="google") for i in range(35)]
+        rows += [row(f"m{i}", "purchased", device="mobile", utm_source="meta") for i in range(3)]
+        block = analyze.cross_tab_block(rows, {})
+        self.assertNotIn("meta:", block)
+
+    def test_a_big_cell_at_the_baseline_is_suppressed(self):
+        # Half the group, but converting exactly like everyone else.
+        rows = [
+            row(f"m{i}", "purchased" if i % 2 else "rest", device="mobile", utm_source="meta")
+            for i in range(10)
+        ]
+        rows += [
+            row(f"g{i}", "purchased" if i % 2 else "rest", device="desktop", utm_source="google")
+            for i in range(10)
+        ]
+        block = analyze.cross_tab_block(rows, {})
+        self.assertNotIn("traffic source × outcome", block.split("Examined")[0])
+
+    def test_suppressed_cells_are_counted_not_hidden(self):
+        block = analyze.cross_tab_block(split_rows(untagged=4), {})
+        self.assertIn("Examined and not reported:", block)
+
+    def test_coverage_is_stated_when_attribution_is_sparse(self):
+        # The shape of real dev data: a handful of tagged sessions in a big pool.
+        rows = [row(f"n{i}", "rest") for i in range(36)]
+        rows += [row(f"m{i}", "purchased", utm_source="meta") for i in range(4)]
+        block = analyze.cross_tab_block(rows, {})
+        self.assertIn("4 of 40 sessions carry a utm_source", block)
+        self.assertNotIn("meta:", block)
+
+    def test_a_group_smaller_than_the_floor_gets_no_block(self):
+        self.assertEqual(analyze.cross_tab_block([row("a"), row("b")], {}), "")
+
+    def test_an_empty_group_gets_no_block(self):
+        self.assertEqual(analyze.cross_tab_block([], {}), "")
+
+
+class TestCrossTabDimensions(unittest.TestCase):
+    def test_a_filtered_dimension_is_never_an_axis(self):
+        # device is constant under this filter, so it cannot separate anything.
+        block = analyze.cross_tab_block(split_rows(), {"device": ["mobile"]})
+        self.assertNotIn("device", block)
+
+    def test_filtering_on_source_drops_every_source_pairing(self):
+        block = analyze.cross_tab_block(split_rows(), {"utm_source": "meta"})
+        self.assertNotIn("traffic source", block)
+
+    def test_an_fbclid_only_session_counts_as_meta(self):
+        rows = [row(f"f{i}", "purchased", fbclid=True) for i in range(6)]
+        rows += [row(f"g{i}", "rest", utm_source="google") for i in range(6)]
+        block = analyze.cross_tab_block(rows, {})
+        self.assertIn("meta (fbclid)", block)
+
+    def test_unknown_is_not_treated_as_a_segment(self):
+        # Untagged sessions must not clump into a "none" cell that reads as a
+        # channel: direct, organic and untagged are not the same thing.
+        rows = [row(f"u{i}", "purchased" if i < 6 else "rest") for i in range(12)]
+        block = analyze.cross_tab_block(rows, {})
+        self.assertNotIn("none", block.lower().split("examined")[0])
+
+    def test_the_block_states_that_its_numbers_win(self):
+        block = analyze.cross_tab_block(split_rows(), {})
+        self.assertIn("EXACT", block)
+
+
+class TestCrossTabReachesBothReaders(unittest.TestCase):
+    """The cut and the chat must see identical measured splits."""
+
+    def test_the_block_is_in_the_shared_context_header(self):
+        rows = split_rows()
+        header, _, _ = analyze.cut_context(rows, "all sessions", "", {})
+        self.assertIn("Measured splits", header)
+        self.assertIn("meta: 8 sessions", header)
+
+    def test_cut_and_chat_headers_match(self):
+        # Both readers build the header the same way from the same spec, so a
+        # chat can never answer over a thinner view than the cut on screen.
+        rows = split_rows()
+        slice_spec = {"page": "/p/cream"}
+        seen = {}
+
+        async def fake_cut(rows_, label_, given_="", spec_=None):
+            seen["cut"] = analyze.cut_context(rows_, label_, given_, spec_)[0]
+            return analyze.empty_cut_analysis(), {}
+
+        saved_call, saved_enabled = analyze.call_gemini_cut, analyze.ANALYSIS_ENABLED
+        analyze.call_gemini_cut, analyze.ANALYSIS_ENABLED = fake_cut, True
+        try:
+            asyncio.run(analyze.build_cut_analysis(rows, slice_spec))
+            selected, label, given, _, spec = asyncio.run(
+                analyze.chat_context(rows, slice_spec)
+            )
+        finally:
+            analyze.call_gemini_cut = saved_call
+            analyze.ANALYSIS_ENABLED = saved_enabled
+
+        seen["chat"] = analyze.cut_context(selected, label, given, spec)[0]
+        self.assertEqual(seen["cut"], seen["chat"])
+        self.assertIn("Measured splits", seen["chat"])
+        self.assertIn("meta: 8 sessions", seen["chat"])
 
 
 if __name__ == "__main__":
