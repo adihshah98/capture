@@ -914,6 +914,49 @@ mobile and desktop sessions did the same things" is a real, useful result.
 When the group really is uniform, say so plainly and move on — but only after
 looking. "They all did X (9 of 9)" is a strong finding when it is true.
 
+### Use the measured splits when they are given
+
+Some groups arrive with a "Measured splits" block above the write-ups. Those
+counts were computed directly from the session labels, not read out of the
+write-ups. They are exact.
+
+- Quote them as given. Do not recompute, re-round or restate them differently,
+  and never write a share that contradicts one.
+- A split listed there is real. Your job is to explain it: go to the write-ups
+  for those sessions and say what they DID that the others did not. A row
+  repeated back without that explanation is not a finding.
+- A split NOT listed there did not clear the reporting floor. Do not assert it
+  from your own reading of the write-ups — if the block says a dimension was
+  examined and nothing cleared, treat that as settled and move on.
+- The block tells you WHAT differs. Only the write-ups tell you WHY. An item
+  built on a measured split must carry page evidence — a quoted label, an
+  [MM:SS], a duration — exactly like any other item.
+- When no block appears, or a dimension is missing from it, fall back to
+  reading the labels yourself and hedge accordingly.
+
+### Cross the dimensions, not just each one alone
+
+The strongest findings usually sit at an intersection: not "mobile visitors"
+and not "Meta visitors" but "Meta visitors on mobile". One channel can work on
+one device and fail on another, and a landing page can suit one campaign's
+traffic and mismatch another's. Those are the splits a team can act on
+immediately, because each names a specific place to spend or stop spending.
+
+Test combinations wherever the group is big enough to support them:
+- traffic source × device — is the creative wrong, or just the mobile page?
+- campaign × landing page — did the page deliver what the ad promised?
+- source or campaign × outcome — which spend actually converts?
+
+  GOOD  "Meta traffic on mobile bounced from the price block within 30s
+         (5 of 20), while Meta on desktop sat 40s+ on the guarantee and
+         converted (4 of 6) — the mobile page buries the proof the ad
+         promised."
+  BAD   "Meta and mobile sessions both underperformed."
+
+The same rules apply: a combination needs enough sessions behind it to be
+worth naming, and the intersection of two labels is never itself a finding —
+what those sessions did differently is.
+
 ## Citing sessions
 
 Each write-up below is headed "--- SESSIONS session N ---". When an item points
@@ -1614,7 +1657,8 @@ answer is that it was not recorded in the write-up — not that it did not happe
 You also cannot answer questions about:
 - Sessions outside this group. The group is the whole world here.
 - Precise metrics — session duration, click counts, scroll pixels, revenue —
-  unless a write-up states the number. You are reading prose, not a database.
+  unless a write-up states the number, or the "Measured splits" block below
+  gives it. Outside those, you are reading prose, not a database.
 - Trends over time, or comparisons to other periods, cohorts or benchmarks.
 - What would happen if something changed. You can say what these visitors did;
   you cannot run the experiment.
@@ -1631,6 +1675,14 @@ percentage and say the evidence is directional.
 
 The group size is stated under "Already known" below. It is the ONLY total you
 may use. Never cite a denominator that is not the group size.
+
+Some groups also arrive with a "Measured splits" block: counts computed
+directly from the session labels rather than read out of the write-ups. Those
+numbers are exact and they win. Quote them as given, never contradict one with
+a count of your own, and treat a split the block does not list as unsupported
+rather than arguing it from the write-ups. The block says WHAT differs; the
+write-ups are still the only place that says WHY, so pair any number you quote
+from it with what those sessions actually did.
 
 ## The filter is not a finding
 

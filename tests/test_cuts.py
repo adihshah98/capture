@@ -974,6 +974,31 @@ class TestCrossTabDimensions(unittest.TestCase):
         self.assertIn("EXACT", block)
 
 
+class TestPromptsTeachTheMeasuredBlock(unittest.TestCase):
+    """Computed numbers are only useful if the prompts defer to them."""
+
+    def test_the_cut_prompt_makes_the_block_authoritative(self):
+        self.assertIn("Measured splits", analyze.CUT_PROMPT)
+        self.assertIn("exact", analyze.CUT_PROMPT.lower())
+
+    def test_the_cut_prompt_asks_for_combinations(self):
+        self.assertIn("×", analyze.CUT_PROMPT)
+        self.assertIn("Cross the dimensions", analyze.CUT_PROMPT)
+
+    def test_the_cut_prompt_still_demands_page_evidence_for_a_split(self):
+        # A measured row quoted without write-up evidence is the failure mode
+        # the block could otherwise introduce.
+        self.assertIn("WHAT differs", analyze.CUT_PROMPT)
+
+    def test_the_chat_prompt_defers_to_the_block(self):
+        self.assertIn("Measured splits", analyze.CHAT_PROMPT)
+
+    def test_the_chat_prompt_no_longer_forbids_every_precise_metric(self):
+        # It must still refuse numbers that are in neither the write-ups nor
+        # the block, but the block is now a legitimate source.
+        self.assertIn("Measured splits", analyze.CHAT_PROMPT.split("Counting")[0])
+
+
 class TestCrossTabReachesBothReaders(unittest.TestCase):
     """The cut and the chat must see identical measured splits."""
 
