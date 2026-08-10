@@ -40,7 +40,7 @@ export function syncTimeline(currentMs) {
 export function renderTimeline(events, navigations, session, showOrder = true) {
   const markers = events.filter((e) => e.type === 5 && e.data && e.data.tag);
   const end = events.length ? events[events.length - 1].timestamp : 0;
-  const entries = gapEntries(markers, end);
+  const entries = gapEntries(events, end);
 
   for (const event of markers) {
     const tag = event.data.tag;
