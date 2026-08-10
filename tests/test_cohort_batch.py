@@ -69,9 +69,12 @@ class TestCohortBatch(unittest.TestCase):
             (out_dir / "digest.json").write_text(json.dumps(digest))
             return digest
 
-        async def fake_submit(prepared, *, display_name, work_dir=None):
+        async def fake_submit(prepared, *, display_name, work_dir=None, pool=None):
             self.assertEqual(len(prepared), 2)
             self.assertTrue(display_name.startswith("capture-"))
+            # Without the pool the batch path cannot resolve a session dir, so
+            # every write-up in the batch would lose its campaign metadata.
+            self.assertIsNotNone(pool)
             return "batches/test-job"
 
         async def fake_wait(name, *, poll_s=None):

@@ -66,7 +66,7 @@ class TestAnalyzeGates(unittest.TestCase):
             await extract_probe.enter()
             return {"frames": [], "warnings": []}
 
-        async def fake_gemini(digest, frames):
+        async def fake_gemini(digest, frames, meta=None):
             await model_probe.enter()
             return "## What stands out\n- something"
 

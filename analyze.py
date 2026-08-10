@@ -110,9 +110,15 @@ def _gates() -> tuple:
 SYSTEM_PROMPT = """You are a senior consumer behavior and marketing analyst analyzing one recorded website session for a consumer brand.
 
 You receive:
-•⁠  ⁠session metadata such as source/campaign, new vs. returning, device, geography, purchase outcome, order value, and products purchased
+•⁠  ⁠session metadata: the entry URL and landing page, any utm_* / fbclid attribution on it, the purchase outcome, and order value and products when the session bought. Fields that are absent are unknown — a session with no attribution may be direct, organic, or simply untagged, so never assert a traffic source that is not given
 •⁠  ⁠a measured session digest
 •⁠  ⁠chronological replay frames labelled [MM:SS]
+
+Tie the behavior back to how they arrived. A visitor who landed from a
+campaign arrived with an expectation the ad set, and the landing page either
+met it or did not — that gap is often the whole story of the session. Where
+the metadata gives you a campaign or landing page, say what the behavior
+suggests about the match between the two.
 
 Your job is not just to describe what happened. Reconstruct the visitor’s likely decision-making process and infer what their behavior reveals about them as a consumer.
 
@@ -146,7 +152,7 @@ Identify the 2 to 4 strongest inferred purchase drivers, questions, or objection
 Explain the most likely reason they purchased or did not purchase. If several explanations are plausible, rank them. Distinguish actual friction from simple low intent.
 
 ## Marketing implications
-Give 2 to 4 specific implications for messaging, PDPs, offers, merchandising, personalization, acquisition, retargeting, or lifecycle marketing. Avoid generic CRO advice. Focus on insights that would matter if the same pattern appears across many sessions.
+Give 2 to 4 specific implications for messaging, PDPs, offers, merchandising, personalization, acquisition, retargeting, or lifecycle marketing. Avoid generic CRO advice. Focus on insights that would matter if the same pattern appears across many sessions. When the session carries a campaign or landing page, make at least one implication about that pairing — whether the page delivered what the campaign promised, and what to change on whichever side is failing.
 
 ## Friction
 Briefly identify concrete UX issues such as failed clicks, rage clicks, confusion, backtracking, or technical problems. Do not mistake normal consideration for friction.
@@ -2180,6 +2186,87 @@ def _clock(ms) -> str:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+# Kept in step with server.parse_attribution, which does the same job for the
+# index. analyze.py cannot import server.py (server imports analyze), so the
+# two are deliberate twins — change both together.
+ATTRIBUTION_PARAMS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term")
+
+
+def _session_attribution(url: Optional[str]) -> dict:
+    """utm_* / fbclid off an entry URL."""
+    if not url:
+        return {}
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return {}
+    params = {}
+    for key, values in urllib.parse.parse_qs(
+        parsed.query, keep_blank_values=False
+    ).items():
+        if values and values[0]:
+            params[key] = values[0]
+    # Some ad platforms hand back "#utm_source=..." rather than a query string.
+    fragment = parsed.fragment or ""
+    if fragment and re.match(r"^[^/]+=", fragment):
+        for key, values in urllib.parse.parse_qs(
+            fragment, keep_blank_values=False
+        ).items():
+            if key not in params and values and values[0]:
+                params[key] = values[0]
+    out = {}
+    for key in ATTRIBUTION_PARAMS:
+        if params.get(key):
+            out[key] = str(params[key])[:256]
+    if params.get("fbclid"):
+        out["fbclid"] = True
+    return out
+
+
+def session_metadata(session_dir: Path) -> dict:
+    """How this visitor arrived and how the session ended.
+
+    The digest describes what happened on screen and says nothing about where
+    the visitor came from, so a write-up built from it alone cannot tie
+    behaviour back to the campaign that bought the click. `visitor.json` keeps
+    the entry URL with its query string intact — the only place the UTMs
+    survive, since page_path() drops them and the digest's `urls` are
+    post-navigation.
+
+    Only fields actually present are returned: a key missing here means
+    unknown, and the prompt says so, rather than the model reading an empty
+    string as evidence of direct traffic.
+    """
+    meta: dict = {}
+
+    try:
+        visitor = json.loads((session_dir / "visitor.json").read_text())
+    except Exception:
+        visitor = None
+    if isinstance(visitor, dict):
+        entry = visitor.get("url")
+        if entry:
+            meta["entry_url"] = str(entry)[:512]
+            landing = page_path(entry)
+            if landing:
+                meta["landing_page"] = landing
+            attribution = _session_attribution(meta["entry_url"])
+            if attribution:
+                meta["attribution"] = attribution
+
+    try:
+        order = json.loads((session_dir / "order.json").read_text())
+    except Exception:
+        order = None
+    order = order if isinstance(order, dict) else None
+    meta["outcome"] = OUTCOME_LABELS[outcome_class(order)]
+    if order:
+        for key in ("order_value", "currency", "products"):
+            if order.get(key) not in (None, "", [], {}):
+                meta[key] = order[key]
+    return meta
+
+
 def prompt_digest(digest: dict) -> dict:
     """Trim the digest to what the model needs, in seconds rather than ms."""
     session = digest.get("session") or {}
@@ -2223,11 +2310,21 @@ def _usable_frames(frames: list) -> list:
     return [f for f in frames if Path(f.get("file") or "").is_file()]
 
 
-def _session_model_parts(digest: dict, frames: list):
+def _session_model_parts(digest: dict, frames: list, meta: Optional[dict] = None):
     from google.genai import types
 
     usable = _usable_frames(frames)
-    parts = [
+    parts = []
+    if meta:
+        parts.append(
+            types.Part.from_text(
+                text="Session metadata — how this visitor arrived and how the "
+                "session ended. Any field not listed here is UNKNOWN: say so "
+                "rather than guessing, and never treat a missing campaign as "
+                "proof the visit was direct.\n\n" + json.dumps(meta, indent=2)
+            )
+        )
+    parts += [
         types.Part.from_text(
             text="Measured digest for this session:\n\n"
             + json.dumps(prompt_digest(digest), indent=2)
@@ -2265,12 +2362,16 @@ def _session_model_config():
     )
 
 
-def build_inlined_session_request(session_id: str, digest: dict, frames: list):
+def build_inlined_session_request(
+    session_id: str, digest: dict, frames: list, meta: Optional[dict] = None
+):
     """One Batch API request for a session write-up, keyed by session_id."""
     from google.genai import types
 
     return types.InlinedRequest(
-        contents=[types.Content(role="user", parts=_session_model_parts(digest, frames))],
+        contents=[
+            types.Content(role="user", parts=_session_model_parts(digest, frames, meta))
+        ],
         metadata={"session_id": session_id},
         config=_session_model_config(),
     )
@@ -2298,14 +2399,16 @@ def write_analysis_result(
     return result
 
 
-async def call_gemini(digest: dict, frames: list) -> str:
+async def call_gemini(digest: dict, frames: list, meta: Optional[dict] = None) -> str:
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=GEMINI_API_KEY)
     response = await client.aio.models.generate_content(
         model=GEMINI_MODEL,
-        contents=[types.Content(role="user", parts=_session_model_parts(digest, frames))],
+        contents=[
+            types.Content(role="user", parts=_session_model_parts(digest, frames, meta))
+        ],
         config=_session_model_config(),
     )
     text = (response.text or "").strip()
@@ -2382,12 +2485,16 @@ async def submit_prepared_gemini_batch(
     *,
     display_name: str,
     work_dir: Optional[Path] = None,
+    pool: Optional[Path] = None,
 ) -> str:
     """Create a Batch job from (entry, digest) pairs, one session at a time.
 
     Streams JSONL to disk so peak RAM is roughly one session's frames, not the
     whole cohort. Always uses the Files API — at cohort scale the inline path
     is both oversized and an OOM hazard while estimating size.
+
+    `pool` is what lets each request carry its session's campaign metadata; a
+    batch submitted without it still works, minus that context.
     """
     from google import genai
     from google.genai import types
@@ -2402,8 +2509,9 @@ async def submit_prepared_gemini_batch(
         with tmp.open("w") as out:
             for entry, digest in prepared:
                 sid = entry["session_id"]
+                meta = session_metadata(pool / sid) if pool is not None else None
                 req = build_inlined_session_request(
-                    sid, digest, digest.get("frames") or []
+                    sid, digest, digest.get("frames") or [], meta
                 )
                 payload = req.model_dump(mode="json", exclude_none=True)
                 del req
@@ -2626,9 +2734,10 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
             return cached
 
     digest = await extract_session_digest(session_dir, chunk_names, force=True)
+    meta = session_metadata(session_dir)
     _, model_gate = _gates()
     async with model_gate:
-        text = await call_gemini(digest, digest.get("frames") or [])
+        text = await call_gemini(digest, digest.get("frames") or [], meta)
     return write_analysis_result(
         session_dir,
         text,
@@ -2756,6 +2865,7 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
                     prepared,
                     display_name=f"capture-{cohort['id']}",
                     work_dir=cohorts_dir(pool),
+                    pool=pool,
                 )
                 cohort["batch"] = {
                     "name": job_name,
@@ -2852,7 +2962,9 @@ async def _cohort_sync_model(pool: Path, cohort: dict, prepared: list) -> None:
         try:
             _, model_gate = _gates()
             async with model_gate:
-                text = await call_gemini(digest, digest.get("frames") or [])
+                text = await call_gemini(
+                digest, digest.get("frames") or [], session_metadata(session_dir)
+            )
             write_analysis_result(
                 session_dir,
                 text,
