@@ -75,11 +75,40 @@ class TestNormalizeSlice(unittest.TestCase):
             analyze.normalize_slice({"outcome": "all"})["outcome"], ["checkout", "rest"]
         )
 
-    def test_selecting_every_value_is_no_constraint(self):
+    def test_selecting_every_outcome_is_no_constraint(self):
+        # Every session has an outcome, so all three select the same rows as
+        # no filter at all.
         self.assertEqual(
             analyze.normalize_slice({"outcome": ["purchased", "checkout", "rest"]}), {}
         )
-        self.assertEqual(analyze.normalize_slice({"device": ["mobile", "desktop"]}), {})
+
+    def test_selecting_both_devices_still_means_a_known_device(self):
+        # device_class() returns None for an unindexed viewport, so "mobile or
+        # desktop" excludes those unknowns while no filter admits them. Dropping
+        # the constraint here would widen the selection instead of narrowing it.
+        self.assertEqual(
+            analyze.normalize_slice({"device": ["mobile", "desktop"]}),
+            {"device": ["desktop", "mobile"]},
+        )
+
+    def test_adding_a_device_never_selects_fewer_rows(self):
+        rows = [
+            {"session_id": "m", "device": "mobile"},
+            {"session_id": "d", "device": "desktop"},
+            {"session_id": "unknown", "device": None},
+        ]
+
+        def matched(spec):
+            clean = analyze.normalize_slice(spec)
+            return {r["session_id"] for r in rows if analyze.row_matches_slice(r, clean)}
+
+        one = matched({"device": ["mobile"]})
+        both = matched({"device": ["mobile", "desktop"]})
+        self.assertEqual(one, {"m"})
+        self.assertEqual(both, {"m", "d"})
+        # The union of the parts, and nothing more — an unknown device is not
+        # swept in by ticking every box.
+        self.assertEqual(both, one | matched({"device": ["desktop"]}))
 
     def test_unknown_values_are_dropped(self):
         self.assertEqual(analyze.normalize_slice({"outcome": ["nope"]}), {})

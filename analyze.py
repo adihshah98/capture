@@ -630,12 +630,24 @@ def normalize_slice(spec: Optional[dict]) -> dict:
     Constraints are ANDed across keys and ORed within a key, so
     {"outcome": ["purchased", "checkout"], "device": ["mobile"]} reads as
     "reached checkout on mobile, bought or not".
+
+    Selecting every value of a dimension drops the constraint only where the
+    dimension is total — see `_multi`.
     """
     if not isinstance(spec, dict):
         return {}
     out = {}
 
-    def _multi(key, allowed):
+    def _multi(key, allowed, *, total: bool):
+        """Clean one multi-valued key.
+
+        `total` says whether every session has a value here. Selecting every
+        value is the same as no constraint only when it is: outcome_class()
+        always returns one of its three, but device_class() returns None for an
+        unindexed viewport, and row_matches_slice refuses those unknowns
+        against any device constraint. Collapsing "mobile or desktop" to no
+        filter would therefore widen the selection to include them.
+        """
         raw = spec.get(key)
         if raw is None or raw == "":
             return
@@ -651,12 +663,11 @@ def normalize_slice(spec: Optional[dict]) -> dict:
                 continue
             if text in allowed and text not in clean:
                 clean.append(text)
-        if clean and len(clean) < len(allowed):
-            # Selecting every value is the same as no constraint at all.
+        if clean and (not total or len(clean) < len(allowed)):
             out[key] = sorted(clean)
 
-    _multi("outcome", OUTCOME_VALUES)
-    _multi("device", DEVICE_VALUES)
+    _multi("outcome", OUTCOME_VALUES, total=True)
+    _multi("device", DEVICE_VALUES, total=False)
 
     page = page_path(spec.get("page")) if spec.get("page") not in (None, "") else None
     if page:
