@@ -6,7 +6,7 @@ the next session does not have to re-derive the analysis.
 
 ## Where things stand
 
-Branch `cleanups`, four commits past `fbbc156`:
+Branch `cleanups`, five commits past `fbbc156`:
 
 | Commit | Fix |
 |---|---|
@@ -14,8 +14,9 @@ Branch `cleanups`, four commits past `fbbc156`:
 | `6948877` | `normalize_slice` no longer collapses "both devices" into no filter |
 | `8e76eee` | Batch is resumed rather than re-billed; `wait_gemini_batch` is bounded |
 | `f74531a` | `page_path` returns `None` for unreadable entry URLs instead of `/` |
+| `14ce676` | **Tier 2.1**: cohort state into SQLite (below) |
 
-304 tests pass (`npm test` runs build + JS + Python; `.venv/bin/python -m
+327 tests pass (`npm test` runs build + JS + Python; `.venv/bin/python -m
 unittest discover -s tests` for Python alone).
 
 **Not ours:** atomic writes (`os.replace` on every `write_text`) are being done
@@ -25,11 +26,13 @@ a data-layer move unavoidably rewrites, and expect a merge conflict there.
 
 ## What the module is
 
-3,500 lines doing four jobs:
+3,750 lines doing four jobs. Line numbers below predate `14ce676`, which added
+~75 lines near the top of the file — anything past the storage block now sits
+roughly that much lower.
 
 | Concern | Roughly | What it is |
 |---|---|---|
-| Storage | 179–361, 2430–2452 | JSON files as a database |
+| Storage | 179–361, 2430–2452 | ~~JSON files as a database~~ → `analyze_store.py` |
 | Slice algebra | 503–735, 1877–1949 | the `{outcome, device, page, utm_*}` filter language |
 | Prompt engineering | 114–170, 738–1083, 1117–1425, 1672–1763 | ~1,100 lines of prompt text + measured splits |
 | Orchestration | 2455–3324 | subprocess extraction, Gemini interactive + Batch, cohort job, CLI |
@@ -73,37 +76,55 @@ Load-bearing decisions that look incidental. Do not lose these in a rewrite.
 
 ## Tier 2
 
-### 1. Cohort state into SQLite
+### 1. Cohort state into SQLite — **done** (`14ce676`)
 
-The problem behind most remaining bugs: cohort state is a mutable JSON document
-rewritten in full by concurrent writers with no locking, atomicity, or
-transactions.
+Cohorts, membership and the cut cache are three tables in `data/index.db`, in
+[`analyze_store.py`](../analyze_store.py). Storage functions in `analyze.py` keep
+their `pool: Path` signatures and dict shapes, so `server.py` was not touched.
 
-`write_cohort` is called **inside loops** — once per session in
-`apply_cohort_batch` (3263) and per extraction start in `extract_one` (3143).
-For 100 sessions that is hundreds of full-document rewrites. `_read_cohort_file`
-swallows a parse error and returns `None`, so a truncated write makes the cohort
-**vanish from the UI** along with its in-flight batch job name.
+What landed:
 
-`write_cut` (337–345) is a textbook lost update: `read_cuts()` → mutate →
-`write_text()`, and `_cut_tasks` is keyed per-cut, so two cuts of one cohort
-finishing together drop one.
+- A cohort is one `cohorts` row plus one `cohort_sessions` row per member, so a
+  per-session mark is an UPDATE of one row instead of a full-document rewrite
+  (**24x** faster over 100 sessions). Each cut is its own `cohort_cuts` row, so
+  the `write_cut` lost update is gone.
+- Writes run in `BEGIN IMMEDIATE`, **serialized per connection by an RLock**. A
+  `sqlite3.Connection` has one transaction state, so `check_same_thread=False`
+  lets threads share it but does not make it concurrent — concurrent `BEGIN`s
+  raise "cannot start a transaction within a transaction" and cursors interleave
+  into `InterfaceError`. First cut of this dropped 21 of 40 concurrent writes;
+  `server.py` already guards its own connection with `_index_lock` for the same
+  reason. Reads take the lock too, so a read straddling a membership rewrite
+  gets a consistent snapshot.
+- `cohorts_needing_batch_resume` is an index lookup over all pools at once.
+- Migration imports `cohorts/*.json` + `*.cuts.json` on first touch, then
+  deletes them (including the directory, so the latch can tell "done" from
+  "never ran"). An unreadable file is **kept**, not consumed. A cohort already
+  in the table wins, so a stale file cannot roll back newer state. Verified
+  against the real `data/`: 6 cohorts, 85 member rows, 3 cuts, order and
+  per-session extras (`qa_status`) intact; persisted `progress` dropped on the
+  way in.
 
-SQLite is already in-process (`data/index.db`, WAL on). Cohort membership,
-per-session status, batch job records and the cut cache are small, relational and
-read-modify-write heavy.
+Cohort rows carry columns for what is queried or updated alone (`id`, `label`,
+`status`, `created_at`, `updated_at`, `batch`); the sampling vocabulary
+(`purchased_n`, `slice`, `selection`, …) rides in a `fields` JSON column so it
+can change without a migration. Per-session extras ride in the same shape.
 
-- Move those four into tables; leave write-up markdown and JPEG frames on disk,
-  referenced by path.
-- `enrich_cohort_status` becomes a query. Today it is O(sessions) `stat` + `read`
-  **on every poll** — see `server.py:1352` `get_cohort`.
-- `cohorts_needing_batch_resume` becomes an index lookup, not a directory scan.
-- Needs a migration reading existing `cohorts/*.json` + `*.cuts.json`. Keep
-  `migrate_legacy_cohort`'s precedent: migrate once, then delete.
+**Not moved:** `write_job` / `read_job` (`analysis.status.json`). They are
+per-session-directory and used by the single-session analysis path in
+`server.py`, which is where the atomic-write branch is working. Folding them in
+is what would make `enrich_cohort_status` a pure query with no `stat` at all —
+see §2, which now depends on it.
 
-If files must stay: temp file + `os.replace`, `fcntl.flock` around
-read-modify-write, and a monotonic `version` for optimistic concurrency. Note the
-atomic-write branch above.
+**Toward an external store.** The seam is reusable: nothing outside
+`analyze_store.py` knows SQLite exists, and the composite keys (`(pool, id)`,
+`(pool, cohort_id, key)`) map onto a partition/sort key or a Postgres table
+as-is. What gets rewritten is `_Tx` (`BEGIN IMMEDIATE` is a local single-writer
+concept; remotely this becomes a conditional write on a `version` column,
+deliberately not added yet), the connection cache (needs a pool with retries),
+and `write_cohort`'s DELETE-then-INSERT membership replacement — cheap locally,
+expensive over a network, so the per-row `update_session_status` path should
+become the only hot-loop write.
 
 ### 2. An explicit state machine
 
@@ -124,8 +145,12 @@ durable record from the response view. A state machine makes that a type
 distinction instead of a field list.
 
 Related, still open: `run_cohort_job` mutates a shared in-memory `cohort` dict
-across N concurrent `extract_one` coroutines while other code re-reads the file,
-so there are two sources of truth that diverge under any concurrent write.
+across N concurrent `extract_one` coroutines while other code re-reads it, so
+there are two sources of truth that diverge under any concurrent write. The
+store makes this *fixable* — `update_session_status` writes one row, so those
+coroutines no longer need to share a dict at all — but the callers still pass
+the dict around and were left alone in `14ce676` to keep that commit to a
+storage swap. Converting them is the natural first half of this section.
 
 ### 3. Package, with prompts as files
 
@@ -140,7 +165,7 @@ analyze/
   prompts/
     session.md  cut.md  chat.md
     __init__.py # loader + version hash
-  store.py      # SQLite repository
+  store.py      # SQLite repository — exists as analyze_store.py, move it here
   extract.py    # subprocess driver for extract.mjs
   models.py     # Gemini: interactive, batch, chat
   pipeline.py   # the cohort state machine
@@ -173,10 +198,12 @@ From the audit, not yet fixed. Numbers are `analyze.py` lines.
    outcome/device/page) or report the shortfall.
 4. **`pool_facets` (1952)** `fetchall()` over the whole pool with no LIMIT, in the
    event-loop thread.
-5. **Silent `except Exception`** in `_read_cohort_file`, `read_analysis`,
-   `read_job`, `load_session_digest`, `_parse_index_json`, `page_path`,
+5. **Silent `except Exception`** in `read_analysis`, `read_job`,
+   `load_session_digest`, `_parse_index_json`, `page_path`,
    `_session_attribution`. Disk error, permissions error and absent file are
-   indistinguishable, with no logging.
+   indistinguishable, with no logging. (`_read_cohort_file` is off the cohort
+   read path since `14ce676` — only the legacy migration still calls it, and
+   that path now logs and keeps the file rather than swallowing.)
 6. **`_dimension_value` (1230)** `str(value).strip().lower() or None if value else None`
    parses correctly but is one edit from wrong.
 7. **`standout_line` (460)** looks for `## What stands out`, which `SYSTEM_PROMPT`
