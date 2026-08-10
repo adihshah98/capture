@@ -1557,10 +1557,22 @@ class TestCutSlices(ServerCase):
 class TestCohortUnavailable(ServerCase):
     env = {"GEMINI_API_KEY": ""}
 
-    def test_post_without_key_is_unavailable(self):
+    def test_sampling_needs_no_key_but_starting_analysis_does(self):
+        """Sampling only reads the index, so it works without a key; starting
+        analysis is what spends one, and that is what must refuse."""
         sid = "d" * 32
         self.assertEqual(self.ingest(sid), 200)
-        status, body = request(f"{self.base}/api/cohorts", method="POST", data=b"")
+        status, body = request(
+            f"{self.base}/api/cohorts?purchased=0&all=1&min_duration_ms=0&url_contains=",
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 201, body)
+
+        cohort_id = json.loads(body)["id"]
+        status, body = request(
+            f"{self.base}/api/cohorts/{cohort_id}/analyze", method="POST", data=b""
+        )
         self.assertEqual(status, 503)
         self.assertIn("not configured", json.loads(body)["error"])
 
