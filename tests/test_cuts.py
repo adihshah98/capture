@@ -974,6 +974,45 @@ class TestCrossTabDimensions(unittest.TestCase):
         self.assertIn("EXACT", block)
 
 
+class TestCrossTabSingleOutcomeGroups(unittest.TestCase):
+    """A purchased-only cut has no purchase rate to grade lift against."""
+
+    def uniform(self):
+        return [
+            row(f"s{i}", "purchased",
+                device="mobile" if i < 6 else "desktop",
+                page="/p", utm_source="meta" if i < 6 else "google")
+            for i in range(12)
+        ]
+
+    def test_a_real_split_survives_when_outcome_is_pinned(self):
+        # Lift is 0 for every cell here by construction; grading on it would
+        # have hidden a clean meta/mobile vs google/desktop split.
+        block = analyze.cross_tab_block(self.uniform(), {"outcome": ["purchased"]})
+        self.assertIn("meta: 6 sessions", block)
+        self.assertIn("google: 6 sessions", block)
+
+    def test_no_purchase_rate_is_quoted_for_a_uniform_group(self):
+        block = analyze.cross_tab_block(self.uniform(), {"outcome": ["purchased"]})
+        self.assertNotIn("purchased ·", block)
+        self.assertNotIn("pts vs baseline", block)
+
+    def test_the_header_explains_why_there_is_no_baseline(self):
+        block = analyze.cross_tab_block(self.uniform(), {"outcome": ["purchased"]})
+        self.assertIn("shares one outcome", block)
+
+    def test_a_mixed_group_still_grades_on_lift(self):
+        block = analyze.cross_tab_block(split_rows(), {})
+        self.assertIn("pts vs baseline", block)
+        self.assertIn("group baseline", block)
+
+    def test_size_gates_still_apply_without_lift(self):
+        rows = [row(f"s{i}", "purchased", utm_source="meta") for i in range(10)]
+        rows += [row("odd", "purchased", utm_source="google")]
+        block = analyze.cross_tab_block(rows, {"outcome": ["purchased"]})
+        self.assertNotIn("google", block.split("Examined")[0])
+
+
 class TestPromptsTeachTheMeasuredBlock(unittest.TestCase):
     """Computed numbers are only useful if the prompts defer to them."""
 

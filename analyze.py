@@ -1247,17 +1247,26 @@ def _purchase_rate(rows: list) -> Optional[float]:
 def cross_tab_cells(rows: list, left: str, right: str) -> dict:
     """Measured split of `rows` by `left`, reported against `right`.
 
-    Returns {"baseline", "kept", "suppressed", "coverage"}. `kept` holds only
-    cells clearing every gate; `suppressed` counts what the gates removed, so
-    the prompt can say a dimension was examined rather than leave the model to
-    read silence as uniformity.
+    Returns {"baseline", "kept", "suppressed", "coverage", "graded"}. `kept`
+    holds only cells clearing every gate; `suppressed` counts what the gates
+    removed, so the prompt can say a dimension was examined rather than leave
+    the model to read silence as uniformity.
+
+    When every session shares one outcome — a "purchased" cut, say — purchase
+    rate is constant and lift is 0 for every cell by construction. Grading on
+    it there would suppress the whole block, including splits that are real
+    and visible. Such a group is graded on size alone and `graded` says so,
+    so the prompt can describe what the numbers mean.
     """
     known, total = _coverage(rows, left)
+    outcomes = {(row.get("outcome") or "rest") for row in rows}
+    graded = "lift" if len(outcomes) > 1 else "composition"
     out = {
         "left": left,
         "right": right,
         "coverage": (known, total),
         "baseline": _purchase_rate(rows),
+        "graded": graded,
         "kept": [],
         "suppressed": 0,
     }
@@ -1276,12 +1285,12 @@ def cross_tab_cells(rows: list, left: str, right: str) -> dict:
         coverage = n / total if total else 0.0
         rate = _purchase_rate(bucket)
         lift = None if rate is None or baseline is None else rate - baseline
-        if (
-            n < CROSS_TAB_MIN_CELL
-            or coverage < CROSS_TAB_MIN_COVERAGE
-            or lift is None
-            or abs(lift) < CROSS_TAB_MIN_LIFT_PTS
-        ):
+        too_small = n < CROSS_TAB_MIN_CELL or coverage < CROSS_TAB_MIN_COVERAGE
+        # Only grade on lift where outcome actually varies; see the docstring.
+        too_flat = graded == "lift" and (
+            lift is None or abs(lift) < CROSS_TAB_MIN_LIFT_PTS
+        )
+        if too_small or too_flat:
             out["suppressed"] += 1
             continue
         breakdown = {}
@@ -1342,21 +1351,33 @@ def cross_tab_block(rows: list, spec: Optional[dict] = None) -> str:
             )
             continue
         baseline = result["baseline"]
-        lines.append(
-            f"\n{title}{coverage_note} — group baseline "
-            f"{_pct(baseline)} purchased ({len(rows)} sessions)"
-        )
+        if result["graded"] == "lift":
+            lines.append(
+                f"\n{title}{coverage_note} — group baseline "
+                f"{_pct(baseline)} purchased ({len(rows)} sessions)"
+            )
+        else:
+            # Outcome is fixed by the filter, so a purchase rate here would
+            # just restate it. These rows say how the group is made up.
+            lines.append(
+                f"\n{title}{coverage_note} — how the group breaks down "
+                f"({len(rows)} sessions, all the same outcome)"
+            )
         for cell in result["kept"]:
-            sign = "+" if cell["lift"] >= 0 else "−"
             parts = ", ".join(
                 f"{k} {v}" for k, v in sorted(cell["breakdown"].items(), key=lambda kv: -kv[1])
             )
-            lines.append(
+            head = (
                 f"  {cell['value']}: {cell['n']} sessions "
-                f"({_pct(cell['share'])} of the group) · "
-                f"{_pct(cell['rate'])} purchased · "
-                f"{sign}{abs(cell['lift']):.0f}pts vs baseline · {parts}"
+                f"({_pct(cell['share'])} of the group)"
             )
+            if result["graded"] == "lift":
+                sign = "+" if cell["lift"] >= 0 else "−"
+                head += (
+                    f" · {_pct(cell['rate'])} purchased · "
+                    f"{sign}{abs(cell['lift']):.0f}pts vs baseline"
+                )
+            lines.append(f"{head} · {parts}")
         if result["suppressed"]:
             lines.append(
                 f"  (below the floor, not shown: {result['suppressed']} more)"
@@ -1365,17 +1386,29 @@ def cross_tab_block(rows: list, spec: Optional[dict] = None) -> str:
     if not lines and not notes:
         return ""
 
+    outcomes = {(row.get("outcome") or "rest") for row in rows}
+    if len(outcomes) > 1:
+        criterion = (
+            f"Only splits meeting all of: at least {CROSS_TAB_MIN_CELL} "
+            f"sessions, at least {_pct(CROSS_TAB_MIN_COVERAGE * 100)} of the "
+            f"group, and at least {CROSS_TAB_MIN_LIFT_PTS:.0f} points away "
+            "from the group's purchase rate."
+        )
+    else:
+        criterion = (
+            "Every session here shares one outcome, so there is no purchase "
+            "rate to compare against. These rows show how the group is made "
+            f"up: only splits of at least {CROSS_TAB_MIN_CELL} sessions and "
+            f"at least {_pct(CROSS_TAB_MIN_COVERAGE * 100)} of the group."
+        )
     header = (
         "## Measured splits — computed, not inferred\n\n"
         "These counts were calculated directly from the group's session "
         "labels. They are EXACT. Quote them as given; never recompute, round "
         "differently, or contradict them. Where your reading of the write-ups "
         "disagrees with a number here, the number is right.\n\n"
-        f"Only splits meeting all of: at least {CROSS_TAB_MIN_CELL} sessions, "
-        f"at least {_pct(CROSS_TAB_MIN_COVERAGE * 100)} of the group, and at "
-        f"least {CROSS_TAB_MIN_LIFT_PTS:.0f} points away from the group's "
-        "purchase rate. A split absent here is one the data does not support "
-        "— do not assert it from the write-ups alone.\n\n"
+        f"{criterion} A split absent here is one the data does not support — "
+        "do not assert it from the write-ups alone.\n\n"
         "A row below tells you WHAT differs, never WHY. The reason lives in "
         "the write-ups: pair each number with what those sessions actually "
         "did on the page, and never restate a row as a finding on its own."
