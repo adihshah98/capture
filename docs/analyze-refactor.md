@@ -15,6 +15,7 @@ Branch `cleanups`, five commits past `fbbc156`:
 | `8e76eee` | Batch is resumed rather than re-billed; `wait_gemini_batch` is bounded |
 | `f74531a` | `page_path` returns `None` for unreadable entry URLs instead of `/` |
 | `14ce676` | **Tier 2.1**: cohort state into SQLite (below) |
+| `084ade9` | Deleting a session drops it from the cohorts that held it |
 
 327 tests pass (`npm test` runs build + JS + Python; `.venv/bin/python -m
 unittest discover -s tests` for Python alone).
@@ -104,6 +105,18 @@ What landed:
   against the real `data/`: 6 cohorts, 85 member rows, 3 cuts, order and
   per-session extras (`qa_status`) intact; persisted `progress` dropped on the
   way in.
+
+**Referential integrity** (`084ade9`). `cohort_sessions` is a join table — one
+row per (cohort, session) edge, so a session in six cohorts has six rows and
+exactly one `analysis.json` on disk that all six point at. Deleting a session
+used to strand those rows, and because `enrich_cohort_status` trusts the stored
+status when it finds nothing on disk, the cohort kept counting the session as
+analyzed. `forget_session` now drops the memberships from all four deletion
+paths (`index_forget` covers three; `rebuild_index`'s stale purge is the
+fourth). Cohorts shrink; cached cuts are left as the record of what the model
+said when it ran. No FK is declared — SQLite ignores them unless every
+connection sets `PRAGMA foreign_keys=ON`, and `server.py`'s (the one deleting)
+does not.
 
 Cohort rows carry columns for what is queried or updated alone (`id`, `label`,
 `status`, `created_at`, `updated_at`, `batch`); the sampling vocabulary
@@ -198,6 +211,14 @@ From the audit, not yet fixed. Numbers are `analyze.py` lines.
    outcome/device/page) or report the shortfall.
 4. **`pool_facets` (1952)** `fetchall()` over the whole pool with no LIMIT, in the
    event-loop thread.
+4b. **`enrich_cohort_status` trusts the stored status when disk says nothing.**
+   The `elif row.get("status") == "done": done += 1` fall-through means a row
+   counts as analyzed with no `analysis.json` behind it. `084ade9` removed the
+   way that mattered most (deleted sessions), but the fall-through is still
+   there and will also fire if a write-up is removed without the session —
+   `clear_analysis` does exactly that on a re-analyze. Worth an explicit
+   "claims done but has no write-up" state in the §2 machine rather than a
+   silent count.
 5. **Silent `except Exception`** in `read_analysis`, `read_job`,
    `load_session_digest`, `_parse_index_json`, `page_path`,
    `_session_attribution`. Disk error, permissions error and absent file are
