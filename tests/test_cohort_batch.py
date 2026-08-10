@@ -147,6 +147,240 @@ class TestCohortBatch(unittest.TestCase):
         self.assertEqual(out["s2"]["error"], "nope")
 
 
+class TestBatchIsNeverPaidForTwice(unittest.TestCase):
+    """Once a batch job exists it is billable, so only submission may fall back."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.pool = self.root / "sessions"
+        self.pool.mkdir(parents=True)
+        self._saved = {
+            "ANALYSIS_ENABLED": analyze.ANALYSIS_ENABLED,
+            "ANALYZE_BATCH": analyze.ANALYZE_BATCH,
+            "run_extractor": analyze.run_extractor,
+            "submit_prepared_gemini_batch": analyze.submit_prepared_gemini_batch,
+            "wait_gemini_batch": analyze.wait_gemini_batch,
+            "_cohort_sync_model": analyze._cohort_sync_model,
+        }
+        analyze.ANALYSIS_ENABLED = True
+        analyze.ANALYZE_BATCH = True
+        analyze._gate_loop = None
+        self.sync_calls = 0
+
+        async def fake_extract(session_dir, out_dir, chunk_names):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            frame = out_dir / "f000.jpg"
+            frame.write_bytes(b"jpeg")
+            digest = {"frames": [{"atMs": 0, "file": str(frame)}], "warnings": []}
+            (out_dir / "digest.json").write_text(json.dumps(digest))
+            return digest
+
+        async def count_sync(pool, cohort, prepared):
+            self.sync_calls += 1
+            for entry, _ in prepared:
+                entry["status"] = "done"
+
+        analyze.run_extractor = fake_extract
+        analyze._cohort_sync_model = count_sync
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        for key, value in self._saved.items():
+            setattr(analyze, key, value)
+        analyze._gate_loop = None
+        self.tmp.cleanup()
+
+    def cohort(self, n=2) -> dict:
+        sessions = []
+        for i in range(n):
+            sid = f"{chr(97 + i) * 3}" + "x" * 29
+            d = self.pool / sid
+            d.mkdir()
+            (d / "1700000000000-abcd1234-abcdef.json").write_text("[]")
+            sessions.append({"session_id": sid, "status": "queued"})
+        cohort = {
+            "id": "cohort-1",
+            "created_at": 1,
+            "status": "idle",
+            "sessions": sessions,
+        }
+        analyze.write_cohort(self.pool, cohort)
+        return cohort
+
+    def submits_as(self, job_name="batches/JOB1"):
+        async def fake_submit(prepared, *, display_name, work_dir=None, pool=None):
+            return job_name
+
+        analyze.submit_prepared_gemini_batch = fake_submit
+
+    def test_a_batch_left_in_flight_is_resumed_not_rerun(self):
+        # The expensive mistake: the job was created and is still running, so
+        # re-sending the sessions interactively pays for the same work twice.
+        self.submits_as()
+
+        async def never_finishes(name, *, poll_s=None, max_wait_s=None):
+            raise analyze.BatchStillRunning("deadline")
+
+        analyze.wait_gemini_batch = never_finishes
+        asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort())))
+
+        saved = analyze.read_cohort(self.pool, "cohort-1")
+        self.assertEqual(self.sync_calls, 0, "must not re-run a live batch")
+        self.assertEqual((saved.get("batch") or {}).get("name"), "batches/JOB1")
+        self.assertEqual(saved["status"], "running")
+        self.assertEqual(
+            [c["id"] for _, c in analyze.cohorts_needing_batch_resume(self.root)],
+            ["cohort-1"],
+        )
+
+    def test_a_failure_reading_results_also_keeps_the_job(self):
+        # Same reasoning for a crash in parse/write: the job is fine, only our
+        # collection of it failed.
+        self.submits_as()
+
+        async def explodes(name, *, poll_s=None, max_wait_s=None):
+            raise RuntimeError("SDK blew up parsing the response")
+
+        analyze.wait_gemini_batch = explodes
+        asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort())))
+
+        saved = analyze.read_cohort(self.pool, "cohort-1")
+        self.assertEqual(self.sync_calls, 0)
+        self.assertEqual((saved.get("batch") or {}).get("name"), "batches/JOB1")
+
+    def test_a_failed_submit_still_falls_back_to_sync(self):
+        # Nothing was created, so nothing has been paid for — the fallback is
+        # the whole point and must survive.
+        async def bad_submit(prepared, *, display_name, work_dir=None, pool=None):
+            raise RuntimeError("batch API unavailable")
+
+        analyze.submit_prepared_gemini_batch = bad_submit
+        asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort())))
+
+        saved = analyze.read_cohort(self.pool, "cohort-1")
+        self.assertEqual(self.sync_calls, 1)
+        self.assertIsNone(saved.get("batch"))
+
+    def test_a_genuinely_failed_batch_still_errors_its_sessions(self):
+        self.submits_as()
+
+        async def failed(name, *, poll_s=None, max_wait_s=None):
+            return SimpleNamespace(
+                state=SimpleNamespace(name="JOB_STATE_FAILED"), error=None, dest=None
+            )
+
+        analyze.wait_gemini_batch = failed
+        asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort(n=1))))
+
+        saved = analyze.read_cohort(self.pool, "cohort-1")
+        self.assertEqual(self.sync_calls, 0)
+        self.assertEqual(saved["sessions"][0]["status"], "error")
+        self.assertIn("JOB_STATE_FAILED", saved["sessions"][0]["error"])
+
+    def test_a_resume_that_cannot_collect_leaves_the_cohort_resumable(self):
+        # resume_cohort_batch runs from an unawaited startup task, so raising
+        # would strand the cohort as "running" with nothing watching it.
+        sid = "aaa" + "x" * 29
+        (self.pool / sid).mkdir()
+        analyze.write_cohort(
+            self.pool,
+            {
+                "id": "cohort-1",
+                "created_at": 1,
+                "status": "running",
+                "batch": {"name": "batches/JOB1", "session_ids": [sid]},
+                "sessions": [{"session_id": sid, "status": "running"}],
+            },
+        )
+
+        async def never_finishes(name, *, poll_s=None, max_wait_s=None):
+            raise analyze.BatchStillRunning("deadline")
+
+        analyze.wait_gemini_batch = never_finishes
+        asyncio.run(
+            analyze.resume_cohort_batch(
+                self.pool, analyze.read_cohort(self.pool, "cohort-1")
+            )
+        )
+
+        saved = analyze.read_cohort(self.pool, "cohort-1")
+        self.assertEqual((saved.get("batch") or {}).get("name"), "batches/JOB1")
+        self.assertEqual(saved["status"], "running")
+        self.assertEqual(
+            [c["id"] for _, c in analyze.cohorts_needing_batch_resume(self.root)],
+            ["cohort-1"],
+        )
+
+
+class TestWaitGeminiBatch(unittest.TestCase):
+    """The poll is bounded and tolerates blips, so neither hangs nor escalates."""
+
+    def setUp(self):
+        import google.genai as genai
+
+        self._client = genai.Client
+        self.addCleanup(lambda: setattr(genai, "Client", self._client))
+        self.genai = genai
+
+    def script(self, steps) -> SimpleNamespace:
+        state = {"rest": list(steps), "last": None, "calls": 0}
+
+        class Batches:
+            async def get(_self, *, name):
+                state["calls"] += 1
+                if state["rest"]:
+                    state["last"] = state["rest"].pop(0)
+                item = state["last"]
+                if isinstance(item, Exception):
+                    raise item
+                return SimpleNamespace(state=SimpleNamespace(name=item))
+
+        batches = Batches()
+
+        class Client:
+            def __init__(self, **kwargs):
+                self.aio = SimpleNamespace(batches=batches)
+
+        self.genai.Client = Client
+        return state
+
+    def test_a_transient_poll_failure_does_not_end_the_wait(self):
+        # Escalating here would drop into the fallback and re-bill the cohort.
+        state = self.script(
+            [RuntimeError("503"), RuntimeError("503"), "JOB_STATE_SUCCEEDED"]
+        )
+        job = asyncio.run(analyze.wait_gemini_batch("j", poll_s=0.001))
+        self.assertEqual(job.state.name, "JOB_STATE_SUCCEEDED")
+        self.assertEqual(state["calls"], 3)
+
+    def test_polling_that_keeps_failing_reports_the_job_as_still_running(self):
+        self.script([RuntimeError("503")] * 20)
+        with self.assertRaises(analyze.BatchStillRunning):
+            asyncio.run(analyze.wait_gemini_batch("j", poll_s=0.001))
+
+    def test_a_stuck_job_gives_up_at_the_deadline(self):
+        self.script(["JOB_STATE_PENDING"] * 500)
+        with self.assertRaises(analyze.BatchStillRunning):
+            asyncio.run(
+                analyze.wait_gemini_batch("j", poll_s=0.001, max_wait_s=0.05)
+            )
+
+    def test_zero_still_means_wait_forever(self):
+        self.script(["JOB_STATE_PENDING", "JOB_STATE_SUCCEEDED"])
+        job = asyncio.run(
+            analyze.wait_gemini_batch("j", poll_s=0.001, max_wait_s=0)
+        )
+        self.assertEqual(job.state.name, "JOB_STATE_SUCCEEDED")
+
+    def test_terminal_states_return_the_job(self):
+        for name in ("JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_EXPIRED"):
+            with self.subTest(state=name):
+                self.script([name])
+                job = asyncio.run(analyze.wait_gemini_batch("j", poll_s=0.001))
+                self.assertEqual(job.state.name, name)
+
+
 class TestPersistableCohort(unittest.TestCase):
     """enrich_cohort_status is a read-time view; only part of it belongs on disk."""
 

@@ -85,6 +85,16 @@ ANALYZE_BATCH = os.environ.get("ANALYZE_BATCH", "1").strip().lower() not in (
     "off",
 )
 ANALYZE_BATCH_POLL_S = float(os.environ.get("ANALYZE_BATCH_POLL_S", "15"))
+# Batch is slow by design (the 50% discount buys a queue, not a latency SLA),
+# so this is a stuck-job backstop rather than a deadline anyone should hit.
+# The job name stays on disk when it trips, so a resume picks the job back up
+# instead of re-billing the cohort. 0 waits forever, as before.
+ANALYZE_BATCH_MAX_WAIT_S = float(os.environ.get("ANALYZE_BATCH_MAX_WAIT_S", str(24 * 3600)))
+# A poll that raises is usually a blip, and escalating one would cost a re-run
+# of the whole cohort, so tolerate a few in a row before giving up.
+ANALYZE_BATCH_POLL_MAX_ERRORS = max(
+    1, int(os.environ.get("ANALYZE_BATCH_POLL_MAX_ERRORS", "5"))
+)
 # Inline batch payloads cap around 20MB; above this we upload a JSONL file.
 ANALYZE_BATCH_INLINE_MAX_BYTES = int(
     os.environ.get("ANALYZE_BATCH_INLINE_MAX_BYTES", str(15 * 1024 * 1024))
@@ -3007,13 +3017,34 @@ def parse_batch_results(job) -> dict:
     return out
 
 
-async def wait_gemini_batch(job_name: str, *, poll_s: Optional[float] = None):
-    """Poll until the batch leaves a non-terminal state; return the final job."""
+class BatchStillRunning(RuntimeError):
+    """Gave up watching a batch that is, as far as we know, still alive.
+
+    Distinct from a batch that failed: the job name remains valid and its
+    results are still coming, so the caller must keep the name on disk and let
+    a resume collect them. Re-running the sessions instead would pay for the
+    same work twice.
+    """
+
+
+async def wait_gemini_batch(
+    job_name: str,
+    *,
+    poll_s: Optional[float] = None,
+    max_wait_s: Optional[float] = None,
+):
+    """Poll until the batch reaches a terminal state; return the final job.
+
+    Raises BatchStillRunning if the deadline passes or polling keeps failing —
+    in both cases the job itself is untouched and can be picked up later.
+    """
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=GEMINI_API_KEY)
     interval = ANALYZE_BATCH_POLL_S if poll_s is None else poll_s
+    limit = ANALYZE_BATCH_MAX_WAIT_S if max_wait_s is None else max_wait_s
+    deadline = None if limit <= 0 else time.monotonic() + limit
     terminal = {
         types.JobState.JOB_STATE_SUCCEEDED,
         types.JobState.JOB_STATE_FAILED,
@@ -3021,13 +3052,38 @@ async def wait_gemini_batch(job_name: str, *, poll_s: Optional[float] = None):
         types.JobState.JOB_STATE_EXPIRED,
         types.JobState.JOB_STATE_PARTIALLY_SUCCEEDED,
     }
+    terminal_names = {s.name for s in terminal}
+    errors = 0
     while True:
-        job = await client.aio.batches.get(name=job_name)
-        state = getattr(job, "state", None)
-        if state in terminal or _batch_state_name(job) in {
-            s.name for s in terminal
-        }:
-            return job
+        try:
+            job = await client.aio.batches.get(name=job_name)
+            errors = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A failed poll says nothing about the job, so treat it as a blip
+            # until it stops looking like one.
+            errors += 1
+            if errors >= ANALYZE_BATCH_POLL_MAX_ERRORS:
+                raise BatchStillRunning(
+                    f"could not read batch {job_name} after {errors} attempts: {exc}"
+                ) from exc
+            print(f"batch poll {job_name} failed ({exc}); retry {errors}")
+        else:
+            # Compare by name first: _batch_state_name handles every shape the
+            # SDK returns, while `state in terminal` raises on anything
+            # unhashable and would defeat that fallback by going first.
+            if _batch_state_name(job) in terminal_names:
+                return job
+            try:
+                if getattr(job, "state", None) in terminal:
+                    return job
+            except TypeError:
+                pass
+        if deadline is not None and time.monotonic() >= deadline:
+            raise BatchStillRunning(
+                f"batch {job_name} still running after {limit:.0f}s"
+            )
         await asyncio.sleep(max(1.0, interval))
 
 
@@ -3160,7 +3216,12 @@ async def resume_cohort_batch(pool: Path, cohort: dict) -> dict:
     write_cohort(pool, cohort)
 
     if prepared:
-        await apply_cohort_batch(pool, cohort, prepared, job_name=job_name)
+        # Same rule as the first attempt: a batch we could not collect keeps
+        # its name and stays resumable. Letting this raise would strand the
+        # cohort as "running" with nothing watching it, since the startup
+        # resume task is never awaited.
+        if not await _collect_cohort_batch(pool, cohort, prepared, job_name):
+            return enrich_cohort_status(pool, read_cohort(pool, cohort["id"]) or cohort)
     live = read_cohort(pool, cohort["id"]) or cohort
     live.pop("batch", None)
     final = enrich_cohort_status(pool, live)
@@ -3235,7 +3296,11 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
             return enrich_cohort_status(pool, read_cohort(pool, cohort["id"]) or cohort)
 
         use_batch = ANALYZE_BATCH and ANALYSIS_ENABLED
+        job_name = None
         if use_batch:
+            # Only submission falls back to sync. Once a job exists it is
+            # billable, so a later failure must keep its name and be resumed
+            # rather than re-running every session at interactive prices.
             try:
                 job_name = await submit_prepared_gemini_batch(
                     prepared,
@@ -3243,23 +3308,29 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
                     work_dir=cohorts_dir(pool),
                     pool=pool,
                 )
-                cohort["batch"] = {
-                    "name": job_name,
-                    "submitted_at": int(time.time() * 1000),
-                    "session_ids": [e["session_id"] for e, _ in prepared],
-                }
-                write_cohort(pool, cohort)
-                await apply_cohort_batch(pool, cohort, prepared, job_name=job_name)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # Fall back to interactive calls so a Batch outage does not strand
-                # an already-extracted cohort.
-                print(f"cohort batch failed ({exc}); falling back to sync Gemini")
+                # No job was created, so nothing has been paid for: falling
+                # back keeps a Batch outage from stranding an extracted cohort.
+                print(f"cohort batch submit failed ({exc}); falling back to sync Gemini")
                 cohort.pop("batch", None)
                 write_cohort(pool, cohort)
                 await _cohort_sync_model(pool, cohort, prepared)
-        else:
+
+        if job_name:
+            cohort["batch"] = {
+                "name": job_name,
+                "submitted_at": int(time.time() * 1000),
+                "session_ids": [e["session_id"] for e, _ in prepared],
+            }
+            write_cohort(pool, cohort)
+            if not await _collect_cohort_batch(pool, cohort, prepared, job_name):
+                # Still in flight and no longer being watched. The name stays
+                # on disk so startup resume — or a Start from the UI — picks
+                # the same job back up.
+                return enrich_cohort_status(pool, read_cohort(pool, cohort["id"]) or cohort)
+        elif not use_batch:
             await _cohort_sync_model(pool, cohort, prepared)
 
         live = read_cohort(pool, cohort["id"]) or cohort
@@ -3274,6 +3345,37 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
             await cancel_gemini_batch(batch_name)
         mark_cohort_paused(pool, live)
         raise
+
+
+async def _collect_cohort_batch(
+    pool: Path, cohort: dict, prepared: list, job_name: str
+) -> bool:
+    """Apply a submitted batch. False when it is still in flight.
+
+    Everything past submission is recoverable: the job exists and has been paid
+    for, so a batch we simply stopped watching must leave its name on disk for
+    a resume. Only a batch that genuinely failed marks its sessions errored.
+    """
+    try:
+        await apply_cohort_batch(pool, cohort, prepared, job_name=job_name)
+        return True
+    except asyncio.CancelledError:
+        raise
+    except BatchStillRunning as exc:
+        print(f"cohort batch {job_name} not collected ({exc}); leaving it to resume")
+        for entry, _ in prepared:
+            entry["status"] = "running"
+        write_cohort(pool, cohort)
+        return False
+    except Exception as exc:
+        # Reading or writing the results failed, not the job. The name stays so
+        # a resume can retry the collection instead of re-billing the cohort.
+        message = str(exc) or "could not apply batch results"
+        print(f"cohort batch {job_name} apply failed ({message}); leaving it to resume")
+        for entry, _ in prepared:
+            entry["status"] = "running"
+        write_cohort(pool, cohort)
+        return False
 
 
 async def apply_cohort_batch(
