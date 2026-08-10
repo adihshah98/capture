@@ -26,7 +26,7 @@ env parsing, status codes — and never touch your recordings.
 To instrument any page served by this server, add one tag:
 
 ```html
-<script src="/capture.js"></script>
+<script async src="/capture.js"></script>
 ```
 
 ## Instrumenting a brand's site
@@ -44,14 +44,10 @@ external site's entire integration is one tag.
 
 2. Send the brand [docs/integration.md](docs/integration.md) — the complete
    brand-facing guide — along with their token and your server address.
-   Their side of the integration is the printed tag:
-
-   ```html
-   <script src="https://capture.yourdomain.com/capture.js" data-token="cap_xxx"></script>
-   ```
-
-   (The guide also covers what the tag costs their page, the privacy
-   defaults, Google Tag Manager, CSP, and how they verify it's working.)
+   Their side is the snippet `add-project` prints — an inline block that
+   fetches nothing until their page has loaded, so this server being down
+   can never affect their site. The guide covers privacy defaults, GTM, CSP
+   and verification.
 
 That's it — recordings land under `data/projects/<token>/sessions/` and the
 replay UI grows a project selector. Operator notes:
@@ -170,7 +166,7 @@ Optional config, before the tag (inline values win over the derived ones):
 
 | Component | What it does |
 |---|---|
-| `public/capture.js` (~1 KB) | Loader snippet; derives server URL + token from its own tag, lazy-loads the recorder after page idle |
+| `public/capture.js` (~1 KB) | Fallback loader for sites that can't run an inline script; the documented snippet injects `recorder.bundle.js` directly and never fetches this |
 | `data/projects.json` + `?token=` on ingest/config | Per-brand projects: token-gated ingest, isolated storage, per-project config |
 | `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you; unset means the read side is refused, not open |
 | `WORKOS_API_KEY` + `WORKOS_CLIENT_ID` (per-user logins) | Replaces the Basic password with WorkOS AuthKit; each project's `org_id` scopes which brand team can read it |

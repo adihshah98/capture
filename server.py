@@ -131,12 +131,21 @@ async def replay_auth(request: Request, call_next):
                 )
     return await call_next(request)
 
+# Stale-servable on purpose: a customer's page must never wait on our health.
+VISITOR_ASSETS = frozenset({"/capture.js", "/recorder.bundle.js"})
+VISITOR_ASSET_CACHE = "public, max-age=3600, stale-while-revalidate=86400, stale-if-error=86400"
+
 @app.middleware("http")
 async def revalidate_static(request: Request, call_next):
 
     response = await call_next(request)
-    is_static = request.url.path.endswith((".js", ".css", ".html")) or request.url.path == "/"
-    if is_static and "cache-control" not in response.headers:
+    if "cache-control" in response.headers:
+        return response
+    path = request.url.path
+    if path in VISITOR_ASSETS and response.status_code == 200:
+        response.headers["Cache-Control"] = VISITOR_ASSET_CACHE
+        return response
+    if path.endswith((".js", ".css", ".html")) or path == "/":
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -2176,6 +2185,36 @@ def public_base_url() -> str:
             return value.strip().rstrip("/")
     return "https://capture.example.com"
 
+# Byte-identical to the block in docs/integration.md; a test pins them.
+INTEGRATION_SNIPPET = """<script>
+(function () {
+  var host = '__HOST__';
+  window.CAPTURE_CONFIG = Object.assign(
+    { endpoint: host + '/ingest', configUrl: host + '/config', token: '__TOKEN__' },
+    window.CAPTURE_CONFIG || {}
+  );
+  function load() {
+    if (window.__captureLoaded) return;
+    window.__captureLoaded = 1;
+    var s = document.createElement('script');
+    s.async = 1;
+    s.src = host + '/recorder.bundle.js';
+    s.onerror = function () { window.__captureLoaded = 0; };
+    document.head.appendChild(s);
+  }
+  function schedule() {
+    if ('requestIdleCallback' in window) requestIdleCallback(load, { timeout: 3000 });
+    else setTimeout(load, 1500);
+  }
+  if (document.readyState === 'complete') schedule();
+  else addEventListener('load', schedule);
+})();
+</script>"""
+
+def integration_snippet(base: str, token: str, indent: str = "  ") -> str:
+    body = INTEGRATION_SNIPPET.replace("__HOST__", base).replace("__TOKEN__", token)
+    return "\n".join(indent + line if line else line for line in body.split("\n"))
+
 def add_project(name: str) -> None:
     token = "cap_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=24))
     projects = load_projects()
@@ -2185,8 +2224,8 @@ def add_project(name: str) -> None:
     project_sessions_dir(token).mkdir(parents=True, exist_ok=True)
     base = public_base_url()
     print(f"project '{name}' created — token: {token}")
-    print("\nAdd this tag to the brand's site:\n")
-    print(f'  <script src="{base}/capture.js" data-token="{token}"></script>')
+    print("\nAdd this snippet to the brand's site, on every page:\n")
+    print(integration_snippet(base, token))
     if base == "https://capture.example.com":
         print(
             "\n  (placeholder host — set CAPTURE_PUBLIC_URL or run ./setup.sh "

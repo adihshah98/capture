@@ -413,6 +413,42 @@ class TestHealthzUnwritableStorage(ServerCase):
         finally:
             os.chmod(self.data_dir, mode)
 
+def request_headers(url):
+    req = urllib.request.Request(url)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as res:
+            return res.status, res.headers
+    except urllib.error.HTTPError as err:
+        return err.code, err.headers
+
+class TestIntegrationSnippetMatchesDocs(unittest.TestCase):
+    def test_cli_snippet_is_the_documented_snippet(self):
+        sys.path.insert(0, str(REPO))
+        import server
+
+        doc = (REPO / "docs" / "integration.md").read_text()
+        documented = doc.split("```html\n", 1)[1].split("```", 1)[0].strip()
+        generated = server.integration_snippet(
+            "https://capture.example.com", "cap_YOURTOKEN", indent=""
+        ).strip()
+        self.assertEqual(documented, generated)
+
+class TestVisitorAssetCaching(ServerCase):
+    def test_visitor_assets_are_cacheable_and_stale_servable(self):
+        for path in ("/capture.js", "/recorder.bundle.js"):
+            with self.subTest(path=path):
+                status, headers = request_headers(self.base + path)
+                self.assertEqual(status, 200)
+                cache_control = headers.get("Cache-Control", "")
+                self.assertIn("public", cache_control)
+                self.assertIn("max-age=3600", cache_control)
+                self.assertIn("stale-if-error=86400", cache_control)
+
+    def test_everything_else_still_revalidates(self):
+        for path in ("/replay.html", "/replay.bundle.js", "/config"):
+            with self.subTest(path=path):
+                self.assertEqual(request_headers(self.base + path)[1].get("Cache-Control"), "no-cache")
+
 class TestProjectTokens(ServerCase):
     @classmethod
     def setUpClass(cls):
@@ -505,13 +541,13 @@ class TestProjectCli(unittest.TestCase):
 
     def test_add_project_uses_the_configured_public_url(self):
         out = self.run_cli("add-project", "Acme", env={"CAPTURE_PUBLIC_URL": "https://cdn.example.net/"})
-        self.assertIn('src="https://cdn.example.net/capture.js"', out)
+        self.assertIn("var host = 'https://cdn.example.net'", out)
         self.assertNotIn("capture.example.com", out)
 
     def test_public_url_file_is_used_when_the_env_var_is_absent(self):
         (self.data_dir / "public_url").write_text("https://from-file.example\n")
         out = self.run_cli("add-project", "Acme")
-        self.assertIn('src="https://from-file.example/capture.js"', out)
+        self.assertIn("var host = 'https://from-file.example'", out)
 
     def test_placeholder_host_is_called_out(self):
         out = self.run_cli("add-project", "Acme")
