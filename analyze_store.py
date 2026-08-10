@@ -58,6 +58,11 @@ CREATE TABLE IF NOT EXISTS cohort_sessions (
     error      TEXT,
     fields     TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (pool, cohort_id, session_id)
+    -- A real FK to sessions (pool, session_id) is not declared: SQLite ignores
+    -- foreign keys unless every connection sets PRAGMA foreign_keys=ON, and the
+    -- connection that does the deleting is server.py's, which does not. The
+    -- rule is enforced by forget_session() at the delete paths instead, where
+    -- it is visible in the code doing the deleting.
 );
 
 CREATE TABLE IF NOT EXISTS cohort_cuts (
@@ -70,6 +75,11 @@ CREATE TABLE IF NOT EXISTS cohort_cuts (
 
 CREATE INDEX IF NOT EXISTS cohorts_recency
     ON cohorts (pool, created_at DESC);
+-- forget_session deletes by session across every cohort; the primary key
+-- leads with cohort_id, so without this that is a full table scan on a path
+-- the retention sweep walks once per expired session.
+CREATE INDEX IF NOT EXISTS cohort_sessions_by_session
+    ON cohort_sessions (pool, session_id);
 -- cohorts_needing_batch_resume was a directory scan reading every cohort file
 -- on every server start; with this it is an index lookup.
 CREATE INDEX IF NOT EXISTS cohorts_resumable
@@ -422,6 +432,52 @@ def delete_cohort(conn: sqlite3.Connection, pool_key: str, cohort_id: str) -> bo
             (pool_key, cohort_id),
         )
     return found
+
+
+def forget_session(conn: sqlite3.Connection, pool_key: str, session_id: str) -> int:
+    """Drop a deleted session from every cohort that held it.
+
+    A cohort member is a reference to a recording, not a copy of it: the
+    write-up and frames live on disk under the session directory. Once that is
+    gone the row cannot be substantiated, and leaving it behind is worse than
+    dropping it — `enrich_cohort_status` falls through to the stored status
+    when it finds nothing on disk, so a deleted session keeps being counted as
+    a completed analysis and the cohort reports a result it cannot back up.
+
+    Returns the number of memberships removed. Cohorts shrink rather than
+    error: a frozen sample whose evidence was deleted is smaller, not broken.
+    Cached cuts are deliberately left alone — they are a record of what the
+    model said when it ran, and rewriting them to match would be a second
+    fabrication. They carry their own citation map (see `cut_key`).
+    """
+    with _Tx(conn):
+        rows = conn.execute(
+            "SELECT DISTINCT cohort_id FROM cohort_sessions WHERE pool = ? AND session_id = ?",
+            (pool_key, session_id),
+        ).fetchall()
+        if not rows:
+            return 0
+        cur = conn.execute(
+            "DELETE FROM cohort_sessions WHERE pool = ? AND session_id = ?",
+            (pool_key, session_id),
+        )
+        removed = cur.rowcount
+        # Bump the owners so a poller sees the membership change.
+        conn.executemany(
+            "UPDATE cohorts SET updated_at = ? WHERE pool = ? AND id = ?",
+            [(int(time.time() * 1000), pool_key, r["cohort_id"]) for r in rows],
+        )
+    return removed
+
+
+def forget_pool(conn: sqlite3.Connection, pool_key: str) -> int:
+    """Drop every cohort in a pool. For index_forget's whole-pool reset."""
+    with _Tx(conn):
+        cur = conn.execute("DELETE FROM cohort_sessions WHERE pool = ?", (pool_key,))
+        removed = cur.rowcount
+        conn.execute("DELETE FROM cohort_cuts WHERE pool = ?", (pool_key,))
+        conn.execute("DELETE FROM cohorts WHERE pool = ?", (pool_key,))
+    return removed
 
 
 def read_cuts(conn: sqlite3.Connection, pool_key: str, cohort_id: str) -> dict:

@@ -441,6 +441,24 @@ def clear_cut(pool: Path, cohort_id: str, key: str) -> bool:
     return analyze_store.clear_cut(conn, pkey, cohort_id, key)
 
 
+def forget_session(pool: Path, session_id: str) -> int:
+    """Remove a deleted session from every cohort in this pool.
+
+    Call this wherever a session's directory is removed. A membership row
+    points at a write-up under the session directory, so once that is gone the
+    row is unsupportable — and `enrich_cohort_status` trusts the stored status
+    when it finds nothing on disk, so the row would keep counting as done.
+    """
+    conn, key = cohort_store(pool)
+    return analyze_store.forget_session(conn, key, str(session_id))
+
+
+def forget_pool_cohorts(pool: Path) -> int:
+    """Drop every cohort in a pool, for a whole-pool index reset."""
+    conn, key = cohort_store(pool)
+    return analyze_store.forget_pool(conn, key)
+
+
 def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
     """Refresh per-session status from analysis.json / analysis.status.json on disk."""
     sessions = []

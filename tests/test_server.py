@@ -1183,6 +1183,41 @@ class TestCohort(ServerCase):
         self.assertEqual(status, 400)
         self.assertIn("empty", json.loads(body)["error"])
 
+    def test_deleting_a_session_removes_it_from_its_cohorts(self):
+        """Otherwise the membership row outlives the recording, and
+        enrich_cohort_status keeps counting it as a completed analysis."""
+        sid = "delsess" + "x" * 25
+        cohort_id = self._cohort_of_one(sid)
+        _, body = request(f"{self.base}/api/cohorts/{cohort_id}")
+        self.assertEqual(json.loads(body)["progress"]["done"], 1)
+
+        status, _ = request(f"{self.base}/api/sessions/{sid}", method="DELETE")
+        self.assertEqual(status, 200)
+
+        _, body = request(f"{self.base}/api/cohorts/{cohort_id}")
+        cohort = json.loads(body)
+        self.assertEqual([s["session_id"] for s in cohort["sessions"]], [])
+        self.assertEqual(cohort["progress"]["total"], 0)
+        self.assertEqual(cohort["progress"]["done"], 0)
+        self.assertEqual(self.stored_cohort(cohort_id)["sessions"], [])
+
+    def test_deleting_one_session_leaves_the_others_in_place(self):
+        sids = ["multi1" + "x" * 26, "multi2" + "x" * 26]
+        for sid in sids:
+            self.assertEqual(self.ingest(sid), 200)
+            self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
+            self.seed_analysis(sid)
+        cohort = self.create_and_analyze(purchased=2, all_n=0)
+        self.wait_done(cohort["id"])
+        self.assertEqual(len(self.stored_cohort(cohort["id"])["sessions"]), 2)
+
+        self.assertEqual(request(f"{self.base}/api/sessions/{sids[0]}", method="DELETE")[0], 200)
+
+        _, body = request(f"{self.base}/api/cohorts/{cohort['id']}")
+        live = json.loads(body)
+        self.assertEqual([s["session_id"] for s in live["sessions"]], [sids[1]])
+        self.assertEqual(live["progress"]["done"], 1)
+
     def test_delete_removes_cohort_and_keeps_session_writeups(self):
         sid = "delcoh" + "x" * 26
         cohort_id = self._cohort_of_one(sid)

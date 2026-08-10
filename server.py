@@ -855,6 +855,15 @@ def delete_session(request: Request, session_id: str, project: Optional[str] = Q
     freed = dir_bytes(session_dir)
     shutil.rmtree(session_dir, ignore_errors=True)
     sessionstore.forget(found.id, session_id)
+    # Cohort membership references a recording that no longer exists. Left
+    # behind, enrich_cohort_status falls back to the stored status and keeps
+    # counting the session as analyzed.
+    try:
+        analyze.forget_session(found.pool, session_id)
+    except Exception as exc:
+        # The session is already gone from the index; a failure here leaves a
+        # stale membership row, which is bad but not worth failing the delete.
+        print(f"cohort cleanup after forgetting {session_id}: {exc}")
     _bytes_used.pop(found.id, None)
     print(f"deleted session {session_id} ({freed} bytes)")
     return {"status": "deleted", "session_id": session_id, "bytes_freed": freed}
@@ -1867,6 +1876,13 @@ def sweep_expired_sessions() -> int:
         for session_id in sessionstore.expired(project.id, cutoff_ms):
             shutil.rmtree(project.pool / session_id, ignore_errors=True)
             sessionstore.forget(project.id, session_id)
+            # Same rule as delete_session: a session purged here no longer has
+            # a directory, so its cohort memberships point at write-ups that
+            # are gone.
+            try:
+                analyze.forget_session(project.pool, session_id)
+            except Exception as exc:
+                print(f"cohort cleanup after expiring {session_id}: {exc}")
             removed += 1
     if removed:
         _bytes_used.clear()

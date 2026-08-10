@@ -7,6 +7,7 @@ cohort — and the one-time import of the files left over from that layout.
 """
 
 import json
+import shutil
 import sys
 import tempfile
 import threading
@@ -267,6 +268,105 @@ class TestMigration(StoreCase):
         self.assertIsNotNone(got)
         self.assertEqual(got["label"], "Legacy")
         self.assertFalse(legacy.exists())
+
+
+class TestSessionDeletion(StoreCase):
+    """A membership row references a recording. Delete the recording and the
+    row cannot be substantiated — and enrich_cohort_status trusts the stored
+    status when it finds nothing on disk, so it would keep counting as done."""
+
+    def seed(self):
+        for sid in ("s0", "s1"):
+            (self.pool / sid).mkdir()
+            (self.pool / sid / "analysis.json").write_text(json.dumps({"text": "write-up"}))
+        analyze.write_cohort(
+            self.pool,
+            {
+                "id": "c-A",
+                "created_at": 1,
+                "status": "done",
+                "sessions": [
+                    {"session_id": "s0", "status": "done", "analysis": "analysis.json"},
+                    {"session_id": "s1", "status": "done", "analysis": "analysis.json"},
+                ],
+            },
+        )
+        analyze.write_cohort(
+            self.pool,
+            {
+                "id": "c-B",
+                "created_at": 2,
+                "status": "done",
+                "sessions": [{"session_id": "s0", "status": "done", "analysis": "analysis.json"}],
+            },
+        )
+
+    def test_a_deleted_session_leaves_every_cohort_it_was_in(self):
+        self.seed()
+        shutil.rmtree(self.pool / "s0")
+        self.assertEqual(analyze.forget_session(self.pool, "s0"), 2)
+        self.assertEqual(
+            [s["session_id"] for s in analyze.read_cohort(self.pool, "c-A")["sessions"]], ["s1"]
+        )
+        self.assertEqual(analyze.read_cohort(self.pool, "c-B")["sessions"], [])
+
+    def test_the_cohort_stops_counting_it_as_analyzed(self):
+        """The failure this prevents: a cohort reporting a completed analysis
+        for a session whose write-up no longer exists."""
+        self.seed()
+        shutil.rmtree(self.pool / "s0")
+        analyze.forget_session(self.pool, "s0")
+        live = analyze.enrich_cohort_status(self.pool, analyze.read_cohort(self.pool, "c-A"))
+        self.assertEqual(live["progress"]["total"], 1)
+        self.assertEqual(live["progress"]["done"], 1)
+
+    def test_surviving_members_are_untouched(self):
+        self.seed()
+        analyze.forget_session(self.pool, "s0")
+        row = analyze.read_cohort(self.pool, "c-A")["sessions"][0]
+        self.assertEqual(row["session_id"], "s1")
+        self.assertEqual(row["status"], "done")
+
+    def test_forgetting_is_idempotent_and_scoped(self):
+        self.seed()
+        self.assertEqual(analyze.forget_session(self.pool, "s0"), 2)
+        self.assertEqual(analyze.forget_session(self.pool, "s0"), 0)
+        self.assertEqual(analyze.forget_session(self.pool, "never-existed"), 0)
+
+    def test_the_owning_cohorts_are_touched_so_pollers_notice(self):
+        self.seed()
+        before = analyze.read_cohort(self.pool, "c-A")["updated_at"]
+        time.sleep(0.005)
+        analyze.forget_session(self.pool, "s0")
+        self.assertGreater(analyze.read_cohort(self.pool, "c-A")["updated_at"], before)
+
+    def test_cached_cuts_survive_a_membership_change(self):
+        """A cut records what the model said when it ran; rewriting it to match
+        a changed membership would be a second fabrication."""
+        self.seed()
+        analyze.write_cut(self.pool, "c-A", "k", {"headline": "as analyzed"})
+        analyze.forget_session(self.pool, "s0")
+        self.assertEqual(analyze.read_cut(self.pool, "c-A", "k"), {"headline": "as analyzed"})
+
+    def test_forgetting_a_pool_drops_its_cohorts_and_cuts(self):
+        self.seed()
+        analyze.write_cut(self.pool, "c-A", "k", {"n": 1})
+        analyze.forget_pool_cohorts(self.pool)
+        self.assertEqual(analyze.list_cohorts(self.pool), [])
+        self.assertEqual(analyze.read_cuts(self.pool, "c-A"), {})
+
+    def test_another_pool_is_not_affected(self):
+        self.seed()
+        project = self.root / "projects" / "acme" / "sessions"
+        project.mkdir(parents=True)
+        analyze.write_cohort(
+            project,
+            {"id": "c-A", "created_at": 1, "sessions": [{"session_id": "s0"}]},
+        )
+        analyze.forget_session(self.pool, "s0")
+        self.assertEqual(
+            [s["session_id"] for s in analyze.read_cohort(project, "c-A")["sessions"]], ["s0"]
+        )
 
 
 class TestPoolLayout(unittest.TestCase):
