@@ -61,6 +61,50 @@ class TestPagePath(unittest.TestCase):
         self.assertIsNone(analyze.page_path(""))
         self.assertIsNone(analyze.page_path(None))
 
+    def test_a_real_host_with_no_path_is_the_homepage(self):
+        for url in (
+            "https://shop.test",
+            "https://shop.test/",
+            "http://localhost:3000/",
+            "http://127.0.0.1:3000/",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(analyze.page_path(url), "/")
+
+    def test_a_bare_host_still_resolves(self):
+        self.assertEqual(analyze.page_path("shop.test/p"), "/p")
+        self.assertEqual(analyze.page_path("localhost:3000/cart"), "/cart")
+
+    def test_unreadable_entry_urls_are_unknown_not_the_homepage(self):
+        # "/" would be indistinguishable from a real homepage visit: offered in
+        # the facet picker, counted in a measured split, and stated to the model
+        # as fact. None is the unknown every consumer already handles.
+        for url in (
+            "not a url at all",
+            "null",
+            "undefined",
+            "about:blank",
+            "javascript:void(0)",
+            "data:text/html,<h1>hi</h1>",
+            "file:///Users/x/index.html",
+            "chrome-extension://abc/page.html",
+            "#/spa/route",
+            "?utm_source=x",
+            "   ",
+        ):
+            with self.subTest(url=url):
+                self.assertIsNone(analyze.page_path(url))
+
+    def test_an_encoded_separator_does_not_merge_two_pages(self):
+        # /a%2Fb is one segment containing a slash; /a/b is two segments.
+        encoded = analyze.page_path("https://shop.test/a%2Fb")
+        plain = analyze.page_path("https://shop.test/a/b")
+        self.assertEqual(plain, "/a/b")
+        self.assertNotEqual(encoded, plain)
+
+    def test_ordinary_percent_encoding_is_still_decoded(self):
+        self.assertEqual(analyze.page_path("https://shop.test/caf%C3%A9"), "/café")
+
 
 class TestNormalizeSlice(unittest.TestCase):
     def test_multi_valued_outcome_and_device(self):
