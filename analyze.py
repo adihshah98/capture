@@ -21,10 +21,13 @@ import os
 import re
 import shutil
 import sqlite3
+import threading
 import time
 import urllib.parse
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+import analyze_store
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -35,6 +38,9 @@ ANALYSIS_DIR = ".analysis"
 COHORT_FILE = "cohort.json"
 COHORTS_DIR = "cohorts"
 CUTS_SUFFIX = ".cuts.json"
+# Per-project pools live at <data root>/projects/<name>/sessions; the default
+# pool is <data root>/sessions. Same layout server.py indexes by.
+PROJECTS_DIR = "projects"
 # Same shape as server.SAFE_CHUNK — keep local so the CLI does not import server.
 SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
 # Cohort ids are ours to mint ("cohort-<ms>"), but they land in filenames, so
@@ -244,11 +250,83 @@ def clear_analysis(session_dir: Path) -> None:
 
 
 def cohorts_dir(pool: Path) -> Path:
-    """Cohorts live beside the sessions directory (project root / data root)."""
+    """Where cohort JSON used to live, beside the sessions directory.
+
+    Only the migration reads this now; cohort state is in SQLite.
+    """
     return pool.parent / COHORTS_DIR
 
 
+def _is_project_pool(pool: Path) -> bool:
+    """`<root>/projects/<name>/sessions` rather than `<root>/sessions`.
+
+    Tested on the grandparent, not the parent: a data root that happens to be
+    named "projects" would otherwise read its own default pool as a project.
+    """
+    return pool.parent.parent.name == PROJECTS_DIR
+
+
+def data_root_for(pool: Path) -> Path:
+    """The data root owning this pool — where index.db lives."""
+    if _is_project_pool(pool):
+        return pool.parent.parent.parent
+    return pool.parent
+
+
+def pool_key(pool: Path) -> str:
+    """Stable pool identifier for the store. Matches server.pool_key: the
+    default pool is "", a project pool is its directory name."""
+    return pool.parent.name if _is_project_pool(pool) else ""
+
+
+def cohort_store(pool: Path):
+    """(connection, pool_key) for this pool, migrating legacy JSON once."""
+    conn = analyze_store.connect(data_root_for(pool))
+    key = pool_key(pool)
+    _migrate_cohorts_once(conn, pool, key)
+    return conn, key
+
+
+_migrated: set = set()
+_migrate_lock = threading.Lock()
+
+
+def _migrate_cohorts_once(conn, pool: Path, key: str) -> None:
+    """Import this pool's cohort files into the store.
+
+    Two legacy layouts feed in: the pre-multi-cohort `cohort.json`, and the
+    `cohorts/*.json` directory. Both are consumed on import, so the steady
+    state is a directory that does not exist.
+
+    Only the directory scan is latched per process — the hundreds of store
+    calls a cohort run makes must not each glob it. `cohort.json` is a single
+    is_file() on a path that normally does not exist, and it can appear after
+    this pool was first touched (an older deployment writing beside a running
+    server), so that check stays live. The import is idempotent either way: an
+    existing row wins, so a second process cannot double-import.
+    """
+    try:
+        migrate_legacy_cohort(pool)
+    except Exception as exc:
+        print(f"legacy cohort migration failed for pool {key or '(default)'}: {exc}")
+
+    directory = cohorts_dir(pool)
+    token = (str(data_root_for(pool).resolve()), key)
+    with _migrate_lock:
+        latched = token in _migrated
+        if latched and not directory.is_dir():
+            return
+        _migrated.add(token)
+    try:
+        analyze_store.migrate_json_cohorts(conn, key, directory, CUTS_SUFFIX)
+    except Exception as exc:
+        # A failed import must not take down the request that triggered it, but
+        # it must be visible — the cohorts would silently read as absent.
+        print(f"cohort migration failed for pool {key or '(default)'}: {exc}")
+
+
 def cohort_path(pool: Path, cohort_id: str) -> Path:
+    """Legacy JSON path. Retained for the migration and for id validation."""
     return cohorts_dir(pool) / f"{safe_cohort_id(cohort_id)}.json"
 
 
@@ -290,34 +368,24 @@ def migrate_legacy_cohort(pool: Path) -> None:
 
 def read_cohort(pool: Path, cohort_id: str) -> Optional[dict]:
     try:
-        return _read_cohort_file(cohort_path(pool, cohort_id))
+        cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return None
+    conn, key = cohort_store(pool)
+    return analyze_store.read_cohort(conn, key, cohort_id)
 
 
 def write_cohort(pool: Path, cohort: dict) -> dict:
-    cohort = {**cohort, "updated_at": int(time.time() * 1000)}
-    path = cohort_path(pool, cohort["id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cohort, indent=2))
-    return cohort
+    conn, key = cohort_store(pool)
+    return analyze_store.write_cohort(
+        conn, key, {**cohort, "id": safe_cohort_id(cohort["id"])}
+    )
 
 
 def list_cohorts(pool: Path) -> list:
     """Every cohort in this pool, newest first. Membership only — no write-ups."""
-    migrate_legacy_cohort(pool)
-    out = []
-    directory = cohorts_dir(pool)
-    if not directory.is_dir():
-        return out
-    for path in directory.glob("*.json"):
-        if path.name.endswith(CUTS_SUFFIX):
-            continue
-        data = _read_cohort_file(path)
-        if data and isinstance(data.get("id"), str):
-            out.append(data)
-    out.sort(key=lambda c: c.get("created_at") or 0, reverse=True)
-    return out
+    conn, key = cohort_store(pool)
+    return analyze_store.list_cohorts(conn, key)
 
 
 def latest_cohort(pool: Path) -> Optional[dict]:
@@ -326,49 +394,51 @@ def latest_cohort(pool: Path) -> Optional[dict]:
 
 
 def cuts_path(pool: Path, cohort_id: str) -> Path:
+    """Legacy cuts filename. The migration reads this shape; cuts live in the
+    store now. Kept alongside cohort_path so both legacy names validate the id
+    the same way."""
     return cohorts_dir(pool) / f"{safe_cohort_id(cohort_id)}{CUTS_SUFFIX}"
 
 
 def read_cuts(pool: Path, cohort_id: str) -> dict:
     """All cached cut analyses for a cohort, keyed by cut_key()."""
     try:
-        path = cuts_path(pool, cohort_id)
+        cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return {}
-    data = _read_cohort_file(path)
-    return data if isinstance(data, dict) else {}
+    conn, key = cohort_store(pool)
+    return analyze_store.read_cuts(conn, key, cohort_id)
 
 
 def read_cut(pool: Path, cohort_id: str, key: str) -> Optional[dict]:
-    cut = read_cuts(pool, cohort_id).get(key)
-    return cut if isinstance(cut, dict) else None
+    try:
+        cohort_id = safe_cohort_id(cohort_id)
+    except ValueError:
+        return None
+    conn, pkey = cohort_store(pool)
+    return analyze_store.read_cut(conn, pkey, cohort_id, key)
 
 
 def write_cut(pool: Path, cohort_id: str, key: str, cut: dict) -> dict:
     """Cache one cut. A done cohort is immutable, so this only needs busting
-    when the question changes (a reworded prompt), never when the data does."""
-    path = cuts_path(pool, cohort_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cuts = read_cuts(pool, cohort_id)
-    cuts[key] = cut
-    path.write_text(json.dumps(cuts, indent=2))
-    return cut
+    when the question changes (a reworded prompt), never when the data does.
+
+    One row per cut: two cuts of the same cohort finishing together no longer
+    race through a read-mutate-write of the whole map.
+    """
+    conn, pkey = cohort_store(pool)
+    return analyze_store.write_cut(conn, pkey, safe_cohort_id(cohort_id), key, cut)
 
 
 def clear_cut(pool: Path, cohort_id: str, key: str) -> bool:
     """Drop one cached cut so the next run re-asks the model. Returns whether
     anything was actually dropped."""
     try:
-        path = cuts_path(pool, cohort_id)
+        cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return False
-    cuts = read_cuts(pool, cohort_id)
-    if key not in cuts:
-        return False
-    cuts.pop(key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cuts, indent=2))
-    return True
+    conn, pkey = cohort_store(pool)
+    return analyze_store.clear_cut(conn, pkey, cohort_id, key)
 
 
 def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
@@ -2555,15 +2625,11 @@ def rename_cohort(pool: Path, cohort_id: str, label: str) -> Optional[dict]:
 def delete_cohort(pool: Path, cohort_id: str) -> bool:
     """Remove a cohort and its cached cuts. Session write-ups on disk stay."""
     try:
-        path = cohort_path(pool, cohort_id)
-        cuts = cuts_path(pool, cohort_id)
+        cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return False
-    if not path.is_file():
-        return False
-    path.unlink(missing_ok=True)
-    cuts.unlink(missing_ok=True)
-    return True
+    conn, key = cohort_store(pool)
+    return analyze_store.delete_cohort(conn, key, cohort_id)
 
 
 async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> dict:
@@ -3510,7 +3576,7 @@ def iter_session_pools(data_root: Path) -> list:
     legacy = data_root / "sessions"
     if legacy.is_dir():
         pools.append(legacy)
-    projects = data_root / "projects"
+    projects = data_root / PROJECTS_DIR
     if projects.is_dir():
         for path in projects.iterdir():
             sessions = path / "sessions"
@@ -3520,13 +3586,21 @@ def iter_session_pools(data_root: Path) -> list:
 
 
 def cohorts_needing_batch_resume(data_root: Path) -> list:
-    """(pool, cohort) pairs with an in-flight Batch job name on disk."""
+    """(pool, cohort) pairs with an in-flight Batch job name.
+
+    An index lookup over every pool at once. The directory scan this replaced
+    parsed every cohort file in every pool on the server's startup path.
+    """
+    pools = {pool_key(pool): pool for pool in iter_session_pools(data_root)}
+    # Touch each pool so a not-yet-migrated cohort is resumable on first boot.
+    for pool in pools.values():
+        cohort_store(pool)
+    conn = analyze_store.connect(data_root)
     out = []
-    for pool in iter_session_pools(data_root):
-        for cohort in list_cohorts(pool):
-            batch = cohort.get("batch") or {}
-            if cohort.get("status") == "running" and batch.get("name"):
-                out.append((pool, cohort))
+    for key, cohort in analyze_store.resumable_cohorts(conn):
+        pool = pools.get(key)
+        if pool is not None:
+            out.append((pool, cohort))
     return out
 
 
@@ -3538,7 +3612,7 @@ def _cli_pool(project: Optional[str]) -> Path:
     root = _cli_data_root()
     if not project:
         return root / "sessions"
-    return root / "projects" / project / "sessions"
+    return root / PROJECTS_DIR / project / "sessions"
 
 
 async def _cli_run_cohort(

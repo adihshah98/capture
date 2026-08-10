@@ -21,6 +21,9 @@ import pgfixture
 REPO = Path(__file__).resolve().parent.parent
 UVICORN = REPO / ".venv" / "bin" / "uvicorn"
 
+sys.path.insert(0, str(REPO))
+import analyze_store
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -97,6 +100,29 @@ class ServerCase(unittest.TestCase):
             cls.proc.wait(timeout=10)
             raise
         shutil.rmtree(cls.data_dir, ignore_errors=True)
+
+    def cohort_store(self):
+        """A fresh connection to the cohort tables the server process writes.
+
+        Tests assert on durable state, which used to mean reading
+        cohorts/<id>.json. The server owns its own connection in another
+        process, so open a separate one rather than caching.
+        """
+        conn = sqlite3.connect(self.data_dir / "index.db")
+        conn.row_factory = sqlite3.Row
+        self.addCleanup(conn.close)
+        return conn
+
+    def stored_cohort(self, cohort_id, pool_key=""):
+        """The cohort as persisted, or None. Mirrors analyze.read_cohort."""
+        return analyze_store.read_cohort(self.cohort_store(), pool_key, cohort_id)
+
+    def store_cohort(self, cohort, pool_key=""):
+        """Overwrite persisted cohort state, to stage a mid-run condition."""
+        return analyze_store.write_cohort(self.cohort_store(), pool_key, cohort)
+
+    def stored_cuts(self, cohort_id, pool_key=""):
+        return analyze_store.read_cuts(self.cohort_store(), pool_key, cohort_id)
 
     def ingest(self, session_id, payload=None, gzipped=True, token=None, raw=None, headers=None):
         body = raw if raw is not None else json.dumps(
@@ -929,9 +955,7 @@ class TestCohort(ServerCase):
             self.assertTrue(entry.get("text", "").startswith("write-up for"))
             self.assertIn("standout", entry)
 
-        saved = json.loads(
-            (self.data_dir / "cohorts" / f"{cohort['id']}.json").read_text()
-        )
+        saved = self.stored_cohort(cohort["id"])
         self.assertEqual(saved["id"], cohort["id"])
         self.assertEqual(len(saved["sessions"]), 4)
         # Write-ups are response-only — not bloating the cohort file on disk.
@@ -1123,8 +1147,8 @@ class TestCohort(ServerCase):
             self.assertIn(cohort_id, listed)
         # Newest first, so the later run sorts ahead of the earlier one.
         self.assertLess(listed.index(ids[1]), listed.index(ids[0]))
-        # First cohort file still exists with its membership.
-        first = json.loads((self.data_dir / "cohorts" / f"{ids[0]}.json").read_text())
+        # First cohort still exists with its membership.
+        first = self.stored_cohort(ids[0])
         self.assertEqual(len(first["sessions"]), 1)
 
     def test_rename_sets_the_label_and_keeps_membership(self):
@@ -1162,8 +1186,9 @@ class TestCohort(ServerCase):
     def test_delete_removes_cohort_and_keeps_session_writeups(self):
         sid = "delcoh" + "x" * 26
         cohort_id = self._cohort_of_one(sid)
-        cuts = self.data_dir / "cohorts" / f"{cohort_id}.cuts.json"
-        cuts.write_text(json.dumps({"some-cut": {"label": "x"}}))
+        analyze_store.write_cut(
+            self.cohort_store(), "", cohort_id, "some-cut", {"label": "x"}
+        )
         analysis = self.data_dir / "sessions" / sid / "analysis.json"
         self.assertTrue(analysis.is_file())
 
@@ -1173,8 +1198,8 @@ class TestCohort(ServerCase):
         self.assertEqual(status, 200, body)
         self.assertTrue(json.loads(body)["ok"])
         self.assertNotIn(cohort_id, [c["id"] for c in self.cohorts()])
-        self.assertFalse((self.data_dir / "cohorts" / f"{cohort_id}.json").is_file())
-        self.assertFalse(cuts.is_file())
+        self.assertIsNone(self.stored_cohort(cohort_id))
+        self.assertEqual(self.stored_cuts(cohort_id), {})
         self.assertTrue(analysis.is_file())
 
         status, body = request(
@@ -1198,11 +1223,14 @@ class TestCohort(ServerCase):
         (self.data_dir / "cohort.json").write_text(json.dumps(legacy))
 
         self.assertIn("cohort-1700000000000", [c["id"] for c in self.cohorts()])
-        self.assertTrue(
-            (self.data_dir / "cohorts" / "cohort-1700000000000.json").is_file()
-        )
-        # The legacy file is consumed, so the migration runs exactly once.
+        migrated = self.stored_cohort("cohort-1700000000000")
+        self.assertEqual(migrated["label"], "Sample 1+0")
+        self.assertEqual([s["session_id"] for s in migrated["sessions"]], [sid])
+        # Both legacy files are consumed, so the migration runs exactly once.
         self.assertFalse((self.data_dir / "cohort.json").exists())
+        self.assertFalse(
+            (self.data_dir / "cohorts" / "cohort-1700000000000.json").exists()
+        )
 
     def _cohort_of_one(self, sid):
         """A settled one-session cohort, with cached analysis so it lands done."""
@@ -1225,12 +1253,11 @@ class TestCohort(ServerCase):
         (session / "analysis.status.json").write_text(
             json.dumps({"status": "error", "error": "page reconstruction timed out"})
         )
-        path = self.data_dir / "cohorts" / f"{cohort_id}.json"
-        saved = json.loads(path.read_text())
+        saved = self.stored_cohort(cohort_id)
         saved["sessions"][0]["status"] = "error"
         saved["sessions"][0]["error"] = "page reconstruction timed out"
         saved["status"] = "error"
-        path.write_text(json.dumps(saved))
+        self.store_cohort(saved)
 
         _, body = request(f"{self.base}/api/cohorts/{cohort_id}")
         self.assertEqual(json.loads(body)["sessions"][0]["status"], "error")
@@ -1387,7 +1414,7 @@ class TestCutEndpoint(ServerCase):
         self.assertEqual(data["status"], "absent")
         self.assertEqual(data["cohort_id"], cohort_id)
         # Nothing was written, so no call was made.
-        self.assertFalse((self.data_dir / "cohorts" / f"{cohort_id}.cuts.json").is_file())
+        self.assertEqual(self.stored_cuts(cohort_id), {})
 
     def test_a_cached_cut_is_served_without_run(self):
         import analyze
@@ -1565,9 +1592,7 @@ class TestCutSlices(ServerCase):
         self.assertEqual(rows["q"]["page"], "/products/cream")
 
     def test_derived_fields_are_not_frozen_into_the_cohort_file(self):
-        saved = json.loads(
-            (self.data_dir / "cohorts" / f"{self.cohort_id}.json").read_text()
-        )
+        saved = self.stored_cohort(self.cohort_id)
         for entry in saved["sessions"]:
             self.assertNotIn("device", entry)
             self.assertNotIn("outcome", entry)
