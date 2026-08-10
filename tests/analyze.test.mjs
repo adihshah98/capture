@@ -160,3 +160,43 @@ test('pickFrameTimes survives a session too short to sample', () => {
   assert.ok(times.length >= 1);
   assert.ok(times.every((t) => Number.isFinite(t)));
 });
+
+// A long, continuously-active recording used to sample a frame per second with
+// no ceiling — every frame a full screenshot sent to the model.
+const busyEvents = () => {
+  const events = [snapshot(0)];
+  for (let t = 100; t <= 200000; t += 100) events.push(scrollAt(t / 100, t));
+  return events;
+};
+
+test('pickFrameTimes clamps an absurd fps instead of multiplying frames', () => {
+  const events = busyEvents();
+  // 50fps would be a frame every 20ms — ~10k frames for this recording.
+  const wild = pickFrameTimes(events, { fps: 50 });
+  const fastest = pickFrameTimes(events, { fps: 4 });
+  assert.deepEqual(wild, fastest, 'fps above the band collapses onto the band');
+  assert.ok(wild.length < 900, `got ${wild.length}`);
+});
+
+test('pickFrameTimes clamps an fps below the floor', () => {
+  const events = busyEvents();
+  const slowest = pickFrameTimes(events, { fps: 0.2 });
+  assert.deepEqual(pickFrameTimes(events, { fps: 0.001 }), slowest);
+});
+
+test('pickFrameTimes treats a missing or invalid fps as 1', () => {
+  const events = busyEvents();
+  const oneFps = pickFrameTimes(events, { fps: 1 });
+  // 0 is the "unset" spelling; NaN comes from Number(undefined) at the CLI edge.
+  assert.deepEqual(pickFrameTimes(events, { fps: 0 }), oneFps);
+  assert.deepEqual(pickFrameTimes(events, { fps: NaN }), oneFps);
+  assert.deepEqual(pickFrameTimes(events, { fps: -5 }), oneFps);
+});
+
+test('pickFrameTimes honours the default frame cap used in production', () => {
+  // Mirrors ANALYZE_MAX_FRAMES=90 in analyze.py: the cap is what keeps a
+  // continuously-active session from growing without bound.
+  const capped = pickFrameTimes(busyEvents(), { maxFrames: 90 });
+  assert.ok(capped.length <= 90, `got ${capped.length}`);
+  assert.ok(capped.every((t, i) => i === 0 || t > capped[i - 1]));
+});

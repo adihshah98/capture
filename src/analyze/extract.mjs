@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 
@@ -26,6 +26,13 @@ const SEEK_SETTLE_MS = 550;
 const IMAGE_SETTLE_CAP_MS = 600;
 const JPEG_QUALITY = 72;
 
+// fps multiplies directly into the frame count, and every frame is a full
+// screenshot sent to the model. A mistyped env var should degrade the sampling
+// rate, not turn one session into thousands of images: 50fps yields ~10k frames
+// for a 200s recording. The band spans one frame every 5s to 4 per second.
+const MIN_FPS = 0.2;
+const MAX_FPS = 4;
+
 // Two rrweb rules the player depends on, inlined rather than loaded from the
 // emitted stylesheet: deploy.sh ships only extract.mjs and the JS bundle, so a
 // file dependency would work locally and break in production.
@@ -44,14 +51,26 @@ const STAGE_CSS = `
   .replayer-mouse, .replayer-mouse-tail, .click-pulse { display: none !important; }
 `;
 
+/**
+ * Parse the session's chunks, reporting the ones that could not be read.
+ *
+ * A dropped chunk does not leave a visible hole: collectEvents sorts whatever
+ * parsed, so a missing middle chunk reads as continuous, and activeSpans then
+ * treats the gap as legitimate dead air and skips it. The result is a partial
+ * session that looks complete — so the count is returned and surfaced as a
+ * warning rather than swallowed.
+ */
 function readChunks(sessionDir, names) {
   const chunks = [];
+  const failed = [];
   for (const name of names) {
     try {
       chunks.push(JSON.parse(readFileSync(join(sessionDir, name), 'utf8')));
-    } catch {}
+    } catch (err) {
+      failed.push({ name, message: String((err && err.message) || err) });
+    }
   }
-  return chunks;
+  return { chunks, failed };
 }
 
 export function collectEvents(chunks) {
@@ -188,7 +207,9 @@ export function pickFrameTimes(events, { fps = 1, maxFrames = 0 } = {}) {
   const t0 = events[0].timestamp;
   const duration = events[events.length - 1].timestamp - t0;
   const last = Math.max(0, duration - END_MARGIN_MS);
-  const step = Math.max(1, Math.round(1000 / (fps > 0 ? fps : 1)));
+  // A non-finite or non-positive fps means "unset", not "as fast as possible".
+  const wanted = Number.isFinite(fps) && fps > 0 ? fps : 1;
+  const step = Math.max(1, Math.round(1000 / Math.min(Math.max(wanted, MIN_FPS), MAX_FPS)));
 
   const firstSnapshot = events.find((e) => e.type === 2);
   const earliest = firstSnapshot
@@ -232,7 +253,14 @@ async function startPlayer(page, events) {
   await page.waitForTimeout(SETTLE_MS);
 }
 
-/** Wait for images to decode, but never let a dead origin stall the run. */
+/**
+ * Wait for images to decode, but never let a dead origin stall the run.
+ *
+ * Best effort by design: a failure here only means the next screenshot may
+ * catch an image mid-decode, which the failed-asset count already reports.
+ * The frame is still captured, so this is the one swallowed error that does
+ * not need to reach the digest.
+ */
 async function settleImages(page, capMs = IMAGE_SETTLE_CAP_MS) {
   try {
     await page.evaluate(
@@ -267,6 +295,7 @@ async function settleImages(page, capMs = IMAGE_SETTLE_CAP_MS) {
  */
 async function captureFrames(page, times, outDir) {
   const frames = [];
+  let dropped = 0;
   for (let i = 0; i < times.length; i++) {
     const atMs = times[i];
     try {
@@ -280,13 +309,25 @@ async function captureFrames(page, times, outDir) {
       await settleImages(page);
 
       const frame = await page.$('#stage iframe');
-      if (!frame) continue;
-      const file = join(outDir, `f${String(i).padStart(3, '0')}.jpg`);
+      if (!frame) {
+        dropped++;
+        continue;
+      }
+      const file = join(outDir, `f${String(i).padStart(4, '0')}.jpg`);
       await frame.screenshot({ path: file, type: 'jpeg', quality: JPEG_QUALITY });
-      frames.push({ atMs, file });
-    } catch {}
+      // An empty or truncated JPEG passes the is_file() check on the Python
+      // side and is then sent to the model, where it fails the whole request
+      // for this session with an opaque error. Cheaper to drop it here.
+      if (statSync(file, { throwIfNoEntry: false })?.size > 0) {
+        frames.push({ atMs, file });
+      } else {
+        dropped++;
+      }
+    } catch {
+      dropped++;
+    }
   }
-  return frames;
+  return { frames, dropped };
 }
 
 export async function extractSession({
@@ -297,7 +338,16 @@ export async function extractSession({
   fps = 1,
   maxFrames = 0,
 }) {
-  const chunks = readChunks(sessionDir, chunkNames);
+  const { chunks, failed: failedChunks } = readChunks(sessionDir, chunkNames);
+  // Every chunk unreadable is a broken recording, not a thin one: analyzing
+  // nothing would report "not enough events" and hide the real cause.
+  if (!chunks.length && (chunkNames || []).length) {
+    return {
+      error:
+        `none of the ${chunkNames.length} chunk(s) could be read — ` +
+        `first failure: ${failedChunks[0]?.message || 'unknown error'}`,
+    };
+  }
   const events = collectEvents(chunks);
   if (events.length < 2) {
     return { error: 'not enough events to analyze', events: events.length };
@@ -321,8 +371,11 @@ export async function extractSession({
 
   const browser = await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   let frames = [];
+  let droppedFrames = 0;
   let pageHeight = 0;
   let failedAssets = 0;
+  // null means "could not be measured", which a plain 0 cannot express.
+  let measuredHeight = null;
   try {
     const page = await browser.newPage({
       viewport: { width: viewport.width, height: viewport.height },
@@ -338,15 +391,16 @@ export async function extractSession({
     await page.addScriptTag({ path: bundlePath });
     await startPlayer(page, events);
 
-    frames = await captureFrames(page, times, outDir);
+    ({ frames, dropped: droppedFrames } = await captureFrames(page, times, outDir));
 
-    pageHeight = await page
+    measuredHeight = await page
       .evaluate(() => {
         const doc = document.querySelector('#stage iframe')?.contentDocument;
-        if (!doc) return 0;
+        if (!doc) return null;
         return Math.max(doc.body?.scrollHeight || 0, doc.documentElement?.scrollHeight || 0);
       })
-      .catch(() => 0);
+      .catch(() => null);
+    pageHeight = measuredHeight ?? 0;
     failedAssets = await page
       .evaluate(() => window.__player?.failedAssets?.size || 0)
       .catch(() => 0);
@@ -385,6 +439,24 @@ export async function extractSession({
     warnings: [
       ...(failedAssets
         ? [`${failedAssets} asset(s) failed to load during replay — parts of the frames may be missing`]
+        : []),
+      // A partly-read recording still produces a plausible-looking digest, so
+      // say so plainly: the model is drawing behavioural conclusions from it.
+      ...(failedChunks.length
+        ? [
+            `${failedChunks.length} of ${chunkNames.length} recording chunk(s) could not be read ` +
+              `(${failedChunks[0].name}: ${failedChunks[0].message}) — this session is incomplete ` +
+              'and gaps may look like inactivity',
+          ]
+        : []),
+      ...(droppedFrames
+        ? [
+            `${droppedFrames} of ${times.length} frame(s) failed to capture — ` +
+              'the replay is sampled less densely than usual',
+          ]
+        : []),
+      ...(measuredHeight === null
+        ? ['page height could not be measured from the replay']
         : []),
       ...(frames.length === 0 ? ['no frames could be captured from the replay'] : []),
     ],

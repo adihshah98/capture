@@ -46,9 +46,13 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 ANALYZE_TIMEOUT_S = float(os.environ.get("ANALYZE_TIMEOUT_S", "300"))
 
 # Frames come one per second of activity; dead air is skipped, so a long
-# session with a little interaction stays cheap. 0 leaves the count uncapped.
+# session with a little interaction stays cheap.
 ANALYZE_FPS = float(os.environ.get("ANALYZE_FPS", "1"))
-ANALYZE_MAX_FRAMES = int(os.environ.get("ANALYZE_MAX_FRAMES", "0"))
+# Capped by default: activity-based sampling keeps a typical session well under
+# this, but a continuously-active one grows a frame per second without bound
+# (~200 frames for 200s), and at cohort scale those JPEGs are the OOM the batch
+# path was rewritten to survive. Set 0 to disable the cap.
+ANALYZE_MAX_FRAMES = int(os.environ.get("ANALYZE_MAX_FRAMES", "90"))
 
 ANALYSIS_ENABLED = bool(GEMINI_API_KEY)
 
