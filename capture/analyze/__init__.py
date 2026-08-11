@@ -22,7 +22,6 @@ import os
 import re
 import shutil
 import sqlite3
-import sys
 import threading
 import time
 import urllib.parse
@@ -774,21 +773,22 @@ def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
 
 
 # The slice language lives in slices.py: pure predicates over dicts, shared by
-# the sampler, the cut cache key and the UI labels. Re-exported here because
-# server.py and the tests reach for these off `analyze`.
+# the sampler, the cut cache key and the UI labels.
+#
+# Imported for use *in this module*, not as a public re-export surface. Anything
+# outside the package reaches the analysis layer through capture/analysis_port.py;
+# anything that wants the slice vocabulary itself imports capture.analyze.slices
+# directly. Names nothing here uses were dropped rather than carried — a re-export
+# with no consumer is a dependency the next reader has to disprove.
 from .slices import (  # noqa: E402
     DEVICE_VALUES,
-    META_SOURCES,
-    MOBILE_MAX_WIDTH,
     OUTCOME_LABELS,
     OUTCOME_VALUES,
     device_class,
-    is_meta_attribution,
     normalize_slice,
     outcome_class,
     page_path,
     row_matches_slice,
-    slice_is_empty,
     slice_label,
 )
 
@@ -938,16 +938,9 @@ def _given_facts(spec: dict, n: int) -> str:
 
 # Measured splits live in stats.py: the model invents shares when asked to
 # count, so the numbers in the cut prompt are computed in Python and handed
-# over as exact. Re-exported here for server.py and the tests.
-from .stats import (  # noqa: E402
-    CROSS_TAB_DIMENSIONS,
-    CROSS_TAB_MIN_CELL,
-    CROSS_TAB_MIN_COVERAGE,
-    CROSS_TAB_MIN_LIFT_PTS,
-    CROSS_TAB_PAIRS,
-    cross_tab_block,
-    cross_tab_cells,
-)
+# over as exact. Only what cut_context() calls is imported; the gates and the
+# cell builder are stats.py's own business, and tests reach them there.
+from .stats import cross_tab_block  # noqa: E402
 
 
 # Insight sections hold {observation, share, action} objects; recommendations
@@ -2987,7 +2980,7 @@ def main(argv: Optional[list] = None) -> int:
     return 1
 
 
-# --- Patch forwarding ------------------------------------------------------
+# --- The patching contract -------------------------------------------------
 #
 # The tests swap out the expensive edges of this module by assignment --
 # `analyze.run_extractor = fake`, `analyze.wait_gemini_batch = fake`,
@@ -2996,30 +2989,19 @@ def main(argv: Optional[list] = None) -> int:
 # resolves through this module's globals at call time, so rebinding the
 # attribute redirects it.
 #
-# Splitting the module breaks that silently. `from .models import call_gemini`
-# copies the value into the submodule's globals at import, so a later
-# `analyze.call_gemini = fake` rebinds only the re-export while the pipeline
-# keeps calling the real one -- a real network call from a test suite that
-# still passes, because the assertions are about cohort state rather than
-# about which function ran.
+# Moving a function into a submodule breaks that silently unless the call site
+# goes through the module object. `from .models import call_gemini` copies the
+# value into this module's globals at import, so a later
+# `analyze.call_gemini = fake` rebinds only the copy while the pipeline keeps
+# calling the real one -- a real, billed API call from a test suite that still
+# passes, because the assertions are about cohort state rather than about which
+# function ran.
 #
-# So assignment to this module forwards to whichever submodule defines the
-# name. Owners are discovered from `vars()` rather than listed here: a
-# hand-maintained map is the mechanism that rots the first time a function
-# moves between submodules (cf. ATTRIBUTION_PARAMS' "change both together"
-# comment, which is a comment and not a mechanism).
-_FORWARD_TO = (slices, stats, prompts)
-
-
-class _ForwardingModule(sys.modules[__name__].__class__):
-    def __setattr__(self, name, value):
-        for submodule in _FORWARD_TO:
-            if name in vars(submodule):
-                setattr(submodule, name, value)
-        super().__setattr__(name, value)
-
-
-sys.modules[__name__].__class__ = _ForwardingModule
+# So the rule for anything a test patches is: import the *module* and call
+# `models.call_gemini(...)`, never `from .models import call_gemini`.
+# `tests/test_patch_contract.py` enforces it by walking the AST, which is what
+# a metaclass used to do at runtime -- see docs/deep-dive/07-patch-forwarding.md
+# for why that mechanism existed and why an import-time check replaced it.
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pgfixture
 
 from capture import analyze
+from capture.analyze import slices
 
 
 def row(sid, outcome="rest", device=None, page=None, **attrs):
@@ -40,7 +41,7 @@ class TestOutcomeAndDeviceClass(unittest.TestCase):
         self.assertEqual(analyze.outcome_class(None), "rest")
 
     def test_device_splits_on_the_shared_threshold(self):
-        edge = analyze.MOBILE_MAX_WIDTH
+        edge = slices.MOBILE_MAX_WIDTH
         self.assertEqual(analyze.device_class({"width": edge - 1}), "mobile")
         self.assertEqual(analyze.device_class({"width": edge}), "desktop")
         self.assertIsNone(analyze.device_class({"width": 0}))
