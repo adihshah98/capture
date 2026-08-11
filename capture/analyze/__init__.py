@@ -24,6 +24,7 @@ import shutil
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -648,24 +649,7 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
 
     selection = cohort.get("selection")
     if not selection:
-        selection = cohort_selection_text(
-            int(cohort.get("purchased_n") or 0),
-            int(cohort.get("all_n") or 0),
-            any_n=int(cohort.get("any_n") or 0),
-            a_n=int(cohort.get("a_n") or 0),
-            b_n=int(cohort.get("b_n") or 0),
-            min_duration_ms=int(
-                cohort.get("min_duration_ms")
-                if cohort.get("min_duration_ms") is not None
-                else COHORT_MIN_DURATION_MS
-            ),
-            url_contains=str(cohort.get("url_contains") or ""),
-            slice_spec=cohort.get("slice"),
-            slice_b=cohort.get("slice_b"),
-            start_ms=cohort.get("start_ms"),
-            end_ms=cohort.get("end_ms"),
-            order=str(cohort.get("order") or COHORT_ORDER_LATEST),
-        )
+        selection = cohort_selection_text(spec.CohortSpec.from_cohort(cohort))
 
     return {
         **cohort,
@@ -1181,89 +1165,48 @@ from .labels import (  # noqa: E402
 def build_cohort(
     conn: sqlite3.Connection,
     pool_key: str,
-    purchased_n: int = COHORT_DEFAULT_PURCHASED_N,
-    all_n: int = COHORT_DEFAULT_ALL_N,
+    selection: spec.CohortSpec,
     *,
-    any_n: int = 0,
-    a_n: int = 0,
-    b_n: int = 0,
-    min_duration_ms: int = COHORT_MIN_DURATION_MS,
-    url_contains: str = COHORT_URL_CONTAINS,
-    slice_spec: Optional[dict] = None,
-    slice_b: Optional[dict] = None,
-    start_ms: Optional[int] = None,
-    end_ms: Optional[int] = None,
-    order: str = COHORT_ORDER_LATEST,
     label: Optional[str] = None,
 ) -> dict:
+    """Sample a cohort and record how it was sampled.
+
+    The returned dict is the cohort as it goes to storage: its membership, plus
+    every field of the selection rule, because a cohort is immutable once
+    sampled and the rule is the only record of what it represents.
+    """
     now = int(time.time() * 1000)
-    spec = normalize_slice(slice_spec)
-    spec_b = normalize_slice(slice_b)
-    sort = order if order in COHORT_ORDERS else COHORT_ORDER_LATEST
-    sessions = sample_cohort_rows(
-        conn,
-        pool_key,
-        purchased_n,
-        all_n,
-        any_n=any_n,
-        a_n=a_n,
-        b_n=b_n,
-        min_duration_ms=min_duration_ms,
-        url_contains=url_contains,
-        slice_spec=spec,
-        slice_b=spec_b,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        order=sort,
+    selection = replace(
+        selection.normalised(),
+        slice_spec=normalize_slice(selection.slice_spec),
+        slice_b=normalize_slice(selection.slice_b),
     )
+    sessions = sample_cohort_rows(conn, pool_key, selection)
     stamp = time.strftime("%b %-d, %-I:%M %p", time.localtime(now / 1000))
-    selection = cohort_selection_text(
-        purchased_n,
-        all_n,
-        any_n=any_n,
-        a_n=a_n,
-        b_n=b_n,
-        min_duration_ms=min_duration_ms,
-        url_contains=url_contains,
-        slice_spec=spec,
-        slice_b=spec_b,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        order=sort,
-    )
-    auto_label = _auto_cohort_label(
-        stamp=stamp,
-        purchased_n=purchased_n,
-        all_n=all_n,
-        any_n=any_n,
-        a_n=a_n,
-        b_n=b_n,
-        url_contains=url_contains,
-        spec=spec,
-        spec_b=spec_b,
-    )
-    chosen = clean_cohort_label(label) or auto_label
+    chosen = clean_cohort_label(label) or _auto_cohort_label(selection, stamp=stamp)
     return {
         "id": f"cohort-{now}",
         # Chosen name, or auto label when none was provided.
         "label": chosen,
-        "selection": selection,
+        "selection": cohort_selection_text(selection),
         "created_at": now,
         "updated_at": now,
         # Sampled only — analysis starts via POST .../analyze.
         "status": "idle",
-        "purchased_n": int(purchased_n) if any_n <= 0 and a_n <= 0 else 0,
-        "all_n": int(all_n) if any_n <= 0 and a_n <= 0 else 0,
-        "any_n": int(any_n),
-        "a_n": int(a_n),
-        "b_n": int(b_n),
-        "min_duration_ms": int(min_duration_ms),
-        "url_contains": (url_contains or "").strip(),
-        "start_ms": int(start_ms) if start_ms is not None else None,
-        "end_ms": int(end_ms) if end_ms is not None else None,
-        "order": sort,
-        "slice": spec,
-        "slice_b": spec_b if b_n > 0 else {},
+        # The legacy arms are only meaningful in their own mode; recording them
+        # alongside any_n/a_n would make the stored rule ambiguous.
+        "purchased_n": selection.purchased_n if selection.total == selection.purchased_n + selection.all_n else 0,
+        "all_n": selection.all_n if selection.total == selection.purchased_n + selection.all_n else 0,
+        "any_n": selection.any_n,
+        "a_n": selection.a_n,
+        "b_n": selection.b_n,
+        "min_duration_ms": selection.min_duration_ms,
+        "url_contains": (selection.url_contains or "").strip(),
+        "start_ms": selection.start_ms,
+        "end_ms": selection.end_ms,
+        "order": selection.order,
+        "slice": selection.slice_spec,
+        "slice_b": selection.slice_b if selection.b_n > 0 else {},
         "sessions": sessions,
     }
 

@@ -28,6 +28,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from . import analyze, paths
+from .analyze.spec import CohortSpec as _CohortSpec
 from .projects import Project
 
 # Read at import by Query() defaults in the cohort routes. Not monkeypatched.
@@ -41,6 +42,11 @@ MIN_DURATION_MS = analyze.COHORT_MIN_DURATION_MS
 URL_CONTAINS = analyze.COHORT_URL_CONTAINS
 ORDER_LATEST = analyze.COHORT_ORDER_LATEST
 ORDERS = analyze.COHORT_ORDERS
+
+# The selection rule as a value the web layer can build and hand back. Exported
+# here rather than imported from the package directly, so the port stays the one
+# door in: test_analysis_port enforces that.
+CohortSpec = _CohortSpec
 
 OUTCOME_VALUES = analyze.OUTCOME_VALUES
 DEVICE_VALUES = analyze.DEVICE_VALUES
@@ -154,10 +160,10 @@ def mark_paused(project: Project, cohort: dict) -> dict:
     return analyze.mark_cohort_paused(project.pool, cohort)
 
 
-def build_cohort(conn, project: Project, **kwargs) -> dict:
+def build_cohort(conn, project: Project, selection: CohortSpec, *, label=None) -> dict:
     """Sample a cohort out of the session index. Takes the caller's connection
     because the sampling runs inside the request's transaction."""
-    return analyze.build_cohort(conn, project.id, **kwargs)
+    return analyze.build_cohort(conn, project.id, selection, label=label)
 
 
 def pool_facets(conn, project: Project, *, min_duration_ms: int = 0) -> dict:

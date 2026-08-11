@@ -4,6 +4,8 @@ import json
 import sqlite3
 import unittest
 
+from capture.analyze.spec import CohortSpec
+
 
 class TestCohortSampling(unittest.TestCase):
     def _conn(self, rows):
@@ -100,7 +102,7 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = analyze.sample_cohort_rows(conn, "", purchased_n=1, all_n=1)
+        sampled = analyze.sample_cohort_rows(conn, "", CohortSpec(purchased_n=1, all_n=1, url_contains=""))
         self.assertEqual(
             [(s["session_id"], s["filter"]) for s in sampled],
             [("newbuy" + "x" * 26, "purchased"), ("newall" + "x" * 26, "all")],
@@ -171,7 +173,7 @@ class TestCohortSampling(unittest.TestCase):
         # global default. It used to default to one customer's landing page,
         # which silently scoped every cohort sampled without an override.
         sampled = analyze.sample_cohort_rows(
-            conn, "", purchased_n=5, all_n=5, url_contains="/pages/ashwamag-01"
+            conn, "", CohortSpec(purchased_n=5, all_n=5, url_contains="/pages/ashwamag-01")
         )
         self.assertEqual(
             {(s["session_id"], s["filter"]) for s in sampled},
@@ -200,7 +202,7 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = analyze.sample_cohort_rows(conn, "", purchased_n=1, all_n=0)
+        sampled = analyze.sample_cohort_rows(conn, "", CohortSpec(purchased_n=1, all_n=0, url_contains=""))
         self.assertEqual([s["session_id"] for s in sampled], ["onbrand" + "x" * 25])
 
     def test_sample_any_mixes_outcomes_up_to_limit(self):
@@ -250,7 +252,7 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = analyze.sample_cohort_rows(conn, "", purchased_n=0, all_n=0, any_n=2)
+        sampled = analyze.sample_cohort_rows(conn, "", CohortSpec(any_n=2, url_contains=""))
         self.assertEqual(
             [(s["session_id"], s["filter"]) for s in sampled],
             [("buy1" + "x" * 28, "purchased"), ("rest1" + "x" * 27, "all")],
@@ -306,11 +308,15 @@ class TestCohortSampling(unittest.TestCase):
         sampled = analyze.sample_cohort_rows(
             conn,
             "",
-            purchased_n=0,
-            all_n=0,
-            any_n=5,
-            url_contains="",
-            slice_spec={"device": ["mobile"], "utm_source": "google", "page": "/pages/ashwamag-01"},
+            CohortSpec(
+                any_n=5,
+                url_contains="",
+                slice_spec={
+                    "device": ["mobile"],
+                    "utm_source": "google",
+                    "page": "/pages/ashwamag-01",
+                },
+            ),
         )
         self.assertEqual(
             [s["session_id"] for s in sampled],
@@ -367,13 +373,13 @@ class TestCohortSampling(unittest.TestCase):
         sampled = analyze.sample_cohort_rows(
             conn,
             "",
-            purchased_n=0,
-            all_n=0,
-            a_n=1,
-            b_n=1,
-            url_contains="",
-            slice_spec={"outcome": ["purchased"], "page": "/pages/ashwamag-01"},
-            slice_b={"outcome": ["checkout", "rest"], "page": "/pages/ashwamag-01"},
+            CohortSpec(
+                a_n=1,
+                b_n=1,
+                url_contains="",
+                slice_spec={"outcome": ["purchased"], "page": "/pages/ashwamag-01"},
+                slice_b={"outcome": ["checkout", "rest"], "page": "/pages/ashwamag-01"},
+            ),
         )
         self.assertEqual(
             [(s["session_id"], s["filter"]) for s in sampled],
@@ -430,23 +436,14 @@ class TestCohortSampling(unittest.TestCase):
         windowed = analyze.sample_cohort_rows(
             conn,
             "",
-            purchased_n=0,
-            all_n=0,
-            any_n=5,
-            url_contains="",
-            start_ms=15_000,
-            end_ms=25_000,
+            CohortSpec(any_n=5, url_contains="", start_ms=15_000, end_ms=25_000),
         )
         self.assertEqual([s["session_id"] for s in windowed], ["mid" + "x" * 29])
 
         earliest = analyze.sample_cohort_rows(
             conn,
             "",
-            purchased_n=0,
-            all_n=0,
-            any_n=2,
-            url_contains="",
-            order=analyze.COHORT_ORDER_EARLIEST,
+            CohortSpec(any_n=2, url_contains="", order=analyze.COHORT_ORDER_EARLIEST),
         )
         self.assertEqual(
             [s["session_id"] for s in earliest],

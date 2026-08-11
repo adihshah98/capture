@@ -27,6 +27,7 @@ import sqlite3
 from typing import List, Optional, Tuple
 
 from . import spec as cohort_spec
+from .spec import CohortSpec
 from .slices import (
     DEVICE_VALUES,
     OUTCOME_LABELS,
@@ -266,84 +267,61 @@ def _sample_matching_rows(
     return out
 
 
-def sample_cohort_rows(
-    conn: sqlite3.Connection,
-    pool: str,
-    purchased_n: int,
-    all_n: int,
-    *,
-    any_n: int = 0,
-    a_n: int = 0,
-    b_n: int = 0,
-    min_duration_ms: int = cohort_spec.MIN_DURATION_MS,
-    url_contains: str = cohort_spec.URL_CONTAINS,
-    slice_spec: Optional[dict] = None,
-    slice_b: Optional[dict] = None,
-    start_ms: Optional[int] = None,
-    end_ms: Optional[int] = None,
-    order: str = cohort_spec.ORDER_LATEST,
-) -> list:
-    """Sessions that match the filters and optional cut-style slice.
+def sample_cohort_rows(conn: sqlite3.Connection, pool: str, spec: CohortSpec) -> list:
+    """Sessions matching a selection rule, in the mode the spec asks for.
 
-    Preferred: `a_n` (+ optional `b_n`) with independent slices for groups A/B.
-    Legacy: `any_n` for one mixed pool, or `purchased_n` + `all_n` for a
-    purchase vs non-purchase split (still tagged purchased/all).
-
-    `order` is latest (default) or earliest by `last_seen`. Optional `start_ms` /
-    `end_ms` bound that same clock. Prefers sessions with more clicks when
-    timestamps tie.
+    `spec.order` is latest (default) or earliest by `last_seen`; `start_ms` /
+    `end_ms` bound that same clock. Sessions with more clicks win a tie.
     """
-    sort = order if order in cohort_spec.ORDERS else cohort_spec.ORDER_LATEST
-    sample_kw = dict(
-        min_duration_ms=min_duration_ms,
-        url_contains=url_contains,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        order=sort,
+    spec = spec.normalised()
+    base = dict(
+        min_duration_ms=spec.min_duration_ms,
+        url_contains=spec.url_contains,
+        start_ms=spec.start_ms,
+        end_ms=spec.end_ms,
+        order=spec.order,
     )
-    if a_n > 0 or b_n > 0:
+
+    if spec.uses_groups:
         sessions = _sample_matching_rows(
-            conn,
-            pool,
-            a_n,
-            slice_spec=slice_spec,
-            tag="a",
-            **sample_kw,
+            conn, pool, spec.a_n, slice_spec=spec.slice_spec, tag="a", **base
         )
-        if b_n > 0:
+        if spec.b_n > 0:
             sessions.extend(
                 _sample_matching_rows(
                     conn,
                     pool,
-                    b_n,
-                    slice_spec=slice_b if slice_b is not None else slice_spec,
+                    spec.b_n,
+                    # An unset B slice means "same filter as A", not "no filter".
+                    slice_spec=spec.slice_b or spec.slice_spec,
                     exclude_ids={s["session_id"] for s in sessions},
                     tag="b",
-                    **sample_kw,
+                    **base,
                 )
             )
         return sessions
 
-    spec = normalize_slice(slice_spec)
-    filter_spec = dict(spec)
-    if any_n <= 0:
+    filter_spec = dict(normalize_slice(spec.slice_spec))
+    if spec.any_n <= 0:
+        # The purchased/all arms own the outcome split, so a slice must not
+        # constrain it as well.
         filter_spec.pop("outcome", None)
 
-    needed = any_n if any_n > 0 else purchased_n + all_n
+    needed = spec.total
     candidate_limit = min(
         cohort_spec.CANDIDATE_CAP,
         max(needed * 20, needed + 200, 500),
     )
-    path_needle = "" if filter_spec.get("page") else url_contains
     candidates = _sample_candidates(
         conn,
         pool,
-        min_duration_ms=min_duration_ms,
-        url_contains=path_needle,
+        min_duration_ms=spec.min_duration_ms,
+        # An explicit page filter supersedes the URL substring.
+        url_contains="" if filter_spec.get("page") else spec.url_contains,
         limit=candidate_limit,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        order=sort,
+        start_ms=spec.start_ms,
+        end_ms=spec.end_ms,
+        order=spec.order,
     )
     matched = [row for row in candidates if row_matches_slice(row, filter_spec)]
 
@@ -354,18 +332,18 @@ def sample_cohort_rows(
             "status": "queued",
         }
 
-    if any_n > 0:
-        return [_entry(row) for row in matched[:any_n]]
+    if spec.any_n > 0:
+        return [_entry(row) for row in matched[: spec.any_n]]
 
     purchased = []
     non_purchase = []
     for row in matched:
         if row.get("bought"):
-            if len(purchased) < purchased_n:
+            if len(purchased) < spec.purchased_n:
                 purchased.append(_entry(row))
-        elif len(non_purchase) < all_n:
+        elif len(non_purchase) < spec.all_n:
             non_purchase.append(_entry(row))
-        if len(purchased) >= purchased_n and len(non_purchase) >= all_n:
+        if len(purchased) >= spec.purchased_n and len(non_purchase) >= spec.all_n:
             break
     return purchased + non_purchase
 

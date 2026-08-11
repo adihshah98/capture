@@ -135,6 +135,17 @@ def get_pool_facets(
         return ap.pool_facets(conn, found, min_duration_ms=min_duration_ms)
 
 
+def _sample_cohort(found: projects.Project, selection: ap.CohortSpec, label: str) -> dict:
+    """Sample a cohort, synchronously. Called via asyncio.to_thread.
+
+    Every step here blocks: the pool checkout waits up to CAPTURE_DB_WAIT_S, and
+    the sampling query sorts over the candidate window before any of it reaches
+    Python.
+    """
+    with compat.cohort_connection(found.id) as conn:
+        return ap.build_cohort(conn, found, selection, label=label or None)
+
+
 @router.post("/api/cohorts")
 async def create_cohort(
     found: projects.Project = Depends(readable_project),
@@ -241,24 +252,24 @@ async def create_cohort(
     if total > ap.MAX_SESSIONS:
         raise ApiError(400, f"cohort size capped at {ap.MAX_SESSIONS} sessions")
 
-    with compat.cohort_connection(found.id) as conn:
-        cohort = ap.build_cohort(
-            conn,
-            found,
-            purchased_n=purchased_n,
-            all_n=all_count,
-            any_n=any_count,
-            a_n=a_n if use_groups else 0,
-            b_n=b_n if use_groups else 0,
-            min_duration_ms=min_duration_ms,
-            url_contains=url_contains,
-            slice_spec=slice_a,
-            slice_b=slice_b if use_groups and b_n > 0 else None,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            order=sort,
-            label=chosen_label or None,
-        )
+    selection = ap.CohortSpec(
+        purchased_n=purchased_n,
+        all_n=all_count,
+        any_n=any_count,
+        a_n=a_n if use_groups else 0,
+        b_n=b_n if use_groups else 0,
+        min_duration_ms=min_duration_ms,
+        url_contains=url_contains,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        order=sort,
+        slice_spec=slice_a,
+        slice_b=slice_b if use_groups and b_n > 0 else {},
+    )
+    # Off the event loop: this is a pooled psycopg checkout (up to
+    # CAPTURE_DB_WAIT_S) plus a sorted scan, and running it inline stalls every
+    # other request the worker is serving.
+    cohort = await asyncio.to_thread(_sample_cohort, found, selection, chosen_label)
 
     if not cohort["sessions"]:
         raise ApiError(400, "no sessions matched the sample filters")

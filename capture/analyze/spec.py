@@ -15,6 +15,8 @@ the label writer and the port can all depend on it without a cycle.
 """
 
 import os
+from dataclasses import dataclass, field, replace
+from typing import Optional
 
 # The insights cohort's defaults. A cohort sampled without arguments is the
 # latest 50 purchased plus 50 non-purchase sessions, at least five seconds long.
@@ -57,3 +59,97 @@ def clean_order(order: str) -> str:
     repeating `order if order in ORDERS else ORDER_LATEST` inline.
     """
     return order if order in ORDERS else ORDER_LATEST
+
+
+@dataclass(frozen=True)
+class CohortSpec:
+    """How a cohort was selected: everything except which sessions came back.
+
+    One object instead of the twelve keyword arguments that were re-typed at
+    every layer -- build_cohort took fifteen parameters, sample_cohort_rows
+    fourteen, and the web layer declared them a third time as Query() objects.
+    Adding a sampling dimension meant editing seven signatures and getting the
+    defaults right in each.
+
+    Frozen because a cohort's selection rule is a fact about a cohort that has
+    already been sampled: `build_cohort` records it, and every later read --
+    the selection sentence, the auto label, a resample -- is describing what was
+    already decided. Use `replace(spec, ...)` for a variant.
+
+    Three sampling modes, and they are mutually exclusive:
+
+      * **groups** -- `a_n` (+ optional `b_n`) with independent slices. The one
+        to prefer; `slice_b` is what makes an A/B cut possible.
+      * **any** -- `any_n` sessions from one mixed pool.
+      * **legacy split** -- `purchased_n` + `all_n`, a purchase vs non-purchase
+        split that predates the slice language. Still tagged purchased/all, and
+        the arms own the outcome split, so a slice's `outcome` is dropped.
+
+    The field names match the keys `store.py` persists in the cohort's `fields`
+    JSON column, so `asdict()` round-trips through storage without a mapping.
+    """
+
+    # Legacy purchase-split arms.
+    purchased_n: int = 0
+    all_n: int = 0
+    # One mixed pool.
+    any_n: int = 0
+    # Independent groups.
+    a_n: int = 0
+    b_n: int = 0
+
+    # Base gates, applied in SQL for every mode.
+    min_duration_ms: int = MIN_DURATION_MS
+    url_contains: str = URL_CONTAINS
+    start_ms: Optional[int] = None
+    end_ms: Optional[int] = None
+    order: str = ORDER_LATEST
+
+    # Cut-style slices, already normalised by slices.normalize_slice.
+    slice_spec: dict = field(default_factory=dict)
+    slice_b: dict = field(default_factory=dict)
+
+    @property
+    def uses_groups(self) -> bool:
+        return self.a_n > 0 or self.b_n > 0
+
+    @property
+    def total(self) -> int:
+        """How many sessions this spec asks for, whichever mode it is in."""
+        if self.uses_groups:
+            return self.a_n + self.b_n
+        if self.any_n > 0:
+            return self.any_n
+        return self.purchased_n + self.all_n
+
+    def normalised(self) -> "CohortSpec":
+        """A copy with the sort coerced to a known value.
+
+        `order` arrives from a query string, so every consumer was repeating the
+        same fallback. Done once, here, rather than at each layer.
+        """
+        return replace(self, order=clean_order(self.order))
+
+    @classmethod
+    def from_cohort(cls, cohort: dict) -> "CohortSpec":
+        """Recover the selection rule from a stored cohort.
+
+        `build_cohort` writes each field as its own key, so this is the inverse.
+        A cohort written before a field existed simply gets its default, which is
+        why every one of them has one.
+        """
+        min_duration = cohort.get("min_duration_ms")
+        return cls(
+            purchased_n=int(cohort.get("purchased_n") or 0),
+            all_n=int(cohort.get("all_n") or 0),
+            any_n=int(cohort.get("any_n") or 0),
+            a_n=int(cohort.get("a_n") or 0),
+            b_n=int(cohort.get("b_n") or 0),
+            min_duration_ms=int(min_duration if min_duration is not None else MIN_DURATION_MS),
+            url_contains=str(cohort.get("url_contains") or ""),
+            start_ms=cohort.get("start_ms"),
+            end_ms=cohort.get("end_ms"),
+            order=str(cohort.get("order") or ORDER_LATEST),
+            slice_spec=cohort.get("slice") or {},
+            slice_b=cohort.get("slice_b") or {},
+        )

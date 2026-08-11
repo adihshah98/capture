@@ -19,6 +19,7 @@ import time
 from typing import Optional
 
 from . import spec as cohort_spec
+from .spec import CohortSpec
 from .slices import OUTCOME_LABELS, normalize_slice, slice_label
 
 def _slice_scope_text(spec: dict, url_contains: str) -> str:
@@ -49,29 +50,18 @@ def _time_window_text(start_ms: Optional[int], end_ms: Optional[int]) -> str:
     return f" before {_format_cohort_clock(end_ms)}"
 
 
-def cohort_selection_text(
-    purchased_n: int,
-    all_n: int,
-    *,
-    any_n: int = 0,
-    a_n: int = 0,
-    b_n: int = 0,
-    min_duration_ms: int = cohort_spec.MIN_DURATION_MS,
-    url_contains: str = cohort_spec.URL_CONTAINS,
-    slice_spec: Optional[dict] = None,
-    slice_b: Optional[dict] = None,
-    start_ms: Optional[int] = None,
-    end_ms: Optional[int] = None,
-    order: str = cohort_spec.ORDER_LATEST,
-) -> str:
+def cohort_selection_text(selection: CohortSpec) -> str:
     """Human-readable sampling rule for the Insights UI."""
-    spec = normalize_slice(slice_spec)
-    spec_b = normalize_slice(slice_b)
-    min_s = max(0, int(min_duration_ms)) / 1000
+    selection = selection.normalised()
+    purchased_n, all_n = selection.purchased_n, selection.all_n
+    any_n, a_n, b_n = selection.any_n, selection.a_n, selection.b_n
+    url_contains = selection.url_contains
+    spec = normalize_slice(selection.slice_spec)
+    spec_b = normalize_slice(selection.slice_b)
+    min_s = max(0, int(selection.min_duration_ms)) / 1000
     min_label = f"{min_s:g}s" if min_s != int(min_s) else f"{int(min_s)}s"
-    sort = order if order in cohort_spec.ORDERS else cohort_spec.ORDER_LATEST
-    rank = "latest" if sort == cohort_spec.ORDER_LATEST else "earliest"
-    window = _time_window_text(start_ms, end_ms)
+    rank = "latest" if selection.order == cohort_spec.ORDER_LATEST else "earliest"
+    window = _time_window_text(selection.start_ms, selection.end_ms)
 
     if a_n > 0 or b_n > 0:
         a_scope = _slice_scope_text(spec, url_contains)
@@ -126,19 +116,13 @@ def _slice_label_bits(spec: Optional[dict], url_contains: str = "") -> list:
     return bits
 
 
-def _auto_cohort_label(
-    *,
-    stamp: str,
-    purchased_n: int,
-    all_n: int,
-    any_n: int,
-    a_n: int,
-    b_n: int,
-    url_contains: str,
-    spec: dict,
-    spec_b: dict,
-) -> str:
+def _auto_cohort_label(selection: CohortSpec, *, stamp: str) -> str:
     """Date/time first, then whatever filters were set."""
+    purchased_n, all_n = selection.purchased_n, selection.all_n
+    any_n, a_n, b_n = selection.any_n, selection.a_n, selection.b_n
+    url_contains = selection.url_contains
+    spec = normalize_slice(selection.slice_spec)
+    spec_b = normalize_slice(selection.slice_b)
     parts = [stamp]
     if a_n > 0 or b_n > 0:
         a_bits = _slice_label_bits(spec, url_contains)
