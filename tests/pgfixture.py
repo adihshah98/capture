@@ -209,6 +209,27 @@ def seed_session(admin_url: str, token: str, session_id: str, **cols) -> None:
         )
 
 
+READONLY_ROLE = "capture_readonly"
+
+
+def seed_readonly_role(admin_url: str) -> str:
+    """SELECT-only role for a mirror. Mirrors the production grant exactly."""
+    with psycopg.connect(admin_url, autocommit=True) as conn:
+        if not conn.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = %s", (READONLY_ROLE,)
+        ).fetchone():
+            conn.execute(
+                f"CREATE ROLE {READONLY_ROLE} LOGIN PASSWORD '{READONLY_ROLE}'"
+                " NOSUPERUSER NOBYPASSRLS"
+            )
+        db_name = admin_url.partition("?")[0].rsplit("/", 1)[1]
+        conn.execute(f'GRANT CONNECT ON DATABASE "{db_name}" TO {READONLY_ROLE}')
+        for schema in ("public", "compat"):
+            conn.execute(f"GRANT USAGE ON SCHEMA {schema} TO {READONLY_ROLE}")
+            conn.execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {READONLY_ROLE}")
+    return _with_role(admin_url, READONLY_ROLE, READONLY_ROLE)
+
+
 def _swap_database(url: str, name: str) -> str:
     head, _, query = url.partition("?")
     base = head.rsplit("/", 1)[0]

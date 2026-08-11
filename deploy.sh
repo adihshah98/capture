@@ -101,7 +101,9 @@ fi
 # are additive per phase, so the old build keeps working if this deploy fails.
 if grep -q CAPTURE_DATABASE_URL /etc/capture.env 2>/dev/null; then
   set -a; . /etc/capture.env; set +a
-  if ! .venv/bin/python db.py; then
+  if [ "${CAPTURE_READ_ONLY:-}" = "1" ]; then
+    echo "read-only server — skipping migrations, it does not own this schema"
+  elif ! .venv/bin/python db.py; then
     echo "migrations failed — not restarting" >&2
     exit 1
   fi

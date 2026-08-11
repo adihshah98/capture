@@ -134,6 +134,37 @@ class TestValidProjectsRoutesByToken(ServerCase):
         self.assertEqual(self.ingest("i" * 32, token="cap_bogus"), 401)
 
 
+class TestReadOnlyServer(ServerCase):
+    """A staging mirror pointed at production. Reads work; nothing else does."""
+
+    env = {"CAPTURE_READ_ONLY": "1", "RETENTION_DAYS": "0"}
+
+    def test_ingest_is_refused_without_touching_the_database(self):
+        self.assertEqual(self.ingest("r" * 32), 403)
+
+    def test_order_is_refused(self):
+        body = json.dumps({"event": "checkout_completed"}).encode()
+        status = request(
+            f"{self.base}/order?session_id={'r' * 32}", method="POST", data=body
+        )[0]
+        self.assertEqual(status, 403)
+
+    def test_nothing_is_written_to_disk(self):
+        self.ingest("s" * 32)
+        pool = self.data_dir / "sessions"
+        self.assertEqual(list(pool.iterdir()) if pool.is_dir() else [], [])
+
+    def test_reads_still_work(self):
+        status, body = request(f"{self.base}/api/sessions")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["total"], 0)
+
+    def test_healthz_reports_read_only_without_going_degraded(self):
+        status, body = request(f"{self.base}/healthz")
+        self.assertEqual(status, 200)
+        self.assertIs(json.loads(body)["checks"]["read_only"], True)
+
+
 class TestConcurrentReaderNeverSeesPartialChunk(ServerCase):
     """A truncating write publishes the file at open() and fills it afterwards, so
     anything listing the directory can read a half-written chunk — which is exactly

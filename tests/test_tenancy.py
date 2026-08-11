@@ -133,5 +133,65 @@ class TestSchemaShape(TenancyCase):
             self.assertEqual(self.all_sessions(conn), ["alpha-1", "alpha-2"])
 
 
+@unittest.skipUnless(pgfixture.available(), pgfixture.UNAVAILABLE)
+class TestReadOnlyRole(unittest.TestCase):
+    """A staging mirror reading production. The role must be able to read every
+    project it is scoped to and change nothing."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.admin_url, cls.app_url = pgfixture.fresh_database()
+        cls.project = pgfixture.seed_default_project(cls.admin_url)
+        with psycopg.connect(cls.admin_url, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO sessions (project_id, session_id, first_seen, last_seen)"
+                " VALUES (%s, 'live-one', 1, 2)",
+                (cls.project,),
+            )
+        cls.ro_url = pgfixture.seed_readonly_role(cls.admin_url)
+
+    def scoped(self):
+        conn = psycopg.connect(self.ro_url)
+        conn.execute("SELECT set_config('app.project_id', %s, false)", (self.project,))
+        return conn
+
+    def test_it_can_read(self):
+        with self.scoped() as conn:
+            rows = conn.execute("SELECT session_id FROM sessions").fetchall()
+        self.assertEqual(rows, [("live-one",)])
+
+    def test_it_can_read_through_the_compat_view(self):
+        with self.scoped() as conn:
+            conn.execute("SET search_path = compat, public")
+            rows = conn.execute("SELECT session_id FROM sessions").fetchall()
+        self.assertEqual(rows, [("live-one",)])
+
+    def test_it_cannot_insert(self):
+        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+            with self.scoped() as conn:
+                conn.execute(
+                    "INSERT INTO sessions (project_id, session_id, first_seen, last_seen)"
+                    " VALUES (%s, 'sneaky', 1, 2)",
+                    (self.project,),
+                )
+
+    def test_it_cannot_delete_production_rows(self):
+        """The retention sweep is the realistic path to this happening."""
+        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+            with self.scoped() as conn:
+                conn.execute("DELETE FROM sessions WHERE session_id = 'live-one'")
+        with psycopg.connect(self.admin_url) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM sessions").fetchone()[0], 1)
+
+    def test_it_cannot_update(self):
+        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+            with self.scoped() as conn:
+                conn.execute("UPDATE sessions SET bytes = 999")
+
+    def test_it_is_still_bound_by_row_level_security(self):
+        with psycopg.connect(self.ro_url) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM sessions").fetchone()[0], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

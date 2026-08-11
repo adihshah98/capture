@@ -65,6 +65,12 @@ async def lifespan(_app):
             "return 503 until it is"
         )
 
+    if READ_ONLY:
+        print(
+            "CAPTURE_READ_ONLY=1 — recording is refused and retention is disabled; "
+            "this server only reads the database it is pointed at"
+        )
+
     async def loop():
         while True:
             removed = await asyncio.to_thread(sweep_expired_sessions)
@@ -72,7 +78,7 @@ async def lifespan(_app):
                 print(f"retention: removed {removed} expired session(s)")
             await asyncio.sleep(24 * 3600)
 
-    task = asyncio.create_task(loop())
+    task = None if READ_ONLY else asyncio.create_task(loop())
     # Cohorts mid-Batch lose their asyncio task on restart — pick them back up.
     for pool, cohort in analyze.cohorts_needing_batch_resume(DATA_ROOT):
         key = _cohort_key(pool, cohort["id"])
@@ -84,7 +90,8 @@ async def lifespan(_app):
     try:
         yield
     finally:
-        task.cancel()
+        if task is not None:
+            task.cancel()
         await _stop_background_jobs()
         await asyncio.to_thread(db.close_pool)
 
@@ -238,6 +245,12 @@ MIN_FREE_DISK_BYTES = int(os.environ.get("MIN_FREE_DISK_BYTES", 1024**3))
 
 RETENTION_DAYS = float(os.environ.get("RETENTION_DAYS", "30"))
 
+# A mirror pointed at someone else's database — staging reading production.
+# Recording and retention are refused outright rather than left to fail on a
+# permission error: the sweep would otherwise try to DELETE rows it can see but
+# does not own, which is production data one careless GRANT away from deletion.
+READ_ONLY = os.environ.get("CAPTURE_READ_ONLY") == "1"
+
 def gunzip(body: bytes, limit: int) -> bytes:
 
     stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
@@ -304,6 +317,8 @@ async def ingest(
     compression: Optional[str] = Query(None),
     token: Optional[str] = Query(None),
 ):
+    if READ_ONLY:
+        raise ApiError(403, "this server is read-only and does not accept recordings")
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
 
@@ -429,6 +444,8 @@ async def order_event(
     token: Optional[str] = Query(None),
 ):
 
+    if READ_ONLY:
+        raise ApiError(403, "this server is read-only and does not accept recordings")
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
     project = projects.by_token(token)
@@ -490,10 +507,13 @@ def healthz():
     checks["replay_auth_enabled"] = bool(REPLAY_PASSWORD or WORKOS_ENABLED) and not REPLAY_AUTH_DISABLED
     # Reported, not health-gating: analysis is an optional extra, and a box
     # without a key or a browser is still a perfectly healthy recorder.
+    checks["read_only"] = READ_ONLY
     checks["analysis_configured"] = analyze.ANALYSIS_ENABLED
     checks["analysis_runtime_present"] = analyze.runtime_present()
 
-    informational = ("replay_auth_enabled", "analysis_configured", "analysis_runtime_present")
+    informational = (
+        "replay_auth_enabled", "read_only", "analysis_configured", "analysis_runtime_present",
+    )
     healthy = all(v for k, v in checks.items() if k not in informational)
     return JSONResponse(
         {"status": "ok" if healthy else "degraded", "checks": checks},
