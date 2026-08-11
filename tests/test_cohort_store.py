@@ -369,6 +369,96 @@ class TestSessionDeletion(StoreCase):
         )
 
 
+class TestConcurrentMarks(StoreCase):
+    """run_cohort_job runs N coroutines that each own one session but share
+    the cohort dict. Marking through write_cohort meant every mark rewrote all
+    N rows from the writer's copy, so two marks landing together lost one."""
+
+    def cohort(self, n=4):
+        analyze.write_cohort(
+            self.pool,
+            {
+                "id": "c",
+                "created_at": 1,
+                "status": "running",
+                "sessions": [{"session_id": f"s{i}", "status": "queued"} for i in range(n)],
+            },
+        )
+        return analyze.read_cohort(self.pool, "c")
+
+    def test_marks_from_stale_copies_do_not_overwrite_each_other(self):
+        self.cohort()
+        # Two holders of the same cohort, as the pipeline's coroutines have.
+        a = analyze.read_cohort(self.pool, "c")
+        b = analyze.read_cohort(self.pool, "c")
+        analyze.mark_cohort_session(self.pool, a, a["sessions"][0], "done", analysis="analysis.json")
+        analyze.mark_cohort_session(self.pool, b, b["sessions"][1], "done", analysis="analysis.json")
+
+        got = [s["status"] for s in analyze.read_cohort(self.pool, "c")["sessions"]]
+        self.assertEqual(got, ["done", "done", "queued", "queued"])
+
+    def test_a_mark_keeps_the_callers_dict_in_step(self):
+        cohort = self.cohort()
+        entry = cohort["sessions"][0]
+        analyze.mark_cohort_session(self.pool, cohort, entry, "error", error="boom")
+        self.assertEqual(entry["status"], "error")
+        self.assertEqual(entry["error"], "boom")
+        # And clearing it on the way to done drops the error in both places.
+        analyze.mark_cohort_session(self.pool, cohort, entry, "done", analysis="analysis.json")
+        self.assertNotIn("error", entry)
+        stored = analyze.read_cohort(self.pool, "c")["sessions"][0]
+        self.assertEqual(stored["status"], "done")
+        self.assertNotIn("error", stored)
+
+    def test_a_mark_does_not_disturb_the_sampling_tag(self):
+        analyze.write_cohort(
+            self.pool,
+            {
+                "id": "c",
+                "created_at": 1,
+                "sessions": [{"session_id": "s0", "status": "queued", "filter": "purchased"}],
+            },
+        )
+        cohort = analyze.read_cohort(self.pool, "c")
+        analyze.mark_cohort_session(self.pool, cohort, cohort["sessions"][0], "done",
+                                    analysis="analysis.json")
+        self.assertEqual(analyze.read_cohort(self.pool, "c")["sessions"][0]["filter"], "purchased")
+
+    def test_marking_a_session_that_left_the_cohort_is_reported(self):
+        cohort = self.cohort()
+        conn, key = analyze.cohort_store(self.pool)
+        self.assertTrue(
+            analyze_store.update_session_status(conn, key, "c", "s0", status="done")
+        )
+        analyze.forget_session(self.pool, "s0")
+        self.assertFalse(
+            analyze_store.update_session_status(conn, key, "c", "s0", status="done"),
+            "a mark aimed at a non-member must report that it matched nothing",
+        )
+
+    def test_concurrent_marks_under_threads_all_land(self):
+        self.cohort(n=30)
+        errors = []
+
+        def mark(i):
+            try:
+                copy = analyze.read_cohort(self.pool, "c")
+                analyze.mark_cohort_session(
+                    self.pool, copy, copy["sessions"][i], "done", analysis="analysis.json"
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=mark, args=(i,)) for i in range(30)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        got = [s["status"] for s in analyze.read_cohort(self.pool, "c")["sessions"]]
+        self.assertEqual(got, ["done"] * 30)
+
+
 class TestPoolLayout(unittest.TestCase):
     """data_root_for and pool_key must agree on where a pool sits, or a cohort
     is written under one key and read under another."""

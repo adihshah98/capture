@@ -459,6 +459,47 @@ def forget_pool_cohorts(pool: Path) -> int:
     return analyze_store.forget_pool(conn, key)
 
 
+def mark_cohort_session(
+    pool: Path,
+    cohort: dict,
+    entry: dict,
+    status: str,
+    *,
+    analysis: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Record one session's status, in the cohort and in the caller's dict.
+
+    The pipeline runs N coroutines that each own one session but share the
+    cohort dict. Writing through `write_cohort` meant every mark rewrote all N
+    rows from the writer's copy, so two marks landing together silently lost
+    one — last writer wins, carrying its stale view of everyone else.
+
+    This writes the single row that changed and keeps `entry` in step for the
+    caller's own bookkeeping, which is what the surrounding code reads.
+    """
+    entry["status"] = status
+    if analysis is None:
+        entry.pop("analysis", None)
+    else:
+        entry["analysis"] = analysis
+    if error is None:
+        entry.pop("error", None)
+    else:
+        entry["error"] = error
+
+    conn, key = cohort_store(pool)
+    analyze_store.update_session_status(
+        conn,
+        key,
+        str(cohort["id"]),
+        str(entry["session_id"]),
+        status=status,
+        analysis=analysis,
+        error=error,
+    )
+
+
 class CohortState:
     """The statuses a cohort can hold. Exactly the six that are persisted.
 
@@ -3484,9 +3525,10 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
 
         async def extract_one(entry: dict) -> None:
             session_dir = pool / entry["session_id"]
-            entry["status"] = "running"
             write_job(session_dir, "running")
-            write_cohort(pool, cohort)
+            # One row, not the whole document: these coroutines run
+            # concurrently and each owns exactly one session.
+            mark_cohort_session(pool, cohort, entry, "running")
             try:
                 # Reuse a prior reconstruction unless the caller asked to redo.
                 # Without this, a retry after a Batch OOM would wipe digests and
@@ -3506,10 +3548,9 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                entry["status"] = "error"
-                entry["error"] = str(exc) or "analysis failed"
-                write_job(session_dir, "error", error=entry["error"])
-                write_cohort(pool, cohort)
+                message = str(exc) or "analysis failed"
+                write_job(session_dir, "error", error=message)
+                mark_cohort_session(pool, cohort, entry, "error", error=message)
 
         await asyncio.gather(*(extract_one(e) for e in pending_entries), return_exceptions=True)
 
@@ -3584,19 +3625,29 @@ async def _collect_cohort_batch(
         raise
     except BatchStillRunning as exc:
         print(f"cohort batch {job_name} not collected ({exc}); leaving it to resume")
-        for entry, _ in prepared:
-            entry["status"] = "running"
-        write_cohort(pool, cohort)
+        _mark_prepared_still_running(pool, cohort, prepared)
         return False
     except Exception as exc:
         # Reading or writing the results failed, not the job. The name stays so
         # a resume can retry the collection instead of re-billing the cohort.
         message = str(exc) or "could not apply batch results"
         print(f"cohort batch {job_name} apply failed ({message}); leaving it to resume")
-        for entry, _ in prepared:
-            entry["status"] = "running"
-        write_cohort(pool, cohort)
+        _mark_prepared_still_running(pool, cohort, prepared)
         return False
+
+
+def _mark_prepared_still_running(pool: Path, cohort: dict, prepared: list) -> None:
+    """Return the batch's sessions to `running` so a resume picks them up.
+
+    Row at a time rather than one `write_cohort`: apply_cohort_batch may
+    already have marked some of these done before it failed, and pushing the
+    whole in-memory dict back would overwrite those completions with this
+    copy's stale view of them.
+    """
+    for entry, _ in prepared:
+        if entry.get("status") == "done":
+            continue
+        mark_cohort_session(pool, cohort, entry, "running")
 
 
 async def apply_cohort_batch(
@@ -3619,10 +3670,8 @@ async def apply_cohort_batch(
         message = getattr(err, "message", None) if err else None
         message = message or f"Gemini batch {state}"
         for entry, _ in prepared:
-            entry["status"] = "error"
-            entry["error"] = message
             write_job(pool / entry["session_id"], "error", error=message)
-        write_cohort(pool, cohort)
+            mark_cohort_session(pool, cohort, entry, "error", error=message)
         return
 
     results = parse_batch_results(job)
@@ -3630,13 +3679,12 @@ async def apply_cohort_batch(
         session_dir = pool / sid
         hit = results.get(sid)
         if not hit:
-            entry["status"] = "error"
-            entry["error"] = "missing from batch results"
-            write_job(session_dir, "error", error=entry["error"])
+            message = "missing from batch results"
+            write_job(session_dir, "error", error=message)
+            mark_cohort_session(pool, cohort, entry, "error", error=message)
         elif hit.get("error"):
-            entry["status"] = "error"
-            entry["error"] = hit["error"]
-            write_job(session_dir, "error", error=entry["error"])
+            write_job(session_dir, "error", error=hit["error"])
+            mark_cohort_session(pool, cohort, entry, "error", error=hit["error"])
         else:
             write_analysis_result(
                 session_dir,
@@ -3644,10 +3692,9 @@ async def apply_cohort_batch(
                 frame_count=len(digest.get("frames") or []),
                 warnings=digest.get("warnings") or [],
             )
-            entry["status"] = "done"
-            entry["analysis"] = ANALYSIS_FILE
-            entry.pop("error", None)
-        write_cohort(pool, cohort)
+            mark_cohort_session(
+                pool, cohort, entry, "done", analysis=ANALYSIS_FILE
+            )
 
 
 async def _cohort_sync_model(pool: Path, cohort: dict, prepared: list) -> None:
@@ -3655,9 +3702,8 @@ async def _cohort_sync_model(pool: Path, cohort: dict, prepared: list) -> None:
 
     async def one(entry: dict, digest: dict) -> None:
         session_dir = pool / entry["session_id"]
-        entry["status"] = "running"
         write_job(session_dir, "running")
-        write_cohort(pool, cohort)
+        mark_cohort_session(pool, cohort, entry, "running")
         try:
             _, model_gate = _gates()
             async with model_gate:
@@ -3670,14 +3716,11 @@ async def _cohort_sync_model(pool: Path, cohort: dict, prepared: list) -> None:
                 frame_count=len(digest.get("frames") or []),
                 warnings=digest.get("warnings") or [],
             )
-            entry["status"] = "done"
-            entry["analysis"] = ANALYSIS_FILE
-            entry.pop("error", None)
+            mark_cohort_session(pool, cohort, entry, "done", analysis=ANALYSIS_FILE)
         except Exception as exc:
-            entry["status"] = "error"
-            entry["error"] = str(exc) or "analysis failed"
-            write_job(session_dir, "error", error=entry["error"])
-        write_cohort(pool, cohort)
+            message = str(exc) or "analysis failed"
+            write_job(session_dir, "error", error=message)
+            mark_cohort_session(pool, cohort, entry, "error", error=message)
 
     await asyncio.gather(
         *(one(entry, digest) for entry, digest in prepared),

@@ -337,15 +337,20 @@ def update_session_status(
     status: str,
     analysis: Optional[str] = None,
     error: Optional[str] = None,
-) -> None:
+) -> bool:
     """Mark one session in one cohort.
 
     The point of the table: the per-session updates that ran inside
     `apply_cohort_batch` and `extract_one` loops touch one row instead of
     rewriting every other session's state alongside it.
+
+    `fields` is left alone — the sampling tag (`filter`) belongs to the
+    membership, not to this run's progress. Returns whether a row matched, so
+    a mark aimed at a session that is no longer a member (deleted mid-run) is
+    visible rather than silently dropped.
     """
     with _Tx(conn):
-        conn.execute(
+        cur = conn.execute(
             """
             UPDATE cohort_sessions
                SET status = ?, analysis = ?, error = ?
@@ -353,10 +358,13 @@ def update_session_status(
             """,
             (status, analysis, error, pool_key, cohort_id, session_id),
         )
-        conn.execute(
-            "UPDATE cohorts SET updated_at = ? WHERE pool = ? AND id = ?",
-            (int(time.time() * 1000), pool_key, cohort_id),
-        )
+        matched = cur.rowcount > 0
+        if matched:
+            conn.execute(
+                "UPDATE cohorts SET updated_at = ? WHERE pool = ? AND id = ?",
+                (int(time.time() * 1000), pool_key, cohort_id),
+            )
+    return matched
 
 
 def set_cohort_status(
