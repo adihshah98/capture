@@ -115,12 +115,13 @@ row per (cohort, session) edge, so a session in six cohorts has six rows and
 exactly one `analysis.json` on disk that all six point at. Deleting a session
 used to strand those rows, and because `enrich_cohort_status` trusts the stored
 status when it finds nothing on disk, the cohort kept counting the session as
-analyzed. `forget_session` now drops the memberships from all four deletion
-paths (`index_forget` covers three; `rebuild_index`'s stale purge is the
-fourth). Cohorts shrink; cached cuts are left as the record of what the model
+analyzed. `forget_session` now drops the memberships from both deletion paths
+that survived the Postgres move (`b3c6943`): the `DELETE /api/sessions/{id}`
+endpoint and `sweep_expired_sessions`, which replaced `rebuild_index`'s stale
+purge. Cohorts shrink; cached cuts are left as the record of what the model
 said when it ran. No FK is declared — SQLite ignores them unless every
-connection sets `PRAGMA foreign_keys=ON`, and `server.py`'s (the one deleting)
-does not.
+connection sets `PRAGMA foreign_keys=ON`, and `analyze_store`'s (the one
+deleting) does not.
 
 Cohort rows carry columns for what is queried or updated alone (`id`, `label`,
 `status`, `created_at`, `updated_at`, `batch`); the sampling vocabulary

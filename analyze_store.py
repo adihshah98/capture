@@ -479,7 +479,7 @@ def forget_session(conn: sqlite3.Connection, pool_key: str, session_id: str) -> 
 
 
 def forget_pool(conn: sqlite3.Connection, pool_key: str) -> int:
-    """Drop every cohort in a pool. For index_forget's whole-pool reset."""
+    """Drop every cohort in a pool. For a whole-pool reset."""
     with _Tx(conn):
         cur = conn.execute("DELETE FROM cohort_sessions WHERE pool = ?", (pool_key,))
         removed = cur.rowcount
