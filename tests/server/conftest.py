@@ -20,7 +20,12 @@ import pytest
 
 from capture import db
 
-UNIT_MODULES = {"test_paths", "test_analysis_port", "test_patch_contract"}
+UNIT_MODULES = {
+    "test_paths",
+    "test_analysis_port",
+    "test_patch_contract",
+    "test_attribution",
+}
 
 
 def pytest_collection_modifyitems(config, items):

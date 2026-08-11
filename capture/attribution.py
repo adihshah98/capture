@@ -1,57 +1,105 @@
-"""One URL → attribution parser.
+"""Where a visitor came from, read off their entry URL.
 
-Pure: urllib and re, nothing else. It lives at the top of the package rather than
-inside a router or inside capture/analyze because both sides need it and neither
-may import the other — server.py cannot import from the analysis package (that is
-what analysis_port.py is for), and the analysis package must stay drivable without
-projects or config.
+One parser, deliberately. There were two: `server.parse_attribution` for the
+index and `analyze._session_attribution` for the prompt metadata, kept in step by
+a comment saying "change both together". They diverged anyway -- which is the
+whole argument for this module existing rather than the comment being reworded.
 
-There is a second, divergent copy inside capture/analyze that re-parses `url` at
-read time for the prompt metadata. The two genuinely disagree today: a session
-that arrived with ?utm_term=… has that term in the prompt but not in the indexed
-attribution column that slicing reads. docs/deep-dive/01-ingest-analyze-seam.md
-records why, and docs/analyze-design-review.md proposes collapsing them. This
-module is the neutral home that makes that possible without either side reaching
-across the boundary — but the collapse itself is not done, and doing it means
-touching the analysis package.
+What had drifted by the time they were merged:
 
-What ingest writes here is frozen: record_chunk upserts attribution with
-coalesce(existing, new), so the first chunk carrying a URL sets it permanently.
-Re-parsing later cannot fix an already-indexed session.
+  * `utm_term` was captured by analyze and not by the indexer, so a session that
+    arrived on a paid search term had it in the model's context and not in the
+    column that slicing and cut-matching read.
+  * empty values were dropped by one (`if params.get(key)`) and kept by the other
+    (`if key not in params`), so `?utm_source=0` disagreed.
+  * one returned `{}` for "nothing found" and the other `None`.
+
+The union of the keys is what ships: `utm_term` because the write-up prompt uses
+it, `fbclid` because the slice language filters on it. Both callers needed both;
+neither had both.
+
+Note what this does *not* fix. `sessions.attribution` is written once at ingest
+under `coalesce(sessions.attribution, excluded.attribution)` -- first write wins,
+permanently -- so rows indexed before this module was introduced keep whatever the
+old parser found. Correcting them means re-reading `sessions.url` and rewriting
+the column; see capture/backfill.py.
 """
 
 import re
 import urllib.parse
 
-ATTRIBUTION_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid")
+# utm_term is analysis-only today (it reaches the write-up prompt, and no slice
+# filters on it) but it is captured for everyone: the cost is one dict key, and
+# the alternative is a second key list that drifts from this one.
+UTM_PARAMS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term")
+
+# Some ad platforms hand back "#utm_source=..." rather than a query string, so the
+# fragment is parsed too -- but only when it looks like parameters rather than a
+# client-side route ("#/cart").
+_FRAGMENT_IS_PARAMS = re.compile(r"^[^/]+=")
+
+# Long enough for a real campaign name, short enough that a junk URL cannot bloat
+# a row. Applies to values only; `fbclid` is stored as a flag, not a value.
+MAX_VALUE_CHARS = 256
 
 
-def parse_attribution(url: str | None) -> dict | None:
-    """Pull utm_* / fbclid from an entry URL for indexing and segment rollups."""
-    if not isinstance(url, str) or not url.strip():
-        return None
+def _params(url: str) -> dict:
+    """Query-string parameters, with the fragment as a fallback source."""
     try:
         parsed = urllib.parse.urlparse(url)
     except Exception:
-        return None
-    params: dict = {}
+        return {}
+
+    found: dict = {}
     for key, values in urllib.parse.parse_qs(parsed.query, keep_blank_values=False).items():
         if values and values[0]:
-            params[key] = values[0]
-    # Some storefronts put the campaign in the fragment. Only treat it as a query
-    # string when it actually looks like one, or a bare #section becomes a param.
+            found[key] = values[0]
+
     fragment = parsed.fragment or ""
-    if fragment and re.match(r"^[^/]+=", fragment):
+    if fragment and _FRAGMENT_IS_PARAMS.match(fragment):
         for key, values in urllib.parse.parse_qs(fragment, keep_blank_values=False).items():
-            if key not in params and values and values[0]:
-                params[key] = values[0]
+            # The query string wins: a platform echoing a param into the fragment
+            # must not overwrite what the visitor actually arrived with.
+            if key not in found and values and values[0]:
+                found[key] = values[0]
+    return found
+
+
+def parse(url: str | None) -> dict:
+    """utm_* and an fbclid flag off an entry URL. `{}` when there is nothing.
+
+    Always a dict, so callers can index it without a None check. The indexer wants
+    NULL rather than an empty JSON object in the column, so it calls
+    `parse_or_none` instead -- that distinction belongs at the storage boundary,
+    not in the parsing.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return {}
+
+    params = _params(url)
     out: dict[str, str | bool] = {}
-    for key in ATTRIBUTION_KEYS:
-        if key not in params:
-            continue
-        if key == "fbclid":
-            # Only its presence matters; the value is an opaque click id.
-            out["fbclid"] = True
-        else:
-            out[key] = str(params[key])[:256]
-    return out or None
+    for key in UTM_PARAMS:
+        # Truthiness, not membership: `?utm_source=` carries no more information
+        # than no utm_source at all, and storing "" would make it a facet value.
+        if params.get(key):
+            out[key] = str(params[key])[:MAX_VALUE_CHARS]
+    # Stored as a flag: the click id itself is per-user and of no analytical use,
+    # but its presence is what `is_meta_attribution` reads.
+    if params.get("fbclid"):
+        out["fbclid"] = True
+    return out
+
+
+def parse_or_none(url: str | None) -> dict | None:
+    """`parse`, but `None` rather than `{}` when nothing was found.
+
+    For the `sessions.attribution` column, where an empty object and SQL NULL are
+    different states and only NULL means "this visit carried no campaign".
+    """
+    return parse(url) or None
+
+
+# The name the ingest and session routes import. They were written against the
+# earlier version of this module, whose single entry point returned None for
+# "nothing found" -- which is exactly parse_or_none's contract.
+parse_attribution = parse_or_none

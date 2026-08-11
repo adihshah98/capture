@@ -24,10 +24,10 @@ import shutil
 import sqlite3
 import threading
 import time
-import urllib.parse
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from .. import attribution
 from . import prompts, slices, stats
 from . import store as analyze_store
 
@@ -1921,41 +1921,11 @@ def _clock(ms) -> str:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
-# Kept in step with server.parse_attribution, which does the same job for the
-# index. analyze.py cannot import server.py (server imports analyze), so the
-# two are deliberate twins — change both together.
-ATTRIBUTION_PARAMS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term")
-
-
-def _session_attribution(url: Optional[str]) -> dict:
-    """utm_* / fbclid off an entry URL."""
-    if not url:
-        return {}
-    try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception:
-        return {}
-    params = {}
-    for key, values in urllib.parse.parse_qs(
-        parsed.query, keep_blank_values=False
-    ).items():
-        if values and values[0]:
-            params[key] = values[0]
-    # Some ad platforms hand back "#utm_source=..." rather than a query string.
-    fragment = parsed.fragment or ""
-    if fragment and re.match(r"^[^/]+=", fragment):
-        for key, values in urllib.parse.parse_qs(
-            fragment, keep_blank_values=False
-        ).items():
-            if key not in params and values and values[0]:
-                params[key] = values[0]
-    out = {}
-    for key in ATTRIBUTION_PARAMS:
-        if params.get(key):
-            out[key] = str(params[key])[:256]
-    if params.get("fbclid"):
-        out["fbclid"] = True
-    return out
+# One parser, in capture/attribution.py, shared with the indexer. It used to be
+# a twin of server.parse_attribution kept in step by a comment; they diverged.
+# `{}` rather than `None` here — this feeds prompt metadata, which is built by
+# assignment and never asks whether the key is absent or empty.
+_session_attribution = attribution.parse
 
 
 def session_metadata(session_dir: Path) -> dict:
