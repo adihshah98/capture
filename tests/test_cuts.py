@@ -319,6 +319,67 @@ class TestCutKey(unittest.TestCase):
         self.assertEqual(json.loads(key)["filter"], {"outcome": ["purchased"]})
 
 
+class TestCutKeyPromptVersion(unittest.TestCase):
+    """A cut's answer depends on what the model was asked, not only on which
+    sessions were selected. Keying on the filter alone meant a reworded
+    CUT_PROMPT kept serving answers from the old one, with no invalidation
+    path and no signal — the response still said `cached: true`."""
+
+    def setUp(self):
+        self._prompt = analyze.CUT_PROMPT
+        self.addCleanup(setattr, analyze, "CUT_PROMPT", self._prompt)
+
+    def key(self, spec=None):
+        return analyze.cut_key(spec or {"outcome": "purchased"})
+
+    def test_editing_the_prompt_changes_the_key(self):
+        before = self.key()
+        analyze.CUT_PROMPT = self._prompt + "\n\nAlways mention shipping."
+        self.assertNotEqual(before, self.key())
+
+    def test_reverting_the_prompt_restores_the_key(self):
+        """A revert should reuse the cache it had, not pay for it again."""
+        before = self.key()
+        analyze.CUT_PROMPT = "something else entirely"
+        analyze.CUT_PROMPT = self._prompt
+        self.assertEqual(before, self.key())
+
+    def test_the_prompt_hash_does_not_collapse_distinct_filters(self):
+        self.assertNotEqual(
+            self.key({"outcome": "purchased"}), self.key({"outcome": "rest"})
+        )
+
+    def test_whitespace_in_the_prompt_still_counts_as_a_change(self):
+        """Content-addressed, so there is no judgement call about what counts
+        as a meaningful edit."""
+        before = self.key()
+        analyze.CUT_PROMPT = self._prompt + " "
+        self.assertNotEqual(before, self.key())
+
+    def test_the_key_carries_the_hash_where_it_can_be_read(self):
+        payload = json.loads(self.key())
+        self.assertEqual(payload["prompt"], analyze.prompt_version(analyze.CUT_PROMPT))
+        self.assertEqual(len(payload["prompt"]), 8)
+
+    def test_a_key_from_before_this_change_no_longer_matches(self):
+        """Cuts cached without a prompt hash are simply re-asked once."""
+        legacy = json.dumps(
+            {"filter": analyze.normalize_slice({"outcome": "purchased"})},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertNotEqual(legacy, self.key())
+
+
+class TestPromptVersion(unittest.TestCase):
+    def test_it_is_stable_and_content_addressed(self):
+        self.assertEqual(analyze.prompt_version("abc"), analyze.prompt_version("abc"))
+        self.assertNotEqual(analyze.prompt_version("abc"), analyze.prompt_version("abd"))
+
+    def test_it_is_short_enough_to_read_in_a_key(self):
+        self.assertEqual(len(analyze.prompt_version("anything")), 8)
+
+
 class TestNormalizeCutAnalysis(unittest.TestCase):
     def test_keeps_the_documented_shape_and_drops_junk(self):
         out = analyze.normalize_cut_analysis(
