@@ -372,18 +372,14 @@ async def ingest(
     if not isinstance(events, list) or not events:
         raise ApiError(400, "no events")
 
-    session_dir = pool / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-
+    # No directory is created here any more: chunks go to storage and the last
+    # two sidecars are columns. Analysis makes one when it stages frames.
     meta = {}
     visitor, url = payload.get("visitor_id"), payload.get("url")
     if isinstance(visitor, str) and SAFE_ID.match(visitor):
         meta["visitor_id"] = visitor
     if isinstance(url, str) and url:
         meta["url"] = url[:2048]
-    meta_path = session_dir / VISITOR_FILE
-    if meta and not meta_path.is_file():
-        atomic_write_json(meta_path, meta)
 
     now = int(time.time() * 1000)
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
@@ -500,9 +496,6 @@ async def order_event(
     order = sessionstore.record_order(project.id, session_id, event, payload, now)
     if order is None:
         raise ApiError(404, "unknown session")
-    # analyze.py reads order.json straight off disk, so it stays written until
-    # those five functions move to Postgres. Postgres is the record; this mirrors it.
-    atomic_write_json(session_dir / ORDER_FILE, order)
     return {"status": "ok"}
 
 @app.get("/healthz")

@@ -646,3 +646,30 @@ def clear_job(store: Store, pool_key: str, session_id: str) -> None:
             "DELETE FROM analysis_jobs WHERE project_id = %s AND session_id = %s",
             (project_id, session_id),
         )
+
+
+def session_facts(store: Store, pool_key: str, session_id: str) -> tuple:
+    """(entry url, order) for one session — what visitor.json and order.json held.
+
+    The entry URL keeps its query string: it is the only place the UTMs
+    survive, since page_path() drops them and the digest's URLs are
+    post-navigation.
+    """
+    with store.tx(pool_key) as (conn, project_id):
+        row = _rows(conn).execute(
+            "SELECT s.url, o.checkout_started_at, o.purchased_at, o.order_id,"
+            " o.total, o.currency"
+            " FROM sessions s"
+            " LEFT JOIN orders o"
+            "   ON o.project_id = s.project_id AND o.session_id = s.session_id"
+            " WHERE s.project_id = %s AND s.session_id = %s",
+            (project_id, session_id),
+        ).fetchone()
+    if row is None:
+        return None, None
+    order = {
+        k: row[k]
+        for k in ("checkout_started_at", "purchased_at", "order_id", "total", "currency")
+        if row[k] is not None
+    }
+    return row["url"], (order or None)

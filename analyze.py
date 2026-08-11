@@ -2942,10 +2942,9 @@ def session_metadata(session_dir: Path) -> dict:
 
     The digest describes what happened on screen and says nothing about where
     the visitor came from, so a write-up built from it alone cannot tie
-    behaviour back to the campaign that bought the click. `visitor.json` keeps
-    the entry URL with its query string intact — the only place the UTMs
-    survive, since page_path() drops them and the digest's `urls` are
-    post-navigation.
+    behaviour back to the campaign that bought the click. The stored entry URL
+    keeps its query string intact — the only place the UTMs survive, since
+    page_path() drops them and the digest's `urls` are post-navigation.
 
     Only fields actually present are returned: a key missing here means
     unknown, and the prompt says so, rather than the model reading an empty
@@ -2953,26 +2952,21 @@ def session_metadata(session_dir: Path) -> dict:
     """
     meta: dict = {}
 
+    key, sid = _session_ref(session_dir)
     try:
-        visitor = json.loads((session_dir / "visitor.json").read_text())
-    except Exception:
-        visitor = None
-    if isinstance(visitor, dict):
-        entry = visitor.get("url")
-        if entry:
-            meta["entry_url"] = str(entry)[:512]
-            landing = page_path(entry)
-            if landing:
-                meta["landing_page"] = landing
-            attribution = _session_attribution(meta["entry_url"])
-            if attribution:
-                meta["attribution"] = attribution
+        entry, order = analyze_store.session_facts(analyze_store.connect(), key, sid)
+    except Exception as exc:
+        print(f"session metadata unavailable for {sid}: {exc}")
+        entry, order = None, None
 
-    try:
-        order = json.loads((session_dir / "order.json").read_text())
-    except Exception:
-        order = None
-    order = order if isinstance(order, dict) else None
+    if entry:
+        meta["entry_url"] = str(entry)[:512]
+        landing = page_path(entry)
+        if landing:
+            meta["landing_page"] = landing
+        attribution = _session_attribution(meta["entry_url"])
+        if attribution:
+            meta["attribution"] = attribution
     meta["outcome"] = OUTCOME_LABELS[outcome_class(order)]
     if order:
         for key in ("order_value", "currency", "products"):
