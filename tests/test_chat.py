@@ -212,6 +212,8 @@ class TestChatEndpoint(unittest.TestCase):
 
         db.close_pool()
         os.environ.pop("CAPTURE_DATABASE_URL", None)
+        # Leaving this set points every later test at a directory about to vanish.
+        os.environ.pop("CAPTURE_DATA_DIR", None)
         shutil.rmtree(cls.data_dir, ignore_errors=True)
 
     def setUp(self):

@@ -377,21 +377,29 @@ async def ingest(
             "events": events,
         }
     ).encode()
-    storage.put_chunk(project.storage_prefix, session_id, chunk_name, stored)
+    # Off the loop deliberately. A 380KB PUT to S3 takes ~64ms; run inline it
+    # would serialise every other request behind it and cap one worker at
+    # roughly 15 req/s, against ~70 when this was a local write.
+    await asyncio.to_thread(
+        storage.put_chunk, project.storage_prefix, session_id, chunk_name, stored
+    )
     clicks, rage = count_clicks(events)
     device = read_device(events)
     size = len(stored)
     first_ts, last_ts = event_span(events) or (now, now)
 
     window_id = str(payload.get("window_id") or "default")
-    state = sessionstore.window_state(project.id, session_id, window_id)
+    state = await asyncio.to_thread(
+        sessionstore.window_state, project.id, session_id, window_id
+    )
     active_ts = last_active_scan(events, state)
     if active_ts:
         state["active"] = max(state.get("active", 0), active_ts)
     state["first"] = min(state.get("first", first_ts), first_ts)
     state["last"] = max(state.get("last", last_ts), last_ts)
 
-    sessionstore.record_chunk(
+    await asyncio.to_thread(
+        sessionstore.record_chunk,
         project.id, session_id,
         window_id=window_id, first_ts=first_ts, last_ts=last_ts, active_ts=active_ts,
         size=size, meta=meta, clicks=clicks, rage=rage, device=device,
