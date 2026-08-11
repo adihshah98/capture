@@ -7,9 +7,10 @@ PUBLIC_URL="${CAPTURE_PUBLIC_URL:-https://d1lt8dgxjrizij.cloudfront.net}"
 
 cd "$(dirname "$0")"
 npm run build
+# A glob, not a list: an explicit one silently drops any module added since
+# it was last edited, and the server only fails on import at startup.
 tar czf /tmp/capture-deploy.tar.gz \
-  server.py analyze.py db.py projects.py sessionstore.py compat.py fsutil.py backfill.py \
-  migrations requirements.txt public \
+  *.py migrations requirements.txt public \
   package.json package-lock.json \
   src/analyze/extract.mjs src/analyze/replayer.bundle.js
 scp -q -i "$KEY" -o StrictHostKeyChecking=accept-new /tmp/capture-deploy.tar.gz "$HOST:/tmp/"
@@ -19,9 +20,7 @@ set -euo pipefail
 cd /opt/capture
 
 rm -rf .rollback && mkdir .rollback
-cp -a server.py analyze.py requirements.txt public src .rollback/ 2>/dev/null || true
-cp -a db.py projects.py sessionstore.py compat.py fsutil.py backfill.py migrations \
-  .rollback/ 2>/dev/null || true
+cp -a *.py requirements.txt public src migrations .rollback/ 2>/dev/null || true
 
 tar xzf /tmp/capture-deploy.tar.gz
 [ -d .venv ] || python3.11 -m venv .venv
