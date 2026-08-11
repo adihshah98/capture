@@ -3,6 +3,14 @@
 Why `capture.analyze` replaces its own module class at import, what that buys, and —
 more importantly — what it does not buy.
 
+> **Status:** the reviews now recommend **deleting** this mechanism
+> ([design §0.3](../analyze-design-review.md), [cleanups #10](../analyze-cleanups.md)).
+> `capture/analysis_port.py` mediates all production access to the package, which
+> removes the reason the re-export blocks — and therefore the forwarding — exist.
+> This document stays as the record of *what problem it solved*, because the
+> **invariant it enforces must survive its deletion**: a patched name has to reach
+> the real call site. Read it before replacing the mechanism with a convention.
+
 ---
 
 ## The constraint: the tests patch by assignment, and the calls are real

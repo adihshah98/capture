@@ -1,7 +1,15 @@
 # analyze — cleanups
 
-*Reviewed 2026-08-11 against `main` @ `d2f35e8`. Part 3 of 3:
+*Reviewed 2026-08-11, re-verified against `main` @ `70f5748`. Part 3 of 3:
 [design](analyze-design-review.md) · [bugs](analyze-bug-review.md) · **cleanups**.*
+
+> **Re-verification note.** `capture/analyze/` is byte-identical since the first
+> draft, so every item below still applies to it. Two changed status: **#3
+> (`SAFE_CHUNK`)** is largely done — `capture/paths.py` is now the single definition
+> and only `analyze`'s own copy remains; **#9 (linter exclusion)** is now the *only*
+> exclusion left, since the rest of `capture/` was formatted and type-gated in
+> `067fe83` / `d177c4c` / `fb82347`. A new item **#10** covers the re-export
+> narrowing that [design §0.3](analyze-design-review.md) added.
 
 Mechanical tidying: dead code, duplication, stale annotations, tooling. Nothing here
 changes behaviour — anything that does is in the [bug review](analyze-bug-review.md).
@@ -42,38 +50,49 @@ The `from .slices import` / `from .stats import` blocks
 [:942](../capture/analyze/__init__.py#L942)) exist because "server.py and the tests
 reach for these off `analyze`." Nine of them do not:
 
-| Symbol | External refs |
-| --- | --- |
-| `META_SOURCES`, `slice_is_empty`, `is_meta_attribution` | 0 |
-| `cross_tab_cells`, `CROSS_TAB_PAIRS`, `CROSS_TAB_DIMENSIONS`, `CROSS_TAB_MIN_CELL`, `CROSS_TAB_MIN_COVERAGE`, `CROSS_TAB_MIN_LIFT_PTS` | 0 |
-| `MOBILE_MAX_WIDTH` | 1 (keep) |
+Re-measured at `70f5748`, now that `analysis_port.py` mediates all production access:
 
-Narrowing the re-export lists to what is actually consumed shrinks the forwarding
-surface (fewer multi-owner collisions — see
-[deep-dive 07](deep-dive/07-patch-forwarding.md)) and makes the remaining exports a
-deliberate public API rather than a dump.
+| Symbol | Production | Tests |
+| --- | --- | --- |
+| `META_SOURCES`, `slice_is_empty`, `is_meta_attribution`, `OUTCOME_LABELS` | 0 | 0 |
+| `cross_tab_cells`, `CROSS_TAB_PAIRS`, `CROSS_TAB_DIMENSIONS`, `CROSS_TAB_MIN_CELL`, `CROSS_TAB_MIN_COVERAGE`, `CROSS_TAB_MIN_LIFT_PTS` | 0 | 0 |
+| `MOBILE_MAX_WIDTH`, `slice_label` | 0 | 1 |
+| `normalize_slice`, `row_matches_slice`, `cross_tab_block` | 0 | 4–18 |
+| `device_class`, `page_path`, `outcome_class` | 1 each (port) | 6–14 |
 
-Low risk, but do it **after** the forwarding mechanism test exists, since re-exports
-are what the mechanism operates on.
+**Ten names have zero consumers anywhere.** The rest are reached almost entirely by
+tests, which can `from capture.analyze import slices` directly — that is not a
+production dependency and does not need a re-export.
 
-## 3. `SAFE_CHUNK` is triplicated
+Narrowing the lists makes the remaining exports a deliberate public API rather than a
+dump, and it is the **precondition for deleting `_ForwardingModule`**
+([design §0.3](analyze-design-review.md)): the re-export blocks are the only reason
+the mechanism exists.
 
-Byte-identical `r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$"` in three places:
-[storage.py:23](../capture/storage.py#L23),
-[server.py:251](../capture/server.py#L251),
-[__init__.py:51](../capture/analyze/__init__.py#L51).
+Order: narrow the lists first, then delete the mechanism (#10), then extract.
 
-The comment at `analyze:50` justifies the copy as *"keep local so the CLI does not
-import server"* — but `storage.py` is dependency-free, and
-[s3copy.py:71](../capture/s3copy.py#L71) already does it right with
-`storage.SAFE_CHUNK`. The stated reason does not apply to importing `storage`, and
-[bug #1](analyze-bug-review.md) removes the CLI anyway.
+## 3. `SAFE_CHUNK` — mostly fixed; one copy left
+
+**Largely done in `37d10ff`** (*"Give the data root and the chunk-name rules one
+definition, fixing a live bug"*). The canonical definition is now
+[paths.py:30](../capture/paths.py#L30); `server.py` and `storage.py` both import it.
+
+One copy remains: [__init__.py:51](../capture/analyze/__init__.py#L51), still
+justified by a comment that is now obsolete —
+
+> ```python
+> # Same shape as server.SAFE_CHUNK — keep local so the CLI does not import server.
+> ```
+
+`capture/paths.py` is dependency-free, so importing it was never the thing the comment
+was avoiding; and [bug #1](analyze-bug-review.md) deletes the CLI regardless.
 
 **Why it matters:** a chunk name accepted by ingest but rejected by
-`session_chunk_names` is a session that records fine and cannot be analysed. Three
-copies is three chances to drift.
+`session_chunk_names` is a session that records fine and cannot be analysed. Two
+copies is still one chance to drift.
 
-**Fix:** import from `storage` in both `server.py` and `analyze`.
+**Fix:** `from ..paths import SAFE_CHUNK` in `analyze/__init__.py`; delete the local
+regex and the stale comment.
 
 ## 4. Duplicate prompt constants
 
@@ -152,8 +171,8 @@ Cheap, and these are the comments most likely to mislead the next reader.
 ## 8. Minor
 
 - **`resolve_project(project)` called twice** in one statement,
-  [server.py:1404](../capture/server.py#L1404) and
-  [:1407](../capture/server.py#L1407). Hoist to a local.
+  [server.py:1153](../capture/server.py#L1153) and
+  [:1156](../capture/server.py#L1156). Hoist to a local.
 - **Test fake signature drift** — `test_cohort_batch.py:95` defines
   `fake_wait(name, *, poll_s=None)` while production is
   `wait_gemini_batch(job_name, *, poll_s=None, max_wait_s=None)`. Benign (the call
@@ -190,8 +209,39 @@ refactor:
 2. Split into two commits — `ruff format` alone, then real fixes — so review is
    possible.
 3. Expect genuine `mypy` errors around the compat connection; #6 is the fix.
-4. `ruff` and `mypy` are not installed in `.venv`, so `npm run lint` currently fails
-   locally while passing in CI. Add them to the local env first.
+4. Install the dev tooling locally — `pip install -r requirements-dev.txt`. The file
+   now exists (`fb82347`); without it `npm run lint` fails locally while passing in CI.
+
+`capture/analyze` is now the **only** entry left in `extend-exclude` that is ours
+(`src/analyze` is the Node extractor, `.venv`/`node_modules` are vendor). The rest of
+`capture/` was formatted and gated in `067fe83` / `d177c4c`, so this is the last file
+outside the net.
+
+## 10. Delete `_ForwardingModule`
+
+Added on re-verification; see [design §0.3](analyze-design-review.md) for the full
+argument.
+
+`_ForwardingModule` ([:3014](../capture/analyze/__init__.py#L3014)) swaps the live
+module's `__class__` so assignment to the package is pushed into whichever submodule
+owns the name. It exists to serve the two re-export blocks (#2) — and with
+`analysis_port.py` mediating production access, those blocks have almost no consumers
+left.
+
+Costs, all concrete: invisible to type checkers, IDEs and `__all__` tooling; fires on
+every module-global write including internal `global` statements; `OUTCOME_LABELS` is
+in `vars()` of both `slices` and `stats` and the loop has no `break`, so one
+assignment writes three bindings; and the class swap is the **last statement of a
+3,026-line module**, so any import-time exception disables it with no error.
+
+It is also propping up a testing style rather than being required by one: the suite
+uses **54 raw assignments** against **one** `unittest.mock.patch`.
+
+**Fix:** after #2, delete `_ForwardingModule` and `_FORWARD_TO`. Preserve the *rule*
+— submodules call through the module object, never `from .x import y` for a name
+tests patch — as an AST test in the style of
+[test_analysis_port.py:153](../tests/test_analysis_port.py#L153). A machine-checked
+convention, which is what the deleted mechanism's own comment argues for.
 
 ---
 
@@ -202,8 +252,12 @@ Safe to interleave with the other two documents' work.
 **Before structural work:** #3 (`SAFE_CHUNK`), #4 (prompt constants), #7 (docstrings),
 #8 (minor). All independent, all low-risk.
 
-**During:** #1 (dead code, alongside the CLI deletion), #2 (re-exports — *after* the
-forwarding test), #6 (annotations — after the CLI is gone).
+**Then, as the extraction precondition:** #2 (narrow re-exports) → #10 (delete
+forwarding). These are ordered and must land before any new submodule, so nothing is
+wired into a mechanism that is about to go.
+
+**During:** #1 (dead code, alongside the CLI deletion), #6 (annotations — after the
+CLI is gone).
 
 **Last:** #9 (linter exclusion).
 

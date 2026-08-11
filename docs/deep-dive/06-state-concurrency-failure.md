@@ -113,8 +113,7 @@ silently guard nothing. Tests reset `_gate_loop = None` between cases for this r
 
 **The gates are shared across module boundaries.** `_gates()` is called from four
 sites inside the package *and* from
-[`server.py:1788`](../../capture/server.py#L1788), which reaches into a private
-symbol. That fifth caller is the real constraint on any module split: the semaphores
+[`analysis_port.py:66`](../../capture/analysis_port.py#L66), outside the package. That fifth caller is the real constraint on any module split: the semaphores
 must stay one shared pair, or the chat endpoint and the cohort loop each get their
 own limit of 3 and the box sees 6 concurrent model calls.
 
@@ -189,10 +188,23 @@ the whole cohort's extraction work to one bad recording.
 
 ---
 
-## The leak: `_gates` is reached privately from outside
+## The leak that was closed: `_gates` reached from outside
 
-`server.py:1788` calling `analyze._gates()` is the one place the package's private
-surface is used by another module. It works, and the shared-semaphore behaviour it
-gets is the *correct* behaviour — but it means any refactor that moves `_gates` has to
-update a file outside the package, and nothing in the type system or the tests will
-say so. A public accessor would make the dependency visible.
+`server.py` used to call `analyze._gates()` directly — the one place the package's
+private surface was used by another module. The behaviour was correct (it got the
+shared pair), but any refactor moving `_gates` had to update a file outside the
+package, with nothing in the type system or the tests to say so.
+
+[`analysis_port.py:63`](../../capture/analysis_port.py#L63) now owns that access:
+
+> ```python
+> def model_gate() -> int:
+>     """How many model calls may be in flight. Was analyze._gates()[1] — reaching
+>     across the boundary for a private, which is why this method exists."""
+> ```
+
+The dependency is now declared in one file, and
+[test_analysis_port.py:153](../../tests/test_analysis_port.py#L153) enforces that no
+other module in `capture/` imports the package. The **constraint itself is unchanged**:
+the semaphores must remain one shared pair, so `_gates` and both gate globals stay in
+a single module through any split.

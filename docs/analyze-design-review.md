@@ -1,7 +1,14 @@
 # analyze — design review
 
-*Reviewed 2026-08-11 against `main` @ `d2f35e8`. Part 1 of 3:
+*Reviewed 2026-08-11, re-verified against `main` @ `70f5748`. Part 1 of 3:
 **design** · [bugs](analyze-bug-review.md) · [cleanups](analyze-cleanups.md).*
+
+> **Re-verification note.** Fifteen commits landed after the first draft. They left
+> `capture/analyze/` **byte-identical** — every measurement in §1–§2 still holds — but
+> restructured everything around it. Three consequences, detailed in §0:
+> `capture/analysis_port.py` now exists and resolves two of this document's
+> preconditions; `server.py` is down to 1,731 lines; and the arrival of the port
+> changes the recommendation on `_ForwardingModule` from "keep" to "delete."
 
 This document is about **structure**: how the package is decomposed, whether the
 proposed split is the right one, and what the code's shape (file sizes, function
@@ -10,6 +17,90 @@ live in the [bug review](analyze-bug-review.md); mechanical tidying lives in
 [cleanups](analyze-cleanups.md).
 
 For how the system actually works, read [docs/deep-dive/](deep-dive/README.md) first.
+
+---
+
+## 0. What changed since the first draft
+
+Verified with `git diff d2f35e8..70f5748`. **`capture/analyze/` has a zero-line
+diff** — the package this document reviews is unchanged. What moved is its
+surroundings, and two of those moves land squarely on this document's recommendations.
+
+### 0.1 `capture/analysis_port.py` — a declared interface (commit `bbcc931`)
+
+The web layer no longer imports `analyze`. `server.py` imports
+`analysis_port as ap`, and [test_analysis_port.py:153](../tests/test_analysis_port.py#L153)
+enforces that nothing else in `capture/` may reach the package directly. The port's
+own docstring records what it replaced:
+
+> ```
+> Before this module, server.py reached into 51 of its names — including
+> `analyze._gates()`, a private — so any rename over there was a breaking change
+> to the web layer, and neither side could see the interface it was depending on.
+> ```
+
+It also collapses the three identity notions (`pool: Path`, `pool_key: str`,
+`data_root: Path`) into one `Project` argument — which is the seam that will matter
+when the package stops being addressed by filesystem path.
+
+**This resolves precondition #2 of §4.** `_gates()` is no longer reached privately
+from outside: [analysis_port.py:63](../capture/analysis_port.py#L63) exposes
+`model_gate()`, and [server.py:1526](../capture/server.py#L1526) uses it. All five
+remaining `_gates()` call sites are now *inside* the package.
+
+### 0.2 Tooling and structure already landed
+
+| Item | Where it was | Status |
+| --- | --- | --- |
+| `SAFE_CHUNK` deduplicated | cleanups #3 | **Done** — now `capture/paths.py`; only `analyze`'s own copy remains |
+| `ruff format` + mypy gate in CI | cleanups #9 | **Done** for `capture/`; `analyze` still excluded |
+| Fast/DB test tiers | — | **New** — `pytest -m unit`, enforced by `conftest.py` |
+| `server.py` size | §2.3 | 2,242 → **1,731** lines (routes, auth, settings, CLI extracted) |
+| Test count | verification | 438 → **506** |
+
+### 0.3 The recommendation that changed: drop `_ForwardingModule`
+
+§4 originally kept the forwarding mechanism and added a test for it. **That is no
+longer the right call**, for a reason the port supplies.
+
+Forwarding exists to keep `analyze.X = fake` reaching a submodule's globals. Its
+justification was that `server.py` and the tests reach for names off `analyze`
+directly. The port removed the production half of that: production now reaches
+`ap.*`, and the port already states the correct rule as a convention —
+
+> ```
+> Call through `analyze.<name>` inside the function body rather than binding
+> the attribute at import.
+> ```
+
+That is the same invariant the metaclass enforces, achieved by convention in one
+278-line file. Re-measured against `HEAD`, the re-export blocks the mechanism serves
+have almost no consumers left:
+
+| Re-exported symbol | Production | Tests |
+| --- | --- | --- |
+| `META_SOURCES`, `slice_is_empty`, `is_meta_attribution`, `OUTCOME_LABELS` | 0 | 0 |
+| `cross_tab_cells`, `CROSS_TAB_*` (5 constants) | 0 | 0 |
+| `MOBILE_MAX_WIDTH`, `slice_label` | 0 | 1 |
+| `device_class`, `page_path`, `outcome_class` | 1 each (via the port) | 6–14 |
+| `normalize_slice`, `cross_tab_block`, `row_matches_slice` | 0 | 4–18 |
+
+Ten re-exported names have **zero** consumers anywhere. The rest are reached almost
+entirely by tests, which can import `capture.analyze.slices` directly.
+
+Against that, the mechanism's costs are concrete: it is invisible to type checkers
+and IDEs; it fires on every module-global write including internal `global`
+statements; `OUTCOME_LABELS` is in `vars()` of both `slices` and `stats` and the
+loop has no `break`, so one assignment writes three bindings; and the class swap is
+the last statement of a 3,026-line module, so any import-time exception disables it
+silently. It is also propping up a testing style — **54 raw assignments versus one
+`unittest.mock.patch`** — rather than being required by one.
+
+**Revised recommendation:** narrow the re-exports to what is consumed, then delete
+`_ForwardingModule` and `_FORWARD_TO`. Keep the "call through the module object"
+rule as a convention, enforced by an AST test in the style of
+`test_analysis_port.py`. This removes the need for the forwarding test that was
+precondition #1, and replaces a metaclass with an ordinary Python package.
 
 ---
 
@@ -122,14 +213,28 @@ worked on. **Lifting the exclusion should be a deliverable of this refactor**, d
 last so the diff is not buried in reformatting. Expect `--fix`-able noise plus real
 type errors around the compat connection.
 
-*(Local note: `ruff` and `mypy` are not installed in `.venv`, so `npm run lint` fails
-locally while passing in CI, which installs `requirements-dev.txt`.)*
+Since the first draft the rest of `capture/` has been formatted and type-gated
+(`067fe83`, `d177c4c`, `fb82347`), and `requirements-dev.txt` now exists — so
+`capture/analyze` is the **only** remaining exclusion, and the argument for lifting it
+is stronger than when this was written.
+
+### 2.5 `server.py` is no longer the counter-example
+
+The first draft called `server.py` (2,242 lines) the same shape as
+`analyze/__init__.py` and put it out of scope. It has since been reduced to 1,731
+lines by extracting routes, auth, settings and the CLI — using the same
+peel-off-leaves rule §4 recommends here. That is a useful precedent: the approach
+below is not hypothetical in this codebase.
+
+`create_cohort` (135 lines / **29 parameters**) survives untouched and remains the
+worst function in the repo. §2.2's `CohortSpec` is its fix.
 
 ---
 
 ## 3. The module split: the proposed seam is wrong
 
-The [existing plan](analyze-refactor.md) proposes `extract.py` → `models.py` →
+The superseded plan (`docs/analyze-refactor.md`, deleted in `1a913be`) proposed
+`extract.py` → `models.py` →
 `pipeline.py` → `cli.py`. **This is the wrong decomposition** and should not be done.
 
 **It cuts by technical layer, but the dependencies do not run that way.**
@@ -143,10 +248,19 @@ circular module-object references and a rule that must be obeyed perfectly at ev
 site, with **no test that catches a violation**. The failure mode is a green suite
 making billed Gemini calls.
 
-**It breaks on `_gates`.** `_gates()` has five call sites across what would become
-three modules — plus [`server.py:1788`](../capture/server.py#L1788), outside the
-package entirely. The plan's own mitigation ("keep `_gates` in `__init__.py`") is an
-admission the seam does not hold.
+**It breaks on `_gates`.** `_gates()` has five call sites that would land in three
+different modules ([:1189](../capture/analyze/__init__.py#L1189),
+[:2486](../capture/analyze/__init__.py#L2486),
+[:2519](../capture/analyze/__init__.py#L2519),
+[:2795](../capture/analyze/__init__.py#L2795), plus
+[analysis_port.py:66](../capture/analysis_port.py#L66)). They must return **one
+shared pair** of semaphores — `tests/test_analyze_concurrency.py` pins that
+extraction is memory-bound (1 Chromium) and model calls network-bound (3). Split them
+across modules and each gets its own limit. The plan's own mitigation ("keep `_gates`
+in `__init__.py`") is an admission the seam does not hold.
+
+*Since the first draft the sixth, external call site has been fixed: the port's
+`model_gate()` now owns that access, so the constraint is entirely internal.*
 
 ## 4. The recommended decomposition
 
@@ -188,11 +302,16 @@ API path. Leave them.
 
 ### Preconditions
 
-1. **Test the forwarding mechanism first** (deep-dive 07). Nothing currently asserts
-   it works; if `_FORWARD_TO` were emptied, every test would still pass.
-2. **Promote `_gates` to a public accessor** and update `server.py:1788`. This is the
-   only external use of the package's private surface.
-3. **Add each new module to `_FORWARD_TO`** as it is created.
+1. ~~Test the forwarding mechanism first.~~ **Superseded by §0.3** — narrow the
+   re-exports and delete the mechanism instead. Do this *before* any extraction, so
+   the new modules are never wired into a mechanism that is about to go.
+2. ~~Promote `_gates` to a public accessor.~~ **Done** —
+   [analysis_port.py:63](../capture/analysis_port.py#L63).
+3. **Route new production consumers through `analysis_port.py`**, not through fresh
+   imports of `capture.analyze`. `test_analysis_port.py` enforces this; a new
+   submodule that `server.py` needs is a port function, not a new import.
+4. **Keep the call-through-the-module-object rule** for anything tests patch, now as
+   a convention plus an AST test rather than a metaclass.
 
 ---
 
@@ -201,10 +320,14 @@ API path. Leave them.
 Load-bearing choices that look incidental. The deep dives cover the reasoning; this
 is the list not to "simplify."
 
-- **`_ForwardingModule`** — the right instinct, even though it currently protects
-  almost nothing ([07](deep-dive/07-patch-forwarding.md)).
-- **Owners discovered via `vars()`**, not a hand-maintained map. The comment predicts
-  exactly the failure the attribution twins then demonstrated.
+- **The instinct behind `_ForwardingModule`** — that a patched name must reach the
+  real call site — is correct and must survive the mechanism's deletion (§0.3). What
+  is preserved is the *rule* (call through the module object, never
+  `from .x import y` for a patchable name), not the metaclass.
+- **Owners discovered via `vars()`**, not a hand-maintained map. The reasoning —
+  that a hand-maintained list rots the first time a function moves — is right, and
+  the attribution twins proved it. Any replacement convention must be
+  machine-checked for the same reason.
 - **`slices.py` as pure predicates** — what makes the sampler testable without a pool
   and translatable to SQL later.
 - **Python computes, the model interprets** — measured splits, the three gates,
@@ -226,21 +349,30 @@ is the list not to "simplify."
 
 Structural work only; see the other two documents for their own ordering.
 
-1. Forwarding mechanism test *(precondition)*.
+1. **Narrow the re-exports, then delete `_ForwardingModule`** *(precondition, §0.3)*.
+   Replace with an AST test asserting submodules never `from .x import y` a
+   patchable name.
 2. `attribution.py` — retires the twins.
 3. `cutfmt.py`, then `labels.py` — pure, mechanical.
-4. `spec.py` + thread `CohortSpec` through the sampling chain; simplify
-   `create_cohort` in `server.py`.
+4. `spec.py` + thread `CohortSpec` through the sampling chain; then collapse
+   `create_cohort`'s 29 parameters. The port already passes them opaquely
+   (`build_cohort(conn, project, **kwargs)`,
+   [analysis_port.py:157](../capture/analysis_port.py#L157)), so the web layer and
+   the package can be changed in one step.
 5. `sampling.py` — then the Postgres port inside it.
-6. Public `model_gate()` accessor; update `server.py:1788`.
-7. **Lift the ruff/mypy exclusion** and fix what it surfaces.
+6. ~~Public `model_gate()` accessor.~~ **Done.**
+7. **Lift the ruff/mypy exclusion** on `capture/analyze` and fix what it surfaces.
+   The rest of `capture/` is already gated, so this is the last file outside the net.
 
 One commit each, full `npm test` between. Do **not** do the
 `extract/models/pipeline/cli` split.
 
 ### Verification
 
-- `npm test` (438 tests) green after every commit.
+- `npm test` green after every commit — **506 tests** at `70f5748` (the earlier
+  figure of 438 predates the fast/DB tier split).
+- `pytest -m unit` for the fast tier; new pure modules should be added to
+  `UNIT_MODULES` in [tests/conftest.py](../tests/conftest.py) as they land.
 - Prompt hashes unchanged: `5637eecc` / `d6416d2b` / `6007448b`. Never edit the
   `.md` prompt files — `cut_key` bakes the hash into cached keys and a whitespace
   change re-bills every cut.

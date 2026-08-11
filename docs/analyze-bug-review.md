@@ -1,14 +1,22 @@
 # analyze — bug review
 
-*Reviewed 2026-08-11 against `main` @ `d2f35e8`. Part 2 of 3:
+*Reviewed 2026-08-11, re-verified against `main` @ `70f5748`. Part 2 of 3:
 [design](analyze-design-review.md) · **bugs** · [cleanups](analyze-cleanups.md).*
+
+> **Re-verification note.** `capture/analyze/` is byte-identical since the first
+> draft, so every defect below still stands as written. Line references into
+> `server.py` were updated — it shrank from 2,242 to 1,731 lines — and the web layer
+> now reaches the package through `capture/analysis_port.py`, so bug #2's call site
+> reads `ap.build_cohort(...)` rather than `analyze.build_cohort(...)`. The blocking
+> behaviour is unchanged.
 
 Defects that produce wrong output, corrupt data, or cost money. Ordered by severity.
 Structural concerns are in the [design review](analyze-design-review.md); mechanical
 tidying is in [cleanups](analyze-cleanups.md).
 
-**Numbering note:** these are independent of the `analyze-refactor.md` "bug 1–10"
-numbering. The mapping is given where it applies.
+**Numbering note:** these are independent of the "bug 1–10" numbering in the
+superseded `docs/analyze-refactor.md` (deleted in `1a913be`). The mapping is given
+where it applies.
 
 | # | Severity | Defect | Status vs. old plan |
 | --- | --- | --- | --- |
@@ -59,8 +67,8 @@ systemd units, cron. Delete `data/index.db` separately, only after confirming
 
 ## 2. 🔴 `create_cohort` blocks the event loop
 
-[`create_cohort`](../capture/server.py#L1339) is `async def`, and at
-[server.py:1404](../capture/server.py#L1404) runs blocking psycopg I/O inline:
+[`create_cohort`](../capture/server.py#L1045) is `async def`, and at
+[server.py:1153](../capture/server.py#L1153) runs blocking psycopg I/O inline:
 
 ```python
 with compat.cohort_connection(resolve_project(project).id) as conn:
@@ -74,12 +82,12 @@ trip, and one or two sorted queries over up to 5,000 rows — each sorting via
 the worker serves, including `/healthz` and `/ingest`.
 
 The same file uses the correct idiom seven times (`asyncio.to_thread` at
-`server.py:79, 111, 402, 411, 420, 1024, 1028`), and `/ingest` itself uses it three
+`server.py:80, 113, 295, 304, 311, 764, 768`), and `/ingest` itself uses it three
 times. This call site simply missed it.
 
 **Fix:** wrap in `asyncio.to_thread`. One line, no refactor, do it first.
 
-By contrast [`get_pool_facets`](../capture/server.py#L1284) is plain `def`, so
+By contrast [`get_pool_facets`](../capture/server.py#L1032) is plain `def`, so
 Starlette already runs it in the threadpool — that one is correct.
 
 ## 3. 🔴 The attribution parsers have diverged
@@ -195,7 +203,7 @@ aggregated in SQL — `facets_from_rows` is a `GROUP BY` written in Python.
 default in a multi-tenant product. It becomes SQL as `url LIKE '%…%'`.
 
 Seven textual occurrences but only **two behavioral**: the `Query` default at
-[server.py:1303](../capture/server.py#L1303) — so any `POST /api/cohorts` omitting
+[server.py:1054](../capture/server.py#L1054) — so any `POST /api/cohorts` omitting
 `url_contains` is silently scoped to that page — and the CLI default (removed by #1).
 The rest are signature defaults always overridden by callers, or label text.
 
@@ -253,7 +261,7 @@ error on either side. The comment acknowledges the coupling; nothing enforces it
 - **`apply_cohort_batch` ordering** (old bug 10) is inert — `by_id` is keyed on
   `session_id` ([:2752](../capture/analyze/__init__.py#L2752)) and never read
   positionally. Sorting `prepared` is cosmetic.
-- **The `write_text` "not ours" warning** in `analyze-refactor.md` is stale. No
+- **The `write_text` "not ours" warning** in the superseded plan was stale. No
   atomic-write branch exists; `write_job`, `write_analysis_result` and the legacy
   migration are ours to change.
 
