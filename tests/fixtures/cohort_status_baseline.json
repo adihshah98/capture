@@ -1,0 +1,2242 @@
+[
+ {
+  "stored": "idle",
+  "done": 0,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 0,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 0,
+  "error": 0,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 0,
+  "error": 1,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 1,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 1,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 0,
+  "error": 0,
+  "queued": 2,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 0,
+  "error": 1,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 0,
+  "error": 2,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 1,
+  "error": 0,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 1,
+  "error": 1,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 2,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 0,
+  "error": 0,
+  "queued": 3,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 3,
+   "error": 0
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 0,
+  "error": 1,
+  "queued": 2,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 1
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 0,
+  "error": 2,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 2
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 0,
+  "error": 3,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 3
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 1,
+  "error": 0,
+  "queued": 2,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 1,
+  "error": 1,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 1,
+  "error": 2,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 2,
+  "error": 0,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 2,
+  "error": 1,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "idle",
+  "done": 3,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 3,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 0,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 0,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 0,
+  "error": 0,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 0,
+  "error": 1,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 1,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 1,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 0,
+  "error": 0,
+  "queued": 2,
+  "expect": "running",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 0,
+  "error": 1,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 0,
+  "error": 2,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 1,
+  "error": 0,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 1,
+  "error": 1,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 2,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 0,
+  "error": 0,
+  "queued": 3,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 3,
+   "error": 0
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 0,
+  "error": 1,
+  "queued": 2,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 1
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 0,
+  "error": 2,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 2
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 0,
+  "error": 3,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 3
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 1,
+  "error": 0,
+  "queued": 2,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 1,
+  "error": 1,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 1,
+  "error": 2,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 2,
+  "error": 0,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 2,
+  "error": 1,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "queued",
+  "done": 3,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 3,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "running",
+  "done": 0,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 0,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "running",
+  "done": 0,
+  "error": 0,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "running",
+  "done": 0,
+  "error": 1,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "running",
+  "done": 1,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 1,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "running",
+  "done": 0,
+  "error": 0,
+  "queued": 2,
+  "expect": "running",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "running",
+  "done": 0,
+  "error": 1,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "running",
+  "done": 0,
+  "error": 2,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "running",
+  "done": 1,
+  "error": 0,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "running",
+  "done": 1,
+  "error": 1,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "running",
+  "done": 2,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "running",
+  "done": 0,
+  "error": 0,
+  "queued": 3,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 3,
+   "error": 0
+  }
+ },
+ {
+  "stored": "running",
+  "done": 0,
+  "error": 1,
+  "queued": 2,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 1
+  }
+ },
+ {
+  "stored": "running",
+  "done": 0,
+  "error": 2,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 2
+  }
+ },
+ {
+  "stored": "running",
+  "done": 0,
+  "error": 3,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 3
+  }
+ },
+ {
+  "stored": "running",
+  "done": 1,
+  "error": 0,
+  "queued": 2,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "running",
+  "done": 1,
+  "error": 1,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "running",
+  "done": 1,
+  "error": 2,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "running",
+  "done": 2,
+  "error": 0,
+  "queued": 1,
+  "expect": "running",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "running",
+  "done": 2,
+  "error": 1,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "running",
+  "done": 3,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 3,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 0,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 0,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 0,
+  "error": 0,
+  "queued": 1,
+  "expect": "paused",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 0,
+  "error": 1,
+  "queued": 0,
+  "expect": "paused",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 1,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 1,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 0,
+  "error": 0,
+  "queued": 2,
+  "expect": "paused",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 0,
+  "error": 1,
+  "queued": 1,
+  "expect": "paused",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 0,
+  "error": 2,
+  "queued": 0,
+  "expect": "paused",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 1,
+  "error": 0,
+  "queued": 1,
+  "expect": "paused",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 1,
+  "error": 1,
+  "queued": 0,
+  "expect": "paused",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 2,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 0,
+  "error": 0,
+  "queued": 3,
+  "expect": "paused",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 3,
+   "error": 0
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 0,
+  "error": 1,
+  "queued": 2,
+  "expect": "paused",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 1
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 0,
+  "error": 2,
+  "queued": 1,
+  "expect": "paused",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 2
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 0,
+  "error": 3,
+  "queued": 0,
+  "expect": "paused",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 3
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 1,
+  "error": 0,
+  "queued": 2,
+  "expect": "paused",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 1,
+  "error": 1,
+  "queued": 1,
+  "expect": "paused",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 1,
+  "error": 2,
+  "queued": 0,
+  "expect": "paused",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 2,
+  "error": 0,
+  "queued": 1,
+  "expect": "paused",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 2,
+  "error": 1,
+  "queued": 0,
+  "expect": "paused",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "paused",
+  "done": 3,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 3,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "done",
+  "done": 0,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 0,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "done",
+  "done": 0,
+  "error": 0,
+  "queued": 1,
+  "expect": "done",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "done",
+  "done": 0,
+  "error": 1,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "done",
+  "done": 1,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 1,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "done",
+  "done": 0,
+  "error": 0,
+  "queued": 2,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "done",
+  "done": 0,
+  "error": 1,
+  "queued": 1,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "done",
+  "done": 0,
+  "error": 2,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "done",
+  "done": 1,
+  "error": 0,
+  "queued": 1,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "done",
+  "done": 1,
+  "error": 1,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "done",
+  "done": 2,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "done",
+  "done": 0,
+  "error": 0,
+  "queued": 3,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 3,
+   "error": 0
+  }
+ },
+ {
+  "stored": "done",
+  "done": 0,
+  "error": 1,
+  "queued": 2,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 1
+  }
+ },
+ {
+  "stored": "done",
+  "done": 0,
+  "error": 2,
+  "queued": 1,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 2
+  }
+ },
+ {
+  "stored": "done",
+  "done": 0,
+  "error": 3,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 3
+  }
+ },
+ {
+  "stored": "done",
+  "done": 1,
+  "error": 0,
+  "queued": 2,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "done",
+  "done": 1,
+  "error": 1,
+  "queued": 1,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "done",
+  "done": 1,
+  "error": 2,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "done",
+  "done": 2,
+  "error": 0,
+  "queued": 1,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "done",
+  "done": 2,
+  "error": 1,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "done",
+  "done": 3,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 3,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "error",
+  "done": 0,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 0,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "error",
+  "done": 0,
+  "error": 0,
+  "queued": 1,
+  "expect": "error",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "error",
+  "done": 0,
+  "error": 1,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "error",
+  "done": 1,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 1,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "error",
+  "done": 0,
+  "error": 0,
+  "queued": 2,
+  "expect": "error",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "error",
+  "done": 0,
+  "error": 1,
+  "queued": 1,
+  "expect": "error",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "error",
+  "done": 0,
+  "error": 2,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "error",
+  "done": 1,
+  "error": 0,
+  "queued": 1,
+  "expect": "error",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "error",
+  "done": 1,
+  "error": 1,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "error",
+  "done": 2,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "error",
+  "done": 0,
+  "error": 0,
+  "queued": 3,
+  "expect": "error",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 3,
+   "error": 0
+  }
+ },
+ {
+  "stored": "error",
+  "done": 0,
+  "error": 1,
+  "queued": 2,
+  "expect": "error",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 1
+  }
+ },
+ {
+  "stored": "error",
+  "done": 0,
+  "error": 2,
+  "queued": 1,
+  "expect": "error",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 2
+  }
+ },
+ {
+  "stored": "error",
+  "done": 0,
+  "error": 3,
+  "queued": 0,
+  "expect": "error",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 3
+  }
+ },
+ {
+  "stored": "error",
+  "done": 1,
+  "error": 0,
+  "queued": 2,
+  "expect": "error",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "error",
+  "done": 1,
+  "error": 1,
+  "queued": 1,
+  "expect": "error",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "error",
+  "done": 1,
+  "error": 2,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "error",
+  "done": 2,
+  "error": 0,
+  "queued": 1,
+  "expect": "error",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "error",
+  "done": 2,
+  "error": 1,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "error",
+  "done": 3,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 3,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 0,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 0,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 0,
+  "error": 0,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 0,
+  "error": 1,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 1,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 1,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 0,
+  "error": 0,
+  "queued": 2,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 0,
+  "error": 1,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 0,
+  "error": 2,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 1,
+  "error": 0,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 1,
+  "error": 1,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 2,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 0,
+  "error": 0,
+  "queued": 3,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 3,
+   "error": 0
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 0,
+  "error": 1,
+  "queued": 2,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 1
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 0,
+  "error": 2,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 2
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 0,
+  "error": 3,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 3
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 1,
+  "error": 0,
+  "queued": 2,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 1,
+  "error": 1,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 1,
+  "error": 2,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 2,
+  "error": 0,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 2,
+  "error": 1,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": "bogus",
+  "done": 3,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 3,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": null,
+  "done": 0,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 0,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": null,
+  "done": 0,
+  "error": 0,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": null,
+  "done": 0,
+  "error": 1,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 1,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": null,
+  "done": 1,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 1,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": null,
+  "done": 0,
+  "error": 0,
+  "queued": 2,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": null,
+  "done": 0,
+  "error": 1,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": null,
+  "done": 0,
+  "error": 2,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": null,
+  "done": 1,
+  "error": 0,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": null,
+  "done": 1,
+  "error": 1,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 2,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": null,
+  "done": 2,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 2,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ },
+ {
+  "stored": null,
+  "done": 0,
+  "error": 0,
+  "queued": 3,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 3,
+   "error": 0
+  }
+ },
+ {
+  "stored": null,
+  "done": 0,
+  "error": 1,
+  "queued": 2,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 2,
+   "error": 1
+  }
+ },
+ {
+  "stored": null,
+  "done": 0,
+  "error": 2,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 1,
+   "error": 2
+  }
+ },
+ {
+  "stored": null,
+  "done": 0,
+  "error": 3,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 0,
+   "running": 0,
+   "queued": 0,
+   "error": 3
+  }
+ },
+ {
+  "stored": null,
+  "done": 1,
+  "error": 0,
+  "queued": 2,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 2,
+   "error": 0
+  }
+ },
+ {
+  "stored": null,
+  "done": 1,
+  "error": 1,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 1,
+   "error": 1
+  }
+ },
+ {
+  "stored": null,
+  "done": 1,
+  "error": 2,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 1,
+   "running": 0,
+   "queued": 0,
+   "error": 2
+  }
+ },
+ {
+  "stored": null,
+  "done": 2,
+  "error": 0,
+  "queued": 1,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 1,
+   "error": 0
+  }
+ },
+ {
+  "stored": null,
+  "done": 2,
+  "error": 1,
+  "queued": 0,
+  "expect": "idle",
+  "progress": {
+   "total": 3,
+   "done": 2,
+   "running": 0,
+   "queued": 0,
+   "error": 1
+  }
+ },
+ {
+  "stored": null,
+  "done": 3,
+  "error": 0,
+  "queued": 0,
+  "expect": "done",
+  "progress": {
+   "total": 3,
+   "done": 3,
+   "running": 0,
+   "queued": 0,
+   "error": 0
+  }
+ }
+]

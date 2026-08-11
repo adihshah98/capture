@@ -459,6 +459,119 @@ def forget_pool_cohorts(pool: Path) -> int:
     return analyze_store.forget_pool(conn, key)
 
 
+class CohortState:
+    """The statuses a cohort can hold. Exactly the six that are persisted.
+
+    The wider vocabulary the refactor notes sketch (extracting / submitted /
+    applying) is not here on purpose: those are phases of `run_cohort_job`'s
+    control flow that nothing writes down, so declaring them would invent
+    states no code can produce or observe.
+    """
+
+    IDLE = "idle"
+    QUEUED = "queued"
+    RUNNING = "running"
+    PAUSED = "paused"
+    DONE = "done"
+    ERROR = "error"
+
+
+COHORT_STATES = (
+    CohortState.IDLE,
+    CohortState.QUEUED,
+    CohortState.RUNNING,
+    CohortState.PAUSED,
+    CohortState.DONE,
+    CohortState.ERROR,
+)
+
+# Which moves are legitimate. Read as "from: {allowed to}".
+#
+# DONE and ERROR are not frozen. A terminal status is recomputed from the
+# session rows, because the stored value goes stale — a crashed runner leaves
+# a cohort marked running, a retried session turns an errored cohort back into
+# a finished one. The rows are the truth; the stored status is a cache.
+COHORT_TRANSITIONS = {
+    CohortState.IDLE: {CohortState.QUEUED, CohortState.RUNNING, CohortState.PAUSED,
+                       CohortState.DONE, CohortState.ERROR, CohortState.IDLE},
+    CohortState.QUEUED: {CohortState.RUNNING, CohortState.PAUSED, CohortState.DONE,
+                         CohortState.ERROR, CohortState.QUEUED},
+    CohortState.RUNNING: {CohortState.DONE, CohortState.ERROR, CohortState.PAUSED,
+                          CohortState.RUNNING},
+    CohortState.PAUSED: {CohortState.RUNNING, CohortState.QUEUED, CohortState.DONE,
+                         CohortState.PAUSED},
+    # Terminal, but recomputed: see above.
+    CohortState.DONE: {CohortState.DONE, CohortState.ERROR, CohortState.RUNNING},
+    CohortState.ERROR: {CohortState.ERROR, CohortState.DONE, CohortState.RUNNING,
+                        CohortState.QUEUED},
+}
+
+
+def cohort_transition(current: str, nxt: str, *, why: str = "") -> str:
+    """Record a status move, reporting any the table does not declare.
+
+    Deliberately permissive: this runs inside a live cohort run with a paid
+    Gemini batch in flight, so an undeclared move must not raise and strand it.
+    The log is the signal — `tests/test_cohort_state.py` drives the real
+    pipeline and asserts nothing is logged, so the table is verified without
+    the enforcement being able to break a run.
+    """
+    if current not in COHORT_TRANSITIONS:
+        return nxt
+    if nxt not in COHORT_TRANSITIONS[current]:
+        print(f"cohort status {current} -> {nxt} is not a declared transition ({why})")
+        _undeclared_transitions.append((current, nxt, why))
+    return nxt
+
+
+# Test hook: the pipeline should never append here. Not a log sink — bounded
+# so a long-running server cannot accumulate.
+_undeclared_transitions: list = []
+
+
+def project_cohort_status(stored: str, tally: dict, *, total: int) -> str:
+    """Decide a cohort's status from its session tallies.
+
+    A projection, not an inference: everything it needs is in `tally`, and the
+    filesystem is not consulted. The four rules, in priority order:
+
+      1. Nothing to do (no sessions, or all done) — the cohort is done.
+      2. IDLE and PAUSED are sticky. Sampled-but-not-started stays that way
+         until the user starts it, and paused stays paused even if a stale job
+         still looks alive. Only genuine in-flight work overrides them.
+      3. Work outstanding — running. A queued row revives only a cohort that
+         was already RUNNING or QUEUED, so an errored cohort is not silently
+         resurrected by one leftover row; the user has to retry.
+      4. Everything settled with at least one error — done if anything
+         succeeded, error if nothing did.
+    """
+    current = stored if stored in COHORT_STATES else CohortState.IDLE
+    done, running, queued, errors = (
+        tally["done"], tally["running"], tally["queued"], tally["error"],
+    )
+
+    # 1. Nothing left to do.
+    if not total or done >= total:
+        return cohort_transition(current, CohortState.DONE, why="all sessions accounted for")
+
+    # 2. Sticky states.
+    if current in (CohortState.IDLE, CohortState.PAUSED):
+        if running:
+            return cohort_transition(current, CohortState.RUNNING, why="work already in flight")
+        return current
+
+    # 3. Work outstanding.
+    if running or (queued and current in (CohortState.RUNNING, CohortState.QUEUED)):
+        return cohort_transition(current, CohortState.RUNNING, why="sessions still to analyze")
+
+    # 4. Settled with errors.
+    if errors and done + errors >= total and not queued and not running:
+        settled = CohortState.ERROR if done == 0 else CohortState.DONE
+        return cohort_transition(current, settled, why="every session settled")
+
+    return current
+
+
 def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
     """Refresh per-session status from analysis.json / analysis.status.json on disk."""
     sessions = []
@@ -498,26 +611,16 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
             queued += 1
         sessions.append(row)
 
-    status = cohort.get("status") or "idle"
-    if status not in ("idle", "queued", "running", "paused", "done", "error"):
-        status = "idle"
-
-    if done >= len(sessions) and sessions:
-        status = "done"
-    elif not sessions:
-        status = "done"
-    elif status == "idle":
-        # Stay sampled-until-started unless work is somehow already in flight.
-        if running:
-            status = "running"
-    elif status == "paused":
-        # Keep paused until the user hits Start again (even if jobs look stale).
-        if running:
-            status = "running"
-    elif running or (queued and status in ("running", "queued")):
-        status = "running"
-    elif errors and done + errors >= len(sessions) and not queued and not running:
-        status = "error" if done == 0 else "done"
+    progress = {
+        "total": len(sessions),
+        "done": done,
+        "running": running,
+        "queued": queued,
+        "error": errors,
+    }
+    status = project_cohort_status(
+        cohort.get("status") or CohortState.IDLE, progress, total=len(sessions)
+    )
 
     selection = cohort.get("selection")
     if not selection:
@@ -545,13 +648,7 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
         "selection": selection,
         "status": status,
         "sessions": sessions,
-        "progress": {
-            "total": len(sessions),
-            "done": done,
-            "running": running,
-            "queued": queued,
-            "error": errors,
-        },
+        "progress": progress,
     }
 
 

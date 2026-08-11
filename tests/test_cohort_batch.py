@@ -30,7 +30,19 @@ class TestCohortBatch(unittest.TestCase):
         analyze.ANALYSIS_ENABLED = True
         analyze.ANALYZE_BATCH = True
         analyze._gate_loop = None
+        # Every test in this class drives the real pipeline, so each one is an
+        # enforcement pass over COHORT_TRANSITIONS: cohort_transition logs
+        # rather than raises, and this turns the log into a failure.
+        analyze._undeclared_transitions.clear()
+        self.addCleanup(self.assert_transitions_declared)
         self.addCleanup(self.restore)
+
+    def assert_transitions_declared(self):
+        self.assertEqual(
+            analyze._undeclared_transitions,
+            [],
+            "the pipeline made a status move COHORT_TRANSITIONS does not declare",
+        )
 
     def restore(self):
         for key, value in self._saved.items():

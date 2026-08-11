@@ -63,18 +63,27 @@ class ServerCase(unittest.TestCase):
             "CAPTURE_DATABASE_ADMIN_URL": cls.admin_url,
             "CAPTURE_PROJECT_CACHE_TTL_S": "0",
             "REPLAY_AUTH_DISABLED": "1",
+            # print() is block-buffered when stdout is a file, so without this
+            # the captured log stays empty until the process exits and any test
+            # asserting on it passes vacuously.
+            "PYTHONUNBUFFERED": "1",
             **cls.env,
         }
         cls.start_server()
 
     @classmethod
     def start_server(cls):
+        # Captured rather than discarded so tests can assert on what the server
+        # reported — cohort_transition logs undeclared status moves instead of
+        # raising, and out here that log is the only way to see one.
+        cls.log_path = cls.data_dir / "server.log"
+        cls.log_file = open(cls.log_path, "ab")
         cls.proc = subprocess.Popen(
             [str(UVICORN), "server:app", "--port", str(cls.port), "--log-level", "error"],
             cwd=REPO,
             env=cls.run_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=cls.log_file,
+            stderr=subprocess.STDOUT,
         )
         # Generous: each class now also provisions a database, and this can run
         # straight after a test that saturates the box.
@@ -99,7 +108,19 @@ class ServerCase(unittest.TestCase):
             cls.proc.kill()
             cls.proc.wait(timeout=10)
             raise
+        finally:
+            try:
+                cls.log_file.close()
+            except Exception:
+                pass
         shutil.rmtree(cls.data_dir, ignore_errors=True)
+
+    def server_log(self) -> str:
+        """What the server process printed so far."""
+        try:
+            return self.log_path.read_text(errors="replace")
+        except OSError:
+            return ""
 
     def cohort_store(self):
         """A fresh connection to the cohort tables the server process writes.
@@ -1182,6 +1203,33 @@ class TestCohort(ServerCase):
         )
         self.assertEqual(status, 400)
         self.assertIn("empty", json.loads(body)["error"])
+
+    def test_the_cohort_lifecycle_makes_only_declared_transitions(self):
+        """Drive create → start → pause → start over HTTP and check the server
+        never reported a status move COHORT_TRANSITIONS does not declare.
+
+        The server runs in a subprocess, so its stdout is the only channel —
+        cohort_transition logs rather than raises so a live run with a paid
+        batch in flight cannot be stranded by an unforeseen move.
+        """
+        sid = "lifecyc" + "x" * 25
+        self.assertEqual(self.ingest(sid), 200)
+        self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
+        self.seed_analysis(sid)
+        cohort = self.create_and_analyze(purchased=1, all_n=0)
+        cohort_id = cohort["id"]
+        self.wait_done(cohort_id)
+
+        for path in ("pause", "analyze"):
+            request(f"{self.base}/api/cohorts/{cohort_id}/{path}", method="POST", data=b"")
+        request(f"{self.base}/api/cohorts/{cohort_id}")
+
+        offenders = [
+            line
+            for line in self.server_log().splitlines()
+            if "not a declared transition" in line
+        ]
+        self.assertEqual(offenders, [])
 
     def test_deleting_a_session_removes_it_from_its_cohorts(self):
         """Otherwise the membership row outlives the recording, and
