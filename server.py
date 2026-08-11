@@ -71,6 +71,8 @@ async def lifespan(_app):
             "CAPTURE_READ_ONLY=1 — recording is refused and retention is disabled; "
             "this server only reads the database it is pointed at"
         )
+    if PREFLIGHT:
+        print("CAPTURE_PREFLIGHT=1 — no retention sweep, no cohort resume")
 
     async def loop():
         while True:
@@ -79,9 +81,9 @@ async def lifespan(_app):
                 print(f"retention: removed {removed} expired session(s)")
             await asyncio.sleep(24 * 3600)
 
-    task = None if READ_ONLY else asyncio.create_task(loop())
+    task = None if (READ_ONLY or PREFLIGHT) else asyncio.create_task(loop())
     # Cohorts mid-Batch lose their asyncio task on restart — pick them back up.
-    for pool, cohort in analyze.cohorts_needing_batch_resume(DATA_ROOT):
+    for pool, cohort in ([] if PREFLIGHT else analyze.cohorts_needing_batch_resume(DATA_ROOT)):
         key = _cohort_key(pool, cohort["id"])
         if key not in _cohort_tasks:
             print(f"resuming cohort batch {cohort['id']} ({(cohort.get('batch') or {}).get('name')})")
@@ -251,6 +253,13 @@ RETENTION_DAYS = float(os.environ.get("RETENTION_DAYS", "30"))
 # permission error: the sweep would otherwise try to DELETE rows it can see but
 # does not own, which is production data one careless GRANT away from deletion.
 READ_ONLY = os.environ.get("CAPTURE_READ_ONLY") == "1"
+
+# A throwaway instance a deploy starts on a spare port to prove the release
+# boots before the live one is replaced. It must not do any of the background
+# work startup normally kicks off: the retention sweep would race the running
+# server's, and resuming a Gemini batch alongside it would pay for that batch
+# a second time.
+PREFLIGHT = os.environ.get("CAPTURE_PREFLIGHT") == "1"
 
 def gunzip(body: bytes, limit: int) -> bytes:
 

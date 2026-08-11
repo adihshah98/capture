@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Each deploy builds a self-contained release directory and the service is
+# pointed at it by a symlink. Nothing is written into the tree the running
+# server is executing from: no tar over live code, no pip into the venv the
+# live interpreter is using. The new release is started on a spare port and
+# health-checked before anything switches, so a missing module or a failed
+# migration is caught while the old release is still serving. Rolling back is
+# repointing the symlink at a release that already ran.
+
 HOST="${CAPTURE_HOST:-ec2-user@ec2-35-167-249-40.us-west-2.compute.amazonaws.com}"
 KEY="${CAPTURE_KEY:-$HOME/Downloads/capture-key.pem}"
 PUBLIC_URL="${CAPTURE_PUBLIC_URL:-https://d1lt8dgxjrizij.cloudfront.net}"
+# Each release carries its own venv and node_modules, a few hundred MB.
+KEEP_RELEASES="${CAPTURE_KEEP_RELEASES:-3}"
+PREFLIGHT_PORT="${CAPTURE_PREFLIGHT_PORT:-8099}"
 
 cd "$(dirname "$0")"
 npm run build
+
+RELEASE="$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null || RELEASE="$RELEASE-dirty"
+echo "release $RELEASE"
+
 # A glob, not a list: an explicit one silently drops any module added since
 # it was last edited, and the server only fails on import at startup.
 tar czf /tmp/capture-deploy.tar.gz \
@@ -15,121 +31,157 @@ tar czf /tmp/capture-deploy.tar.gz \
   src/analyze/extract.mjs src/analyze/replayer.bundle.js
 scp -q -i "$KEY" -o StrictHostKeyChecking=accept-new /tmp/capture-deploy.tar.gz "$HOST:/tmp/"
 
-ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" 'bash -s' <<'REMOTE'
+ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "$HOST" 'bash -s' \
+  "$RELEASE" "$KEEP_RELEASES" "$PREFLIGHT_PORT" <<'REMOTE'
 set -euo pipefail
-cd /opt/capture
+RELEASE="${1:?release id}"; KEEP="${2:?keep count}"; PORT="${3:?preflight port}"
 
-rm -rf .rollback && mkdir .rollback
-cp -a *.py requirements.txt public src migrations .rollback/ 2>/dev/null || true
+ROOT=/opt/capture
+RELEASES="$ROOT/releases"
+SHARED="$ROOT/shared"
+TARGET="$RELEASES/$RELEASE"
+UNIT=/etc/systemd/system/capture.service
 
-tar xzf /tmp/capture-deploy.tar.gz
-[ -d .venv ] || python3.11 -m venv .venv
-.venv/bin/pip install -q -r requirements.txt
+sudo mkdir -p "$RELEASES" "$SHARED/playwright"
+sudo chown -R ec2-user "$RELEASES" "$SHARED"
+rm -rf "$TARGET" && mkdir -p "$TARGET"
+# A release that never went live must not linger: it would otherwise age out a
+# release that did, leaving nothing good to roll back to.
+trap 'if [ "$(readlink -f "$ROOT/current" 2>/dev/null)" != "$TARGET" ]; then rm -rf "$TARGET"; fi' EXIT
+tar xzf /tmp/capture-deploy.tar.gz -C "$TARGET"
 
-# AI analysis needs a headless browser to rebuild the recorded page. Without
-# node the rest of the app still runs; the server just reports analysis as
-# unavailable and the button stays hidden.
+echo "building the release venv"
+python3.11 -m venv "$TARGET/.venv"
+"$TARGET/.venv/bin/pip" install -q -r "$TARGET/requirements.txt"
+
+# The browser download is large and identical across releases, so it lives in
+# shared and is only fetched when missing.
+export PLAYWRIGHT_BROWSERS_PATH="$SHARED/playwright"
 if command -v node >/dev/null 2>&1; then
-  npm install --omit=dev --no-audit --no-fund --silent
-  export PLAYWRIGHT_BROWSERS_PATH=/opt/capture/.playwright
-  if command -v apt-get >/dev/null 2>&1; then
-    npx --yes playwright install --with-deps chromium
+  (cd "$TARGET" && npm install --omit=dev --no-audit --no-fund --silent)
+  if [ -z "$(ls -A "$SHARED/playwright" 2>/dev/null)" ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      (cd "$TARGET" && npx --yes playwright install --with-deps chromium)
+    else
+      sudo dnf install -y -q nss nspr atk at-spi2-atk at-spi2-core cups-libs \
+        libdrm libXcomposite libXdamage libXext libXfixes libXrandr \
+        mesa-libgbm libxkbcommon pango cairo alsa-lib
+      (cd "$TARGET" && npx --yes playwright install chromium)
+    fi
   else
-    sudo dnf install -y -q nss nspr atk at-spi2-atk at-spi2-core cups-libs \
-      libdrm libXcomposite libXdamage libXext libXfixes libXrandr \
-      mesa-libgbm libxkbcommon pango cairo alsa-lib
-    npx --yes playwright install chromium
-  fi
-
-  # Boxes bootstrapped before AI analysis existed have a unit without the
-  # browser path, so the service would not find the chromium we just installed.
-  if ! grep -q PLAYWRIGHT_BROWSERS_PATH /etc/systemd/system/capture.service; then
-    sudo sed -i '/^WorkingDirectory=/a Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/capture/.playwright' \
-      /etc/systemd/system/capture.service
-    sudo systemctl daemon-reload
-    echo "patched capture.service with the browser path"
+    echo "playwright browser already in shared"
   fi
 else
   echo "warning: node not installed — AI analysis will be unavailable" >&2
 fi
 
-UNIT=/etc/systemd/system/capture.service
-patched=0
-
-# State used to live in /opt/capture/data, inside the directory a deploy
-# overwrites. Move it out once, with the service stopped so nothing is written
-# to the old location after the copy.
-if ! grep -q CAPTURE_DATA_DIR "$UNIT"; then
-  sudo systemctl stop capture 2>/dev/null || true
-  if [ -d /opt/capture/data ] && [ ! -d /var/lib/capture ]; then
-    # Recordings run to tens of GB. On one filesystem this is a rename and
-    # returns instantly; copying would hold the service down for minutes and
-    # briefly need twice the disk.
-    if [ "$(stat -c %d /opt/capture)" = "$(stat -c %d /var/lib)" ]; then
-      sudo mv /opt/capture/data /var/lib/capture
-      echo "state moved to /var/lib/capture (rename, same filesystem)"
-    else
-      sudo mkdir -p /var/lib/capture
-      sudo cp -a /opt/capture/data/. /var/lib/capture/
-      echo "state copied to /var/lib/capture (different filesystem)"
-    fi
-  else
-    sudo mkdir -p /var/lib/capture
-  fi
-  sudo chown -R ec2-user /var/lib/capture
-  sudo sed -i '/^WorkingDirectory=/a Environment=CAPTURE_DATA_DIR=/var/lib/capture' "$UNIT"
-  patched=1
-fi
-
-# A SIGKILL mid-write is what corrupts session files. Let uvicorn bound its own
-# drain and give systemd more room than uvicorn takes, so it never has to.
-if ! grep -q timeout-graceful-shutdown "$UNIT"; then
-  sudo sed -i '/^ExecStart=.*uvicorn/ s/$/ --timeout-graceful-shutdown 25/' "$UNIT"
-  patched=1
-fi
-if ! grep -q TimeoutStopSec "$UNIT"; then
-  sudo sed -i '/^Restart=always/i TimeoutStopSec=40' "$UNIT"
-  patched=1
-fi
-if [ "$patched" -eq 1 ]; then
-  sudo systemctl daemon-reload
-  echo "patched capture.service (data dir + graceful shutdown)"
-fi
-
-# Migrations run before the new code starts, as the admin role. Schema changes
-# are additive per phase, so the old build keeps working if this deploy fails.
-if grep -q CAPTURE_DATABASE_URL /etc/capture.env 2>/dev/null; then
-  set -a; . /etc/capture.env; set +a
-  if [ "${CAPTURE_READ_ONLY:-}" = "1" ]; then
-    echo "read-only server — skipping migrations, it does not own this schema"
-  elif ! .venv/bin/python db.py; then
-    echo "migrations failed — not restarting" >&2
-    exit 1
-  fi
-else
-  echo "CAPTURE_DATABASE_URL is not in /etc/capture.env — the server will not start" >&2
+set -a; . /etc/capture.env; set +a
+if [ -z "${CAPTURE_DATABASE_URL:-}" ]; then
+  echo "CAPTURE_DATABASE_URL is not in /etc/capture.env — refusing to deploy" >&2
   exit 1
 fi
 
+if [ "${CAPTURE_READ_ONLY:-}" = "1" ]; then
+  echo "read-only server — skipping migrations, it does not own this schema"
+elif ! (cd "$TARGET" && .venv/bin/python db.py); then
+  echo "migrations failed — the running release is untouched" >&2
+  exit 1
+fi
+
+# Prove the release boots and answers before the live one is disturbed. This is
+# what catches a missing module, which previously only surfaced once the old
+# code had already been overwritten. CAPTURE_PREFLIGHT keeps this instance
+# inert: no retention sweep racing the live one, no cohort batch resumed twice.
+echo "pre-flighting on port $PORT"
+# The port must be silent first. An instance leaked by an earlier deploy would
+# answer in place of the new release and pass one that cannot even import.
+pkill -f "uvicorn server:app .*--port $PORT" 2>/dev/null || true
+sleep 1
+if curl -sf -o /dev/null "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
+  echo "something is still answering on port $PORT — refusing to pre-flight blind" >&2
+  exit 1
+fi
+
+# Not wrapped in a subshell: $! has to be uvicorn itself, or the kill below
+# reaps the subshell and leaves the server running.
+cd "$TARGET"
+CAPTURE_PREFLIGHT=1 .venv/bin/uvicorn server:app \
+  --host 127.0.0.1 --port "$PORT" --log-level warning >/tmp/preflight.log 2>&1 &
+PREFLIGHT_PID=$!
+cd "$ROOT"
+ok=0
+for _ in $(seq 1 40); do
+  kill -0 "$PREFLIGHT_PID" 2>/dev/null || break
+  if curl -sf -o /tmp/preflight.json "http://127.0.0.1:$PORT/healthz"; then ok=1; break; fi
+  sleep 1
+done
+kill "$PREFLIGHT_PID" 2>/dev/null || true
+wait "$PREFLIGHT_PID" 2>/dev/null || true
+pkill -f "uvicorn server:app .*--port $PORT" 2>/dev/null || true
+if [ "$ok" -ne 1 ]; then
+  echo "the new release did not come up — the running one is untouched" >&2
+  tail -20 /tmp/preflight.log >&2 || true
+  exit 1
+fi
+echo "pre-flight ok: $(cat /tmp/preflight.json)"
+
+PREVIOUS="$(readlink -f "$ROOT/current" 2>/dev/null || true)"
+
+# Swap first: until this exists, the rewritten unit would name a missing path.
+ln -sfnT "$TARGET" "$ROOT/current.new"
+mv -fT "$ROOT/current.new" "$ROOT/current"
+
+sudo tee "$UNIT" >/dev/null <<UNITFILE
+[Unit]
+Description=Capture session replay server
+After=network.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=$ROOT/current
+Environment=PLAYWRIGHT_BROWSERS_PATH=$SHARED/playwright
+EnvironmentFile=/etc/capture.env
+EnvironmentFile=/etc/capture-cloudfront.env
+ExecStart=$ROOT/current/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 80 --proxy-headers --forwarded-allow-ips=\${FORWARDED_ALLOW_IPS} --timeout-graceful-shutdown 25
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+TimeoutStopSec=40
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNITFILE
+sudo systemctl daemon-reload
 sudo systemctl restart capture
 
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   if curl -sf -o /tmp/health.json localhost/healthz; then
     echo "origin health: $(cat /tmp/health.json)"
+    live="$(readlink -f "$ROOT/current")"
+    ls -1dt "$RELEASES"/*/ 2>/dev/null | tail -n +$((KEEP + 1)) | while read -r old; do
+      [ "$(readlink -f "$old")" = "$live" ] && continue
+      rm -rf "$old"
+    done
+    echo "releases on the box: $(ls -1 "$RELEASES" | wc -l)"
     exit 0
   fi
   sleep 1
 done
 
-echo "origin health check FAILED — rolling back" >&2
+echo "origin health check FAILED" >&2
 curl -s localhost/healthz >&2 || echo "(no response at all)" >&2
-cp -a .rollback/. /opt/capture/
-sudo systemctl restart capture
-sleep 3
-if curl -sf -o /dev/null localhost/healthz; then
-  echo "rolled back to the previous build, which is healthy" >&2
+if [ -n "$PREVIOUS" ] && [ -d "$PREVIOUS" ]; then
+  echo "rolling back to $(basename "$PREVIOUS")" >&2
+  ln -sfnT "$PREVIOUS" "$ROOT/current.new"
+  mv -fT "$ROOT/current.new" "$ROOT/current"
+  sudo systemctl restart capture
+  sleep 3
+  if curl -sf -o /dev/null localhost/healthz; then
+    echo "rolled back to the previous release, which is healthy" >&2
+  else
+    echo "ROLLBACK ALSO UNHEALTHY — the box needs manual attention" >&2
+  fi
 else
-  echo "ROLLBACK ALSO UNHEALTHY — the box needs manual attention" >&2
+  echo "no previous release to roll back to" >&2
 fi
 exit 1
 REMOTE
@@ -180,4 +232,4 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo "deployed to $HOST and verified at $PUBLIC_URL"
+echo "deployed $RELEASE to $HOST and verified at $PUBLIC_URL"
