@@ -44,7 +44,6 @@ PATCHABLE = frozenset(
         "stream_gemini_chat",
         "wait_gemini_batch",
         "submit_prepared_gemini_batch",
-        "submit_gemini_batch",
         "parse_batch_results",
         "cancel_gemini_batch",
         "_cohort_sync_model",

@@ -19,29 +19,32 @@ structural work, and good filler between the larger steps.
 
 ---
 
-## 1. Dead code
+## 1. Dead code — **done**
 
 Verified by grep across `capture/`, `tests/` and `src/`.
 
-| Symbol | Location | Refs | Action |
-| --- | --- | --- | --- |
-| `submit_gemini_batch` | [:2163](../capture/analyze/__init__.py#L2163) | **definition only** | delete |
-| `_estimate_inlined_bytes` | [:2155](../capture/analyze/__init__.py#L2155) | only from the above | delete |
-| `ANALYZE_BATCH_INLINE_MAX_BYTES` | [:111](../capture/analyze/__init__.py#L111) | only from the above | delete |
-| `status_path` | [:149](../capture/analyze/__init__.py#L149) | **definition only** | delete |
+| Symbol | Refs | Action |
+| --- | --- | --- |
+| `submit_gemini_batch` | **definition only** | deleted |
+| `_estimate_inlined_bytes` | only from the above | deleted |
+| `ANALYZE_BATCH_INLINE_MAX_BYTES` | only from the above | deleted |
+| `status_path` | **definition only** | deleted |
+| `ANALYSIS_STATUS_FILE` | only from `status_path` | deleted |
 
-`submit_gemini_batch` is the non-cohort inline-batch branch. Deleting it removes the
-inline path entirely — cohorts already always use the Files API
-([deep-dive 03](deep-dive/03-model-paths-batch-and-sync.md)). **Confirm that is
-intended** before deleting; if a non-cohort batch entry point is planned, keep it and
-mark it as such.
+`submit_gemini_batch` was the non-cohort inline-batch branch; removing it removes the
+inline path entirely, which is intended — cohorts already always use the Files API
+([deep-dive 03](deep-dive/03-model-paths-batch-and-sync.md), updated to match). If a
+non-cohort batch entry point is wanted later it is a fresh design, not a revival.
 
-`status_path` is a leftover from when job status was a file; job state moved to
-Postgres in `0004_analyses.sql`.
+`status_path` was a leftover from when job status was a file; job state moved to
+Postgres in `0004_analyses.sql`. It took `ANALYSIS_STATUS_FILE`, its only remaining
+reader, with it.
 
-**Also removed by [bug #1](analyze-bug-review.md)** (the CLI deletion): `main`,
-`_cli_run_cohort`, `_cli_pool`, `_cli_data_root`, the argparse block, the `__main__`
-guard, and the then-unused `argparse` / `sqlite3` imports — ~135 lines.
+**The CLI went in the same pass** (listed under [bug #1](analyze-bug-review.md)):
+`main`, `_cli_run_cohort`, `_cli_pool`, `_cli_data_root`, the argparse block, the
+`__main__` guard, and the then-unused `argparse` import. `sqlite3` stays for now —
+its only remaining uses are the stale annotations in #6, which is the item that
+removes it. 208 lines total; `npm run test:server` green at 525 tests.
 
 ## 2. Re-exports with no consumers
 
@@ -256,8 +259,8 @@ Safe to interleave with the other two documents' work.
 forwarding). These are ordered and must land before any new submodule, so nothing is
 wired into a mechanism that is about to go.
 
-**During:** #1 (dead code, alongside the CLI deletion), #6 (annotations — after the
-CLI is gone).
+**During:** ~~#1 (dead code, alongside the CLI deletion)~~ — **done**; #6
+(annotations) is now unblocked, since the CLI went with it.
 
 **Last:** #9 (linter exclusion).
 

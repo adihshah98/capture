@@ -114,16 +114,19 @@ Reordering these two blocks reintroduces the bug: an unhashable `state` raises
 
 ## Streaming submission: the OOM that shaped the API
 
-There are two submit functions.
-[`submit_gemini_batch`](../../capture/analyze/__init__.py#L2163) takes fully-built
-`InlinedRequest` objects — and its own docstring warns you off:
+There used to be two submit functions. `submit_gemini_batch` took fully-built
+`InlinedRequest` objects, and its own docstring warned you off it:
 
 > ```python
 > Prefer submit_prepared_gemini_batch for cohorts: building every request up
 > front keeps all frame bytes in RAM and OOM'd a 2GB box at n=100.
 > ```
 
-[`submit_prepared_gemini_batch`](../../capture/analyze/__init__.py#L2218) takes
+It was the non-cohort inline branch, and it reached zero callers; it and its
+`_estimate_inlined_bytes` helper were deleted per the cleanup review. What remains
+is the streaming path that OOM shaped.
+
+[`submit_prepared_gemini_batch`](../../capture/analyze/__init__.py#L1471) takes
 `(entry, digest)` pairs and builds each request *inside* the write loop:
 
 ```python
@@ -146,12 +149,10 @@ It also **always** uses the Files API, never the inline path:
 > is both oversized and an OOM hazard while estimating size.
 > ```
 
-`_estimate_inlined_bytes` would have to serialise every request to measure it —
-reintroducing the exact allocation the streaming path exists to avoid.
-
-**As of today `submit_gemini_batch` and `_estimate_inlined_bytes` have zero
-callers.** They are the non-cohort inline branch, kept but unreachable. See the
-cleanup review.
+Choosing between inline and Files would have meant serialising every request to
+measure it — reintroducing the exact allocation the streaming path exists to avoid.
+That size check is why the deleted `_estimate_inlined_bytes` existed, and why
+nothing replaced it: the Files API unconditionally is the cheaper answer.
 
 ### `pool` is what carries campaign metadata
 

@@ -14,7 +14,6 @@ once sampled, so a "cut" across it can be analysed once and cached beside it
 (`refresh=1` busts that cache).
 """
 
-import argparse
 import asyncio
 import hashlib
 import json
@@ -38,7 +37,6 @@ from . import store as analyze_store
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 ANALYSIS_FILE = "analysis.json"
-ANALYSIS_STATUS_FILE = "analysis.status.json"
 ANALYSIS_DIR = ".analysis"
 # Pre-multi-cohort layout: one cohort.json per pool, migrated on first read.
 COHORT_FILE = "cohort.json"
@@ -47,7 +45,9 @@ CUTS_SUFFIX = ".cuts.json"
 # Per-project pools live at <data root>/projects/<name>/sessions; the default
 # pool is <data root>/sessions. Same layout server.py indexes by.
 PROJECTS_DIR = "projects"
-# Same shape as server.SAFE_CHUNK — keep local so the CLI does not import server.
+# A second copy of paths.SAFE_CHUNK. The CLI that justified keeping it local is
+# gone; collapsing the two is cleanup #3, and drift here means a session that
+# records fine and cannot be analysed.
 SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
 # Cohort ids are ours to mint ("cohort-<ms>"), but they land in filenames, so
 # validate rather than trust anything arriving from a URL.
@@ -107,13 +107,9 @@ ANALYZE_BATCH_MAX_WAIT_S = float(os.environ.get("ANALYZE_BATCH_MAX_WAIT_S", str(
 ANALYZE_BATCH_POLL_MAX_ERRORS = max(
     1, int(os.environ.get("ANALYZE_BATCH_POLL_MAX_ERRORS", "5"))
 )
-# Inline batch payloads cap around 20MB; above this we upload a JSONL file.
-ANALYZE_BATCH_INLINE_MAX_BYTES = int(
-    os.environ.get("ANALYZE_BATCH_INLINE_MAX_BYTES", str(15 * 1024 * 1024))
-)
 
 # Created lazily: a Semaphore binds to the running loop, and this module is
-# imported before the server's loop exists (and reused by the sync CLI).
+# imported before the server's loop exists.
 _extract_gate: Optional[asyncio.Semaphore] = None
 _model_gate: Optional[asyncio.Semaphore] = None
 _gate_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -144,10 +140,6 @@ def runtime_present() -> bool:
 
 def analysis_paths(session_dir: Path) -> tuple:
     return session_dir / ANALYSIS_FILE, session_dir / ANALYSIS_DIR
-
-
-def status_path(session_dir: Path) -> Path:
-    return session_dir / ANALYSIS_STATUS_FILE
 
 
 def _session_ref(session_dir: Path) -> tuple:
@@ -1472,62 +1464,6 @@ async def call_gemini(digest: dict, frames: list, meta: Optional[dict] = None) -
     return text
 
 
-def _estimate_inlined_bytes(requests: list) -> int:
-    total = 0
-    for req in requests:
-        dumped = req.model_dump(mode="json", exclude_none=True)
-        total += len(json.dumps(dumped))
-    return total
-
-
-async def submit_gemini_batch(requests: list, *, display_name: str) -> str:
-    """Create a Batch job from already-built InlinedRequest objects.
-
-    Prefer submit_prepared_gemini_batch for cohorts: building every request up
-    front keeps all frame bytes in RAM and OOM'd a 2GB box at n=100.
-    """
-    from google import genai
-    from google.genai import types
-
-    if not requests:
-        raise ValueError("batch requires at least one request")
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    config = types.CreateBatchJobConfig(display_name=display_name[:128])
-    size = _estimate_inlined_bytes(requests)
-    if size <= ANALYZE_BATCH_INLINE_MAX_BYTES:
-        job = await client.aio.batches.create(
-            model=GEMINI_MODEL, src=requests, config=config
-        )
-    else:
-        # JSONL + Files API — each line is {key, request} for result matching.
-        # Write on disk (not tmpfs /tmp) so the payload does not compete for RAM.
-        tmp = _batch_jsonl_path()
-        try:
-            with tmp.open("w") as out:
-                for req in requests:
-                    payload = req.model_dump(mode="json", exclude_none=True)
-                    key = (payload.pop("metadata", None) or {}).get("session_id") or f"r{out.tell()}"
-                    out.write(
-                        json.dumps({"key": key, "request": payload}, separators=(",", ":"))
-                    )
-                    out.write("\n")
-            uploaded = await client.aio.files.upload(
-                file=str(tmp),
-                config=types.UploadFileConfig(mime_type="jsonl"),
-            )
-        finally:
-            tmp.unlink(missing_ok=True)
-        job = await client.aio.batches.create(
-            model=GEMINI_MODEL,
-            src=types.BatchJobSource(file_name=uploaded.name),
-            config=config,
-        )
-    if not job.name:
-        raise RuntimeError("Gemini batch create returned no job name")
-    return job.name
-
-
 def _batch_jsonl_path(work_dir: Optional[Path] = None) -> Path:
     """Disk-backed temp path for batch JSONL (avoid tmpfs /tmp on small boxes)."""
     base = work_dir if work_dir is not None else Path("/var/tmp")
@@ -2169,144 +2105,6 @@ def cohorts_needing_batch_resume(data_root: Path) -> list:
     return out
 
 
-def _cli_data_root() -> Path:
-    return Path(os.environ.get("CAPTURE_DATA_DIR") or BASE_DIR / "data")
-
-
-def _cli_pool(project: Optional[str]) -> Path:
-    root = _cli_data_root()
-    if not project:
-        return root / "sessions"
-    return root / PROJECTS_DIR / project / "sessions"
-
-
-async def _cli_run_cohort(
-    pool: Path,
-    pool_key: str,
-    purchased_n: int,
-    all_n: int,
-    force: bool,
-    *,
-    any_n: int = 0,
-    min_duration_ms: int,
-    url_contains: str,
-) -> int:
-    index = _cli_data_root() / "index.db"
-    if not index.is_file():
-        print(f"no session index at {index} — start the server once to build it")
-        return 1
-    if not ANALYSIS_ENABLED:
-        print("analysis is not configured — set GEMINI_API_KEY")
-        return 1
-    if not runtime_present():
-        print("analysis runtime unavailable — need node, extract.mjs, and the replayer bundle")
-        return 1
-
-    total = any_n if any_n > 0 else purchased_n + all_n
-    if total < 1:
-        print("request at least one session")
-        return 1
-    if total > COHORT_MAX_SESSIONS:
-        print(f"cohort size capped at {COHORT_MAX_SESSIONS} sessions")
-        return 1
-
-    conn = sqlite3.connect(index)
-    try:
-        cohort = build_cohort(
-            conn,
-            pool_key,
-            0 if any_n > 0 else purchased_n,
-            0 if any_n > 0 else all_n,
-            any_n=any_n,
-            min_duration_ms=min_duration_ms,
-            url_contains=url_contains,
-        )
-    finally:
-        conn.close()
-
-    if not cohort["sessions"]:
-        print("no sessions matched the sample filters")
-        write_cohort(pool, cohort)
-        return 1
-
-    write_cohort(pool, cohort)
-    print(
-        f"{cohort['label']}: {len(cohort['sessions'])} session(s) → "
-        f"{cohort_path(pool, cohort['id'])}"
-        f"{' [batch]' if ANALYZE_BATCH else ' [sync]'}"
-    )
-    final = await run_cohort_job(pool, cohort, force=force)
-    prog = final["progress"]
-    print(
-        f"{final['status']}: {prog['done']} done · {prog['error']} error · "
-        f"{prog['queued']} queued of {prog['total']}"
-    )
-    return 0 if prog["error"] == 0 and prog["done"] == prog["total"] else 1
-
-
-def main(argv: Optional[list] = None) -> int:
-    parser = argparse.ArgumentParser(description="Capture session analysis")
-    sub = parser.add_subparsers(dest="cmd")
-
-    cohort_p = sub.add_parser("cohort", help="Sample purchased+all sessions and analyze them")
-    cohort_p.add_argument(
-        "--purchased",
-        type=int,
-        default=COHORT_DEFAULT_PURCHASED_N,
-        help=f"purchased sample size (default {COHORT_DEFAULT_PURCHASED_N})",
-    )
-    cohort_p.add_argument(
-        "--all",
-        type=int,
-        default=COHORT_DEFAULT_ALL_N,
-        dest="all_n",
-        help=f"all/non-purchase sample size (default {COHORT_DEFAULT_ALL_N})",
-    )
-    cohort_p.add_argument(
-        "--any",
-        type=int,
-        default=0,
-        dest="any_n",
-        help="sample N matching sessions with no purchase split (overrides --purchased/--all)",
-    )
-    cohort_p.add_argument(
-        "--min-duration-ms",
-        type=int,
-        default=COHORT_MIN_DURATION_MS,
-        help=f"minimum last_seen-first_seen (default {COHORT_MIN_DURATION_MS})",
-    )
-    cohort_p.add_argument(
-        "--url-contains",
-        default=COHORT_URL_CONTAINS,
-        help=f"require this path fragment in url (default {COHORT_URL_CONTAINS!r}; empty = any)",
-    )
-    cohort_p.add_argument("--project", default="", help="project token (default: no-project pool)")
-    cohort_p.add_argument("--force", action="store_true", help="re-analyze even when analysis.json exists")
-
-    args = parser.parse_args(argv)
-    if args.cmd == "cohort":
-        if args.purchased < 0 or args.all_n < 0 or args.any_n < 0:
-            print("sample sizes must be >= 0")
-            return 1
-        pool = _cli_pool(args.project or None)
-        pool_key = "" if not args.project else args.project
-        return asyncio.run(
-            _cli_run_cohort(
-                pool,
-                pool_key,
-                args.purchased,
-                args.all_n,
-                args.force,
-                any_n=args.any_n,
-                min_duration_ms=args.min_duration_ms,
-                url_contains=args.url_contains,
-            )
-        )
-
-    parser.print_help()
-    return 1
-
-
 # --- The patching contract -------------------------------------------------
 #
 # The tests swap out the expensive edges of this module by assignment --
@@ -2329,7 +2127,3 @@ def main(argv: Optional[list] = None) -> int:
 # `tests/test_patch_contract.py` enforces it by walking the AST, which is what
 # a metaclass used to do at runtime -- see docs/deep-dive/07-patch-forwarding.md
 # for why that mechanism existed and why an import-time check replaced it.
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

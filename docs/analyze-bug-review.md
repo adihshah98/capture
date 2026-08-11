@@ -20,7 +20,7 @@ where it applies.
 
 | # | Severity | Defect | Status vs. old plan |
 | --- | --- | --- | --- |
-| 1 | 🔴 | CLI samples cohorts from a stale SQLite file | **new** |
+| 1 | 🔴 | ~~CLI samples cohorts from a stale SQLite file~~ — **fixed** | **new** |
 | 2 | 🔴 | `create_cohort` blocks the event loop | **new** |
 | 3 | 🔴 | Attribution parsers diverged | old bug 8, understated |
 | 4 | 🟠 | Sampling shortfall is silent | old bug 3 |
@@ -33,9 +33,9 @@ where it applies.
 
 ---
 
-## 1. 🔴 The CLI builds cohorts from a stale SQLite file
+## 1. 🔴 The CLI builds cohorts from a stale SQLite file — **fixed (deleted)**
 
-[`_cli_run_cohort`](../capture/analyze/__init__.py#L2874) opens `data/index.db` with
+`_cli_run_cohort` opened `data/index.db` with
 `sqlite3.connect(index)` and calls `build_cohort` against it. The application runs on
 **Postgres** — `capture/db.py` is psycopg, and `store.connect()` ignores its
 `data_root` argument entirely.
@@ -47,23 +47,25 @@ tables: [('sessions',), ('cohorts',), ('cohort_sessions',), ('cohort_cuts',)]
 sessions count: (141,)
 ```
 
-So the CLI **does not fail**. It samples a cohort from 141 orphaned pre-migration
-sessions and writes it into Postgres via `write_cohort` — wrong session ids,
-persisted to the live store, presented as a real cohort. The
-`if not index.is_file()` guard at [:2875](../capture/analyze/__init__.py#L2875) makes
-it worse: it is a check that the wrong thing exists.
+So the CLI **did not fail**. It sampled a cohort from 141 orphaned pre-migration
+sessions and wrote it into Postgres via `write_cohort` — wrong session ids,
+persisted to the live store, presented as a real cohort. The `if not
+index.is_file()` guard made it worse: it was a check that the wrong thing exists.
 
-**Fix — delete the CLI** (decided). Remove `main`, `_cli_run_cohort`, `_cli_pool`,
-`_cli_data_root`, the argparse block and the `__main__` guard (~135 lines,
-`:2852-2987` + `:3025`), plus the then-unused `argparse` and `sqlite3` imports.
+**Fixed by deleting the CLI.** `main`, `_cli_run_cohort`, `_cli_pool`,
+`_cli_data_root`, the argparse block, the `__main__` guard and the `argparse` import
+are gone, alongside [cleanup #1](analyze-cleanups.md)'s dead symbols. Nothing invoked
+it — verified against `deploy.sh`, `deploy-staging.sh`, `setup.sh`, `package.json`
+and the CI workflow.
 
-Second payoff: the CLI is the **only** caller passing a genuine `sqlite3.Connection`
-into the sampling functions. Once gone, they serve one connection type, the false
-annotations become fixable, and the Postgres port loses its dual-mode requirement.
+Second payoff, now available: the CLI was the **only** caller passing a genuine
+`sqlite3.Connection` into the sampling functions. They now serve one connection type,
+so the false annotations ([cleanup #6](analyze-cleanups.md)) are fixable and the
+Postgres port loses its dual-mode requirement. The `sqlite3` import stays until that
+item lands, since those annotations still reference it.
 
-**Before deleting:** confirm nothing invokes it — `deploy.sh`, `package.json`,
-systemd units, cron. Delete `data/index.db` separately, only after confirming
-`store.migrate_sqlite_cohorts` has consumed it.
+**Still outstanding:** delete `data/index.db`, only after confirming
+`store.migrate_sqlite_cohorts` has consumed it ([cleanup #8](analyze-cleanups.md)).
 
 ## 2. 🔴 `create_cohort` blocks the event loop
 
