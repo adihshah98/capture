@@ -33,7 +33,7 @@ def legacy_projects_file() -> dict:
     except FileNotFoundError:
         return {}
     except Exception as exc:
-        raise SystemExit(f"projects.json is unreadable, refusing to guess: {exc}")
+        raise SystemExit(f"projects.json is unreadable, refusing to guess: {exc}") from exc
 
 
 def _json(value):

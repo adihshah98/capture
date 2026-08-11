@@ -429,7 +429,7 @@ class TestConcurrentMarks(StoreCase):
         self.assertEqual(analyze.read_cohort(self.pool, "c")["sessions"][0]["filter"], "purchased")
 
     def test_marking_a_session_that_left_the_cohort_is_reported(self):
-        cohort = self.cohort()
+        self.cohort()
         conn, key = analyze.cohort_store(self.pool)
         self.assertTrue(
             analyze_store.update_session_status(conn, key, "c", "s0", status="done")

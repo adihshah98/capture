@@ -17,6 +17,9 @@ ignore = [
     "RUF012",
     # `×` in cross-tab labels is deliberate and matches analyze.py's output.
     "RUF001",
+    # isinstance(x, int | float) is slower than the tuple form in CPython, and
+    # every site here is on the ingest path. Not worth throughput for syntax.
+    "UP038",
 ]
 
 [tool.ruff.lint.per-file-ignores]

@@ -634,7 +634,7 @@ class TestProjectCli(unittest.TestCase):
             rows = conn.execute(
                 "SELECT p.storage_prefix, p.domains FROM projects p"
             ).fetchall()
-        return {prefix: domains for prefix, domains in rows}
+        return dict(rows)
 
     def live_tokens(self) -> list:
         import psycopg
@@ -783,9 +783,7 @@ class TestSessionFilters(ServerCase):
         self.assertEqual(self.order(started, {"event": "checkout_started"}), 200)
         self.ingest(bought)
         self.assertEqual(self.order(bought, {"event": "checkout_completed"}), 200)
-        self.ingest(ragey, {"events": self.EVENTS + [
-            {"type": 5, "data": {"tag": "capture-click", "payload": {"rage": True}}}
-        ]})
+        self.ingest(ragey, {"events": [*self.EVENTS, {"type": 5, "data": {"tag": "capture-click", "payload": {"rage": True}}}]})
 
         self.assertEqual(self.listed_ids("?filter=checkout"), {started, bought})
         self.assertEqual(self.listed_ids("?filter=purchased"), {bought})
@@ -1099,7 +1097,7 @@ class TestCohort(ServerCase):
         self.assertEqual(status, 201, body)
         cohort = json.loads(body)
         self.assertEqual(
-            set(s["session_id"] for s in cohort["sessions"]),
+            {s["session_id"] for s in cohort["sessions"]},
             {mobile, nonbuy},
         )
         self.assertEqual(cohort.get("slice", {}).get("device"), ["mobile"])

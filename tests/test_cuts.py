@@ -722,7 +722,7 @@ class TestGivenFacts(unittest.TestCase):
 
     def test_a_filtered_dimension_is_not_offered_for_clustering(self):
         text = self.given({"device": ["mobile"]})
-        cluster_line = [ln for ln in text.splitlines() if "cannot separate" in ln][0]
+        cluster_line = next(ln for ln in text.splitlines() if "cannot separate" in ln)
         self.assertNotIn("device", cluster_line)
         self.assertIn("outcome", cluster_line)
         self.assertIn("landing page", cluster_line)

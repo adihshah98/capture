@@ -344,7 +344,6 @@ async def ingest(
     if project is None:
         raise ApiError(401, "unknown project token")
     require_allowed_domain(request, project)
-    pool = project.pool
 
     if MIN_FREE_DISK_BYTES and shutil.disk_usage(DATA_ROOT).free < MIN_FREE_DISK_BYTES:
         raise ApiError(507, "server storage full")
@@ -358,8 +357,8 @@ async def ingest(
     try:
         raw = gunzip(body, MAX_DECOMPRESSED_BYTES) if compression == "gzip-js" else body
         payload = json.loads(raw)
-    except Exception:
-        raise ApiError(400, "bad payload")
+    except Exception as exc:
+        raise ApiError(400, "bad payload") from exc
 
     if not isinstance(payload, dict):
         raise ApiError(400, "bad payload")
@@ -473,15 +472,14 @@ async def order_event(
     project = projects.by_token(token)
     if project is None:
         raise ApiError(401, "unknown project token")
-    session_dir = project.pool / session_id
 
     body = await request.body()
     if len(body) > ORDER_MAX_BODY_BYTES:
         raise ApiError(413, "payload too large")
     try:
         payload = json.loads(body)
-    except Exception:
-        raise ApiError(400, "bad payload")
+    except Exception as exc:
+        raise ApiError(400, "bad payload") from exc
     if not isinstance(payload, dict):
         raise ApiError(400, "bad payload")
     event = payload.get("event")
@@ -774,7 +772,7 @@ def user_orgs(user_id: str) -> set:
         print(f"auth: membership lookup failed for {user_id}: {exc}")
         if cached:
             return cached[1]
-        raise ApiError(503, "could not verify project access — try again shortly")
+        raise ApiError(503, "could not verify project access — try again shortly") from exc
     _org_cache[user_id] = (now + ORG_CACHE_TTL_S, orgs)
     return orgs
 
@@ -811,7 +809,7 @@ def auth_callback(request: Request, code: str | None = Query(None), state: str |
         email, user_id = workos_authenticate(code)
     except Exception as exc:
         print(f"auth: WorkOS code exchange failed: {exc}")
-        raise ApiError(401, "login failed — start again at /login")
+        raise ApiError(401, "login failed — start again at /login") from exc
     if not user_id:
         raise ApiError(401, "login failed — start again at /login")
     session = make_session({"email": email, "user_id": user_id, "exp": int(time.time()) + SESSION_TTL_S})
@@ -871,8 +869,8 @@ def list_sessions(
         return sessionstore.listing(
             resolve_project(project).id, limit=limit, cursor=cursor, filter=filter, q=q
         )
-    except ValueError:
-        raise ApiError(400, "bad cursor")
+    except ValueError as exc:
+        raise ApiError(400, "bad cursor") from exc
 
 @app.get("/api/sessions/{session_id}")
 def get_session(request: Request, session_id: str, project: str | None = Query(None)):
@@ -890,7 +888,8 @@ def delete_session(request: Request, session_id: str, project: str | None = Quer
 
     require_read_access(request, project)
     found = resolve_project(project)
-    session_dir = resolve_session(session_id, project)
+    # Called for its 404: deleting an unknown session must not report success.
+    resolve_session(session_id, project)
     freed = storage.delete_session(found.storage_prefix, session_id)
     sessionstore.forget(found.id, session_id)
     # Cohort membership references a recording that no longer exists. Left
@@ -1225,14 +1224,14 @@ async def rename_cohort(request: Request, cohort_id: str, project: str | None = 
     pool = resolve_pool(project)
     try:
         payload = await request.json()
-    except Exception:
-        raise ApiError(400, "bad payload")
+    except Exception as exc:
+        raise ApiError(400, "bad payload") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("label"), str):
         raise ApiError(400, "label is required")
     try:
         renamed = analyze.rename_cohort(pool, cohort_id, payload["label"])
     except ValueError as exc:
-        raise ApiError(400, str(exc))
+        raise ApiError(400, str(exc)) from exc
     if not renamed:
         raise ApiError(404, "no such cohort")
     return cohort_response(pool, analyze.enrich_cohort_status(pool, renamed))
@@ -1731,8 +1730,8 @@ async def post_cohort_chat(
 
     try:
         payload = await request.json()
-    except Exception:
-        raise ApiError(400, "expected a JSON body")
+    except Exception as exc:
+        raise ApiError(400, "expected a JSON body") from exc
     messages = analyze.clean_chat_messages(
         (payload or {}).get("messages") if isinstance(payload, dict) else None
     )

@@ -251,7 +251,7 @@ def listing(project_id, *, limit: int, cursor: str | None = None,
         rows = conn.execute(
             f"SELECT {SESSION_COLUMNS} {FROM_SESSIONS} WHERE {' AND '.join(page_where)}"
             " ORDER BY s.last_seen DESC, s.session_id DESC LIMIT %s",
-            page_params + [limit + 1],
+            [*page_params, limit + 1],
         ).fetchall()
 
     more = len(rows) > limit
