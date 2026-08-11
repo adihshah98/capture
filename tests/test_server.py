@@ -52,6 +52,14 @@ class ServerCase(unittest.TestCase):
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-test-"))
         cls.prepare_data_dir()
         cls.admin_url, cls.app_url = pgfixture.fresh_database()
+        import db as _db
+        import projects as _projects
+
+        cls._db, cls._projects = _db, _projects
+        cls._saved_db_url = os.environ.get("CAPTURE_DATABASE_URL")
+        os.environ["CAPTURE_DATABASE_URL"] = cls.app_url
+        _db.close_pool()
+        _projects.invalidate()
         if cls.default_project:
             cls.project_id = pgfixture.seed_default_project(cls.admin_url)
         cls.port = free_port()
@@ -101,6 +109,12 @@ class ServerCase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        cls._db.close_pool()
+        if cls._saved_db_url is None:
+            os.environ.pop("CAPTURE_DATABASE_URL", None)
+        else:
+            os.environ["CAPTURE_DATABASE_URL"] = cls._saved_db_url
+        cls._projects.invalidate()
         cls.proc.terminate()
         try:
             cls.proc.wait(timeout=30)
@@ -126,13 +140,11 @@ class ServerCase(unittest.TestCase):
         """A fresh connection to the cohort tables the server process writes.
 
         Tests assert on durable state, which used to mean reading
-        cohorts/<id>.json. The server owns its own connection in another
-        process, so open a separate one rather than caching.
+        cohorts/<id>.json and then index.db. The server owns its own pool in
+        another process; this is the test process's own handle on the same
+        database.
         """
-        conn = sqlite3.connect(self.data_dir / "index.db")
-        conn.row_factory = sqlite3.Row
-        self.addCleanup(conn.close)
-        return conn
+        return analyze_store.connect()
 
     def stored_cohort(self, cohort_id, pool_key=""):
         """The cohort as persisted, or None. Mirrors analyze.read_cohort."""

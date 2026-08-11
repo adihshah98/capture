@@ -22,7 +22,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pgfixture
 import analyze
 import analyze_store
 
@@ -56,10 +58,11 @@ def cohort_of(stored, done, error, queued, *, writeups=True, pool=None):
     return cohort
 
 
-class TestStatusBaseline(unittest.TestCase):
+class TestStatusBaseline(pgfixture.CohortStoreMixin, unittest.TestCase):
     """Every case the old inference engine decided, decided the same way."""
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.pool = Path(self.tmp) / "sessions"
         self.pool.mkdir(parents=True)
@@ -116,7 +119,7 @@ class TestStatusBaseline(unittest.TestCase):
         self.assertTrue(differing, "the two halves must not be identical")
 
 
-class TestStaleRows(unittest.TestCase):
+class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
     """A row claiming done with no analysis.json behind it.
 
     The old fall-through counted it as done, so a cohort reported a completed
@@ -125,6 +128,7 @@ class TestStaleRows(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.pool = Path(self.tmp) / "sessions"
         self.pool.mkdir(parents=True)
@@ -215,7 +219,7 @@ class TestStaleRows(unittest.TestCase):
         self.assertEqual(self.live()["sessions"][0]["status"], "done")
 
 
-class TestTransitionTable(unittest.TestCase):
+class TestTransitionTable(pgfixture.CohortStoreMixin, unittest.TestCase):
     """The table is only worth something if the real code obeys it.
 
     cohort_transition logs rather than raises, because it runs inside a live
@@ -224,6 +228,7 @@ class TestTransitionTable(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.pool = Path(self.tmp) / "sessions"
         self.pool.mkdir(parents=True)
@@ -274,7 +279,7 @@ class TestTransitionTable(unittest.TestCase):
         self.assertEqual(analyze._undeclared_transitions, [])
 
 
-class TestTerminalRecompute(unittest.TestCase):
+class TestTerminalRecompute(pgfixture.CohortStoreMixin, unittest.TestCase):
     """Two behaviors that look like bugs and are not, so nobody 'fixes' them.
 
     A terminal status is recomputed from the tallies rather than frozen: the
@@ -283,6 +288,7 @@ class TestTerminalRecompute(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.pool = Path(self.tmp) / "sessions"
         self.pool.mkdir(parents=True)

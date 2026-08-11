@@ -83,7 +83,19 @@ async def lifespan(_app):
 
     task = None if (READ_ONLY or PREFLIGHT) else asyncio.create_task(loop())
     # Cohorts mid-Batch lose their asyncio task on restart — pick them back up.
-    for pool, cohort in ([] if PREFLIGHT else analyze.cohorts_needing_batch_resume(DATA_ROOT)):
+    # Cohort state moved to Postgres, so this now depends on the database being
+    # reachable. Failing to resume must not stop the server booting: it comes up
+    # degraded and reports so, where before it would exit and never serve.
+    def _resumable():
+        if PREFLIGHT:
+            return []
+        try:
+            return analyze.cohorts_needing_batch_resume(DATA_ROOT)
+        except Exception as exc:
+            print(f"cohort resume unavailable at startup: {exc}")
+            return []
+
+    for pool, cohort in _resumable():
         key = _cohort_key(pool, cohort["id"])
         if key not in _cohort_tasks:
             print(f"resuming cohort batch {cohort['id']} ({(cohort.get('batch') or {}).get('name')})")

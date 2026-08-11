@@ -242,3 +242,46 @@ def _with_role(url: str, role: str, password: str) -> str:
     if not host_and_path:
         host_and_path = rest
     return f"{scheme}://{role}:{password}@{host_and_path}"
+
+
+class CohortStoreMixin:
+    """A Postgres-backed cohort store for tests that used to get SQLite.
+
+    One database per class; cohorts are cleared between tests. The pool the
+    tests build resolves to pool_key "" — the default project — so that is what
+    gets seeded.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        import db
+        import projects
+
+        cls._pg_admin, cls._pg_app = fresh_database()
+        cls._pg_project = seed_default_project(cls._pg_admin)
+        # The pool-isolation tests build a project pool named "acme".
+        seed_project(cls._pg_admin, "Acme", "acme")
+        cls._pg_saved = os.environ.get("CAPTURE_DATABASE_URL")
+        os.environ["CAPTURE_DATABASE_URL"] = cls._pg_app
+        cls._pg_db, cls._pg_projects = db, projects
+        db.close_pool()
+        projects.invalidate()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._pg_db.close_pool()
+        if cls._pg_saved is None:
+            os.environ.pop("CAPTURE_DATABASE_URL", None)
+        else:
+            os.environ["CAPTURE_DATABASE_URL"] = cls._pg_saved
+        cls._pg_projects.invalidate()
+        super().tearDownClass()
+
+    def setUp(self):
+        super().setUp()
+        with psycopg.connect(self._pg_admin, autocommit=True) as conn:
+            # Cuts have no foreign key to cohorts, so they do not cascade.
+            conn.execute("DELETE FROM cohort_cuts")
+            conn.execute("DELETE FROM cohorts")
+        self._pg_projects.invalidate()

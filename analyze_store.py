@@ -1,203 +1,110 @@
-"""SQLite storage for cohort state.
+"""Cohort state, in Postgres.
 
-Cohort membership, per-session status and the cut cache used to be JSON
-documents rewritten in full by concurrent writers. `write_cohort` is called
-inside loops — once per session in `apply_cohort_batch`, once per extraction
-start in `extract_one` — so a 100-session cohort meant hundreds of
-full-document rewrites, any one of which could be interrupted. A truncated
-write made `_read_cohort_file` return None and the cohort vanished from the UI
-along with its in-flight batch job name. `write_cut` was a plain lost update:
-read the whole map, mutate, write it back.
+Ported from the SQLite version, keeping its data model and its public
+signatures so analyze.py is unchanged: membership is its own table, the
+columns worth filtering on are promoted out of the cohort dict, and everything
+else rides in `fields` so the sampling vocabulary can change without a
+migration.
 
-This module keeps the same function names and dict shapes the rest of the
-codebase already passes around, so callers see a storage swap and nothing else.
-What changed underneath:
+Three things the move simplifies, all of which were SQLite constraints rather
+than model ones:
 
-- a cohort's session rows are their own table, so marking one session done is
-  an UPDATE of one row rather than a rewrite of the document;
-- read-modify-write happens inside IMMEDIATE transactions, so two cuts of one
-  cohort finishing together no longer drop one;
-- write-up markdown and JPEG frames stay on disk, referenced by path. Only the
-  small relational state moved.
+  * `BEGIN IMMEDIATE` is gone. It existed because a deferred transaction takes
+    its write lock at the first write, so two writers could both read and the
+    second clobber the first. Postgres takes row locks on UPDATE and gives
+    readers a consistent snapshot regardless.
+  * The per-connection lock is gone. It guarded a `sqlite3.Connection`'s single
+    transaction state, not the data; a pooled connection per transaction has no
+    such thing to protect.
+  * The transaction is still reentrant, because migrate_json_cohorts calls
+    write_cohort inside its own and the inner call must join it rather than
+    deadlock waiting on a row its own caller holds.
 
-The connection lives here rather than in server.py so that `analyze` does not
-depend on the web layer — the CLI path builds a store the same way the server
-does.
+`connect()` returns a handle rather than a connection. Callers only ever pass
+it back into this module, and each entry point opens a pooled connection scoped
+to one project, so row level security applies to cohorts exactly as it does to
+sessions.
 """
 
 import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-# Cohort ids reach this module from the same validated path as before; the
-# store keys on them but never builds a filesystem path out of them.
+from psycopg.rows import dict_row
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS cohorts (
-    pool         TEXT NOT NULL,
-    id           TEXT NOT NULL,
-    label        TEXT,
-    status       TEXT NOT NULL DEFAULT 'idle',
-    created_at   INTEGER NOT NULL DEFAULT 0,
-    updated_at   INTEGER NOT NULL DEFAULT 0,
-    batch        TEXT,
-    fields       TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (pool, id)
-);
-
-CREATE TABLE IF NOT EXISTS cohort_sessions (
-    pool       TEXT NOT NULL,
-    cohort_id  TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    position   INTEGER NOT NULL,
-    status     TEXT,
-    analysis   TEXT,
-    error      TEXT,
-    fields     TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (pool, cohort_id, session_id)
-    -- A real FK to sessions (pool, session_id) is not declared: SQLite ignores
-    -- foreign keys unless every connection sets PRAGMA foreign_keys=ON, and the
-    -- connection that does the deleting is server.py's, which does not. The
-    -- rule is enforced by forget_session() at the delete paths instead, where
-    -- it is visible in the code doing the deleting.
-);
-
-CREATE TABLE IF NOT EXISTS cohort_cuts (
-    pool      TEXT NOT NULL,
-    cohort_id TEXT NOT NULL,
-    key       TEXT NOT NULL,
-    cut       TEXT NOT NULL,
-    PRIMARY KEY (pool, cohort_id, key)
-);
-
-CREATE INDEX IF NOT EXISTS cohorts_recency
-    ON cohorts (pool, created_at DESC);
--- forget_session deletes by session across every cohort; the primary key
--- leads with cohort_id, so without this that is a full table scan on a path
--- the retention sweep walks once per expired session.
-CREATE INDEX IF NOT EXISTS cohort_sessions_by_session
-    ON cohort_sessions (pool, session_id);
--- cohorts_needing_batch_resume was a directory scan reading every cohort file
--- on every server start; with this it is an index lookup.
-CREATE INDEX IF NOT EXISTS cohorts_resumable
-    ON cohorts (status) WHERE batch IS NOT NULL;
-"""
+import db
+import projects
 
 # Columns promoted out of the cohort blob. Everything else in a cohort dict
-# (purchased_n, all_n, slice, selection, url_contains, ...) rides in `fields`,
-# which keeps the sampling vocabulary free to change without a migration.
+# (purchased_n, all_n, slice, selection, url_contains, ...) rides in `fields`.
 COHORT_COLUMNS = ("id", "label", "status", "created_at", "updated_at", "batch")
 SESSION_COLUMNS = ("session_id", "status", "analysis", "error")
 
-_conns: dict = {}
-_lock = threading.Lock()
+
+class Store:
+    """Stands in for the connection analyze.py used to pass around."""
+
+    def __init__(self):
+        self._local = threading.local()
+
+    @contextmanager
+    def tx(self, pool_key: str):
+        """A transaction scoped to the project owning this pool. Reentrant: a
+        nested call joins the outer transaction instead of waiting on a row the
+        outer one already holds."""
+        existing = getattr(self._local, "conn", None)
+        if existing is not None:
+            yield existing
+            return
+        project = projects.by_handle(pool_key)
+        if project is None:
+            raise LookupError(f"no project for pool {pool_key!r}")
+        with db.connection(project.id) as conn:
+            self._local.conn = (conn, project.id)
+            try:
+                yield (conn, project.id)
+            finally:
+                self._local.conn = None
+
+    @contextmanager
+    def admin_tx(self):
+        """Across every project — only for resumable_cohorts, which has to look
+        at all of them on the startup path."""
+        with db.connection(admin=True) as conn:
+            yield conn
 
 
-def connect(data_root: Path) -> sqlite3.Connection:
-    """Open (once per data root) the index database that holds cohort state.
+_store = Store()
 
-    Same file as the session index, so a cohort can be joined against
-    `sessions` instead of being enriched row by row in Python. WAL means this
-    connection and server.py's own reader coexist.
-    """
-    key = str(Path(data_root).resolve())
-    with _lock:
-        conn = _conns.get(key)
-        if conn is not None:
-            return conn
-        path = Path(data_root)
-        path.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path / "index.db", check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.executescript(
-            "PRAGMA journal_mode=WAL;\nPRAGMA synchronous=NORMAL;\n" + SCHEMA
-        )
-        conn.commit()
-        _conns[key] = conn
-        return conn
+
+def connect(data_root: Path = None) -> Store:
+    """The handle analyze.py threads through. data_root is accepted and ignored:
+    cohorts are no longer addressed by where the pool sits on disk."""
+    return _store
 
 
 def close_all() -> None:
-    """Drop cached connections. Tests use this between temp data roots."""
-    with _lock:
-        for conn in _conns.values():
-            try:
-                conn.close()
-            except Exception:
-                pass
-        _conns.clear()
+    """The connection pool is db.py's; nothing per-store to close."""
 
 
-# One lock per connection. A sqlite3.Connection has a single transaction
-# state, so `check_same_thread=False` lets threads share it but does not make
-# it concurrent: two threads issuing BEGIN IMMEDIATE raise "cannot start a
-# transaction within a transaction", and their cursors interleave into
-# InterfaceError. server.py guards its own index connection the same way.
-# Serializing is not a real cost — SQLite admits one writer regardless.
-_tx_locks: dict = {}
+def _rows(conn):
+    return conn.cursor(row_factory=dict_row)
 
 
-def _tx_lock(conn: sqlite3.Connection) -> threading.RLock:
-    with _lock:
-        got = _tx_locks.get(id(conn))
-        if got is None:
-            got = threading.RLock()
-            _tx_locks[id(conn)] = got
-        return got
-
-
-class _Tx:
-    """BEGIN IMMEDIATE around a read-modify-write, serialized per connection.
-
-    The default deferred transaction takes its write lock only at the first
-    write, so two writers can both read, both decide, and the second clobbers
-    the first — the `write_cut` lost update. IMMEDIATE takes the lock up front,
-    which also makes SQLite raise rather than silently interleave if a caller
-    ever nests one of these.
-
-    Reentrant so a helper called inside a transaction (migrate_json_cohorts
-    calling write_cohort) does not deadlock; the inner BEGIN is skipped and the
-    outermost block owns the commit.
-    """
-
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
-        self.lock = _tx_lock(conn)
-        self.outermost = False
-
-    def __enter__(self) -> sqlite3.Connection:
-        self.lock.acquire()
-        # in_transaction is True only if an enclosing _Tx already began one.
-        self.outermost = not self.conn.in_transaction
-        if self.outermost:
-            self.conn.execute("BEGIN IMMEDIATE")
-        return self.conn
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        try:
-            if self.outermost:
-                if exc_type is None:
-                    self.conn.commit()
-                else:
-                    self.conn.rollback()
-        finally:
-            self.lock.release()
-        return False
-
-
-def _row_to_cohort(row: sqlite3.Row, sessions: list) -> dict:
-    out = dict(json.loads(row["fields"] or "{}"))
-    out["id"] = row["id"]
+def _row_to_cohort(row: dict, sessions: list) -> dict:
+    out = dict(row.get("fields") or {})
+    out["id"] = row["cohort_id"]
     out["status"] = row["status"]
     out["created_at"] = row["created_at"]
     out["updated_at"] = row["updated_at"]
-    if row["label"] is not None:
+    if row.get("label") is not None:
         out["label"] = row["label"]
-    if row["batch"]:
-        out["batch"] = json.loads(row["batch"])
+    if row.get("batch"):
+        out["batch"] = row["batch"]
     else:
         # Absent rather than null: callers test `cohort.get("batch")` and
         # `cohort.pop("batch", None)` to mean "no job in flight".
@@ -206,11 +113,11 @@ def _row_to_cohort(row: sqlite3.Row, sessions: list) -> dict:
     return out
 
 
-def _row_to_session(row: sqlite3.Row) -> dict:
-    out = dict(json.loads(row["fields"] or "{}"))
+def _row_to_session(row: dict) -> dict:
+    out = dict(row.get("fields") or {})
     out["session_id"] = row["session_id"]
     for col in ("status", "analysis", "error"):
-        if row[col] is not None:
+        if row.get(col) is not None:
             out[col] = row[col]
         else:
             out.pop(col, None)
@@ -246,49 +153,46 @@ def _split_session(entry: dict) -> tuple:
     )
 
 
-def read_cohort(conn: sqlite3.Connection, pool_key: str, cohort_id: str) -> Optional[dict]:
-    # Reads take the lock too: a cursor on a shared connection interleaves with
-    # a concurrent writer's, and a cohort read straddling a membership rewrite
-    # would see a torn view. Holding it across both statements makes the cohort
-    # row and its sessions one consistent snapshot.
-    with _tx_lock(conn):
-        row = conn.execute(
-            "SELECT * FROM cohorts WHERE pool = ? AND id = ?", (pool_key, cohort_id)
+def _now() -> int:
+    return int(time.time() * 1000)
+
+
+def read_cohort(store: Store, pool_key: str, cohort_id: str) -> Optional[dict]:
+    with store.tx(pool_key) as (conn, project_id):
+        row = _rows(conn).execute(
+            "SELECT * FROM cohorts WHERE project_id = %s AND cohort_id = %s",
+            (project_id, cohort_id),
         ).fetchone()
         if row is None:
             return None
-        return _row_to_cohort(row, _read_sessions(conn, pool_key, cohort_id))
+        return _row_to_cohort(row, _read_sessions(conn, project_id, cohort_id))
 
 
-def _read_sessions(conn: sqlite3.Connection, pool_key: str, cohort_id: str) -> list:
-    with _tx_lock(conn):
-        rows = conn.execute(
-            """
-            SELECT * FROM cohort_sessions
-            WHERE pool = ? AND cohort_id = ?
-            ORDER BY position
-            """,
-            (pool_key, cohort_id),
-        ).fetchall()
+def _read_sessions(conn, project_id, cohort_id: str) -> list:
+    rows = _rows(conn).execute(
+        "SELECT * FROM cohort_sessions WHERE project_id = %s AND cohort_id = %s"
+        " ORDER BY position",
+        (project_id, cohort_id),
+    ).fetchall()
     return [_row_to_session(r) for r in rows]
 
 
-def write_cohort(conn: sqlite3.Connection, pool_key: str, cohort: dict) -> dict:
+def write_cohort(store: Store, pool_key: str, cohort: dict) -> dict:
     """Upsert a cohort and its membership. Returns the stored dict.
 
-    Sessions are replaced wholesale because callers hand back a full list, but
-    the delete/insert runs in one transaction, so a reader never observes a
-    cohort with no members — the old failure where a half-written file read as
-    an empty or missing cohort.
+    Sessions are replaced wholesale because callers hand back a full list. The
+    delete and insert share a transaction, so a reader never sees the cohort
+    without its members.
     """
     cols, fields, sessions = _split_cohort(cohort)
-    updated = int(time.time() * 1000)
-    with _Tx(conn):
+    updated = _now()
+    with store.tx(pool_key) as (conn, project_id):
         conn.execute(
             """
-            INSERT INTO cohorts (pool, id, label, status, created_at, updated_at, batch, fields)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (pool, id) DO UPDATE SET
+            INSERT INTO cohorts
+                (project_id, cohort_id, label, status, created_at, updated_at, batch, fields)
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+            ON CONFLICT (project_id, cohort_id) DO UPDATE SET
                 label = excluded.label,
                 status = excluded.status,
                 created_at = CASE WHEN excluded.created_at > 0
@@ -298,275 +202,248 @@ def write_cohort(conn: sqlite3.Connection, pool_key: str, cohort: dict) -> dict:
                 fields = excluded.fields
             """,
             (
-                pool_key,
-                cols["id"],
-                cols["label"],
-                cols["status"],
-                cols["created_at"],
-                updated,
-                cols["batch"],
-                json.dumps(fields),
+                project_id, cols["id"], cols["label"], cols["status"],
+                cols["created_at"], updated, cols["batch"], json.dumps(fields),
             ),
         )
         conn.execute(
-            "DELETE FROM cohort_sessions WHERE pool = ? AND cohort_id = ?",
-            (pool_key, cols["id"]),
+            "DELETE FROM cohort_sessions WHERE project_id = %s AND cohort_id = %s",
+            (project_id, cols["id"]),
         )
-        conn.executemany(
-            """
-            INSERT INTO cohort_sessions
-                (pool, cohort_id, session_id, position, status, analysis, error, fields)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (pool_key, cols["id"], sid, i, status, analysis, error, json.dumps(extra))
-                for i, (sid, status, analysis, error, extra) in (
-                    (i, _split_session(e)) for i, e in enumerate(sessions)
-                )
-            ],
-        )
+        rows = [
+            (project_id, cols["id"], sid, i, status, analysis, error, json.dumps(extra))
+            for i, (sid, status, analysis, error, extra) in (
+                (i, _split_session(e)) for i, e in enumerate(sessions)
+            )
+        ]
+        if rows:
+            conn.cursor().executemany(
+                """
+                INSERT INTO cohort_sessions
+                    (project_id, cohort_id, session_id, position, status, analysis, error, fields)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                rows,
+            )
     return {**cohort, "updated_at": updated}
 
 
 def update_session_status(
-    conn: sqlite3.Connection,
-    pool_key: str,
-    cohort_id: str,
-    session_id: str,
-    *,
-    status: str,
-    analysis: Optional[str] = None,
-    error: Optional[str] = None,
+    store: Store, pool_key: str, cohort_id: str, session_id: str, *,
+    status: str, analysis: Optional[str] = None, error: Optional[str] = None,
 ) -> bool:
     """Mark one session in one cohort.
 
-    The point of the table: the per-session updates that ran inside
-    `apply_cohort_batch` and `extract_one` loops touch one row instead of
-    rewriting every other session's state alongside it.
-
-    `fields` is left alone — the sampling tag (`filter`) belongs to the
-    membership, not to this run's progress. Returns whether a row matched, so
-    a mark aimed at a session that is no longer a member (deleted mid-run) is
-    visible rather than silently dropped.
+    The point of the table: per-session updates touch one row instead of
+    rewriting every other session's state alongside it. `fields` is left alone
+    — the sampling tag belongs to the membership, not to this run's progress.
+    Returns whether a row matched, so a mark aimed at a session that is no
+    longer a member is visible rather than silently dropped.
     """
-    with _Tx(conn):
+    with store.tx(pool_key) as (conn, project_id):
         cur = conn.execute(
-            """
-            UPDATE cohort_sessions
-               SET status = ?, analysis = ?, error = ?
-             WHERE pool = ? AND cohort_id = ? AND session_id = ?
-            """,
-            (status, analysis, error, pool_key, cohort_id, session_id),
+            "UPDATE cohort_sessions SET status = %s, analysis = %s, error = %s"
+            " WHERE project_id = %s AND cohort_id = %s AND session_id = %s",
+            (status, analysis, error, project_id, cohort_id, session_id),
         )
         matched = cur.rowcount > 0
         if matched:
             conn.execute(
-                "UPDATE cohorts SET updated_at = ? WHERE pool = ? AND id = ?",
-                (int(time.time() * 1000), pool_key, cohort_id),
+                "UPDATE cohorts SET updated_at = %s WHERE project_id = %s AND cohort_id = %s",
+                (_now(), project_id, cohort_id),
             )
     return matched
 
 
 def set_cohort_status(
-    conn: sqlite3.Connection,
-    pool_key: str,
-    cohort_id: str,
-    status: str,
-    *,
-    batch: Optional[dict] = None,
-    clear_batch: bool = False,
+    store: Store, pool_key: str, cohort_id: str, status: str, *,
+    batch: Optional[dict] = None, clear_batch: bool = False,
 ) -> None:
     """Move a cohort's own status without rewriting its membership."""
-    with _Tx(conn):
+    with store.tx(pool_key) as (conn, project_id):
         if clear_batch:
             conn.execute(
-                "UPDATE cohorts SET status = ?, batch = NULL, updated_at = ? WHERE pool = ? AND id = ?",
-                (status, int(time.time() * 1000), pool_key, cohort_id),
+                "UPDATE cohorts SET status = %s, batch = NULL, updated_at = %s"
+                " WHERE project_id = %s AND cohort_id = %s",
+                (status, _now(), project_id, cohort_id),
             )
         elif batch is not None:
             conn.execute(
-                "UPDATE cohorts SET status = ?, batch = ?, updated_at = ? WHERE pool = ? AND id = ?",
-                (status, json.dumps(batch), int(time.time() * 1000), pool_key, cohort_id),
+                "UPDATE cohorts SET status = %s, batch = %s::jsonb, updated_at = %s"
+                " WHERE project_id = %s AND cohort_id = %s",
+                (status, json.dumps(batch), _now(), project_id, cohort_id),
             )
         else:
             conn.execute(
-                "UPDATE cohorts SET status = ?, updated_at = ? WHERE pool = ? AND id = ?",
-                (status, int(time.time() * 1000), pool_key, cohort_id),
+                "UPDATE cohorts SET status = %s, updated_at = %s"
+                " WHERE project_id = %s AND cohort_id = %s",
+                (status, _now(), project_id, cohort_id),
             )
 
 
-def list_cohorts(conn: sqlite3.Connection, pool_key: str) -> list:
+def list_cohorts(store: Store, pool_key: str) -> list:
     """Every cohort in this pool, newest first, with membership."""
-    with _tx_lock(conn):
-        rows = conn.execute(
-            "SELECT * FROM cohorts WHERE pool = ? ORDER BY created_at DESC, id DESC",
-            (pool_key,),
+    with store.tx(pool_key) as (conn, project_id):
+        rows = _rows(conn).execute(
+            "SELECT * FROM cohorts WHERE project_id = %s"
+            " ORDER BY created_at DESC, cohort_id DESC",
+            (project_id,),
         ).fetchall()
-        return [_row_to_cohort(r, _read_sessions(conn, pool_key, r["id"])) for r in rows]
+        return [
+            _row_to_cohort(r, _read_sessions(conn, project_id, r["cohort_id"])) for r in rows
+        ]
 
 
-def resumable_cohorts(conn: sqlite3.Connection) -> list:
+def resumable_cohorts(store: Store) -> list:
     """(pool_key, cohort) for every cohort with an in-flight batch job name.
 
-    Index lookup over every pool at once — the old version walked every pool
-    directory and parsed every cohort file on the server's startup path.
+    Spans projects, so it runs with admin scope — it is the startup path
+    deciding what to re-attach to, before any request has named a project.
     """
-    with _tx_lock(conn):
-        rows = conn.execute(
+    handles = {p.id: p.handle for p in projects.all_projects(fresh=True)}
+    out = []
+    with store.admin_tx() as conn:
+        rows = _rows(conn).execute(
             "SELECT * FROM cohorts WHERE status = 'running' AND batch IS NOT NULL"
         ).fetchall()
-        out = []
         for row in rows:
-            if not (json.loads(row["batch"]) or {}).get("name"):
+            if not (row.get("batch") or {}).get("name"):
                 continue
-            out.append(
-                (row["pool"], _row_to_cohort(row, _read_sessions(conn, row["pool"], row["id"])))
-            )
+            handle = handles.get(str(row["project_id"]))
+            if handle is None:
+                continue
+            sessions = _read_sessions(conn, row["project_id"], row["cohort_id"])
+            out.append((handle, _row_to_cohort(row, sessions)))
     return out
 
 
-def delete_cohort(conn: sqlite3.Connection, pool_key: str, cohort_id: str) -> bool:
-    with _Tx(conn):
+def delete_cohort(store: Store, pool_key: str, cohort_id: str) -> bool:
+    with store.tx(pool_key) as (conn, project_id):
         cur = conn.execute(
-            "DELETE FROM cohorts WHERE pool = ? AND id = ?", (pool_key, cohort_id)
+            "DELETE FROM cohorts WHERE project_id = %s AND cohort_id = %s",
+            (project_id, cohort_id),
         )
         found = cur.rowcount > 0
+        # Membership cascades from the cohort row; cuts have no foreign key,
+        # so they go explicitly.
         conn.execute(
-            "DELETE FROM cohort_sessions WHERE pool = ? AND cohort_id = ?",
-            (pool_key, cohort_id),
-        )
-        conn.execute(
-            "DELETE FROM cohort_cuts WHERE pool = ? AND cohort_id = ?",
-            (pool_key, cohort_id),
+            "DELETE FROM cohort_cuts WHERE project_id = %s AND cohort_id = %s",
+            (project_id, cohort_id),
         )
     return found
 
 
-def forget_session(conn: sqlite3.Connection, pool_key: str, session_id: str) -> int:
+def forget_session(store: Store, pool_key: str, session_id: str) -> int:
     """Drop a deleted session from every cohort that held it.
 
-    A cohort member is a reference to a recording, not a copy of it: the
-    write-up and frames live on disk under the session directory. Once that is
-    gone the row cannot be substantiated, and leaving it behind is worse than
-    dropping it — `enrich_cohort_status` falls through to the stored status
-    when it finds nothing on disk, so a deleted session keeps being counted as
-    a completed analysis and the cohort reports a result it cannot back up.
+    A cohort member is a reference to a recording, not a copy of it. Once the
+    recording is gone the row cannot be substantiated, and leaving it behind is
+    worse than dropping it — enrich_cohort_status falls through to the stored
+    status when it finds nothing, so a deleted session keeps being counted as a
+    completed analysis and the cohort reports a result it cannot back up.
 
     Returns the number of memberships removed. Cohorts shrink rather than
     error: a frozen sample whose evidence was deleted is smaller, not broken.
-    Cached cuts are deliberately left alone — they are a record of what the
-    model said when it ran, and rewriting them to match would be a second
-    fabrication. They carry their own citation map (see `cut_key`).
+    Cached cuts are deliberately left alone — they record what the model said
+    when it ran, and rewriting them to match would be a second fabrication.
     """
-    with _Tx(conn):
-        rows = conn.execute(
-            "SELECT DISTINCT cohort_id FROM cohort_sessions WHERE pool = ? AND session_id = ?",
-            (pool_key, session_id),
+    with store.tx(pool_key) as (conn, project_id):
+        owners = conn.execute(
+            "SELECT DISTINCT cohort_id FROM cohort_sessions"
+            " WHERE project_id = %s AND session_id = %s",
+            (project_id, session_id),
         ).fetchall()
-        if not rows:
+        if not owners:
             return 0
         cur = conn.execute(
-            "DELETE FROM cohort_sessions WHERE pool = ? AND session_id = ?",
-            (pool_key, session_id),
+            "DELETE FROM cohort_sessions WHERE project_id = %s AND session_id = %s",
+            (project_id, session_id),
         )
         removed = cur.rowcount
         # Bump the owners so a poller sees the membership change.
-        conn.executemany(
-            "UPDATE cohorts SET updated_at = ? WHERE pool = ? AND id = ?",
-            [(int(time.time() * 1000), pool_key, r["cohort_id"]) for r in rows],
+        conn.cursor().executemany(
+            "UPDATE cohorts SET updated_at = %s WHERE project_id = %s AND cohort_id = %s",
+            [(_now(), project_id, r[0]) for r in owners],
         )
     return removed
 
 
-def forget_pool(conn: sqlite3.Connection, pool_key: str) -> int:
+def forget_pool(store: Store, pool_key: str) -> int:
     """Drop every cohort in a pool. For a whole-pool reset."""
-    with _Tx(conn):
-        cur = conn.execute("DELETE FROM cohort_sessions WHERE pool = ?", (pool_key,))
-        removed = cur.rowcount
-        conn.execute("DELETE FROM cohort_cuts WHERE pool = ?", (pool_key,))
-        conn.execute("DELETE FROM cohorts WHERE pool = ?", (pool_key,))
+    with store.tx(pool_key) as (conn, project_id):
+        removed = conn.execute(
+            "DELETE FROM cohort_sessions WHERE project_id = %s", (project_id,)
+        ).rowcount
+        conn.execute("DELETE FROM cohort_cuts WHERE project_id = %s", (project_id,))
+        conn.execute("DELETE FROM cohorts WHERE project_id = %s", (project_id,))
     return removed
 
 
-def read_cuts(conn: sqlite3.Connection, pool_key: str, cohort_id: str) -> dict:
-    with _tx_lock(conn):
+def read_cuts(store: Store, pool_key: str, cohort_id: str) -> dict:
+    with store.tx(pool_key) as (conn, project_id):
         rows = conn.execute(
-            "SELECT key, cut FROM cohort_cuts WHERE pool = ? AND cohort_id = ?",
-            (pool_key, cohort_id),
+            "SELECT cut_key, cut FROM cohort_cuts WHERE project_id = %s AND cohort_id = %s",
+            (project_id, cohort_id),
         ).fetchall()
-    out = {}
-    for row in rows:
-        try:
-            value = json.loads(row["cut"])
-        except (TypeError, ValueError):
-            continue
-        if isinstance(value, dict):
-            out[row["key"]] = value
-    return out
+    return {key: cut for key, cut in rows if isinstance(cut, dict)}
 
 
-def read_cut(conn: sqlite3.Connection, pool_key: str, cohort_id: str, key: str) -> Optional[dict]:
-    with _tx_lock(conn):
+def read_cut(store: Store, pool_key: str, cohort_id: str, key: str) -> Optional[dict]:
+    with store.tx(pool_key) as (conn, project_id):
         row = conn.execute(
-            "SELECT cut FROM cohort_cuts WHERE pool = ? AND cohort_id = ? AND key = ?",
-            (pool_key, cohort_id, key),
+            "SELECT cut FROM cohort_cuts"
+            " WHERE project_id = %s AND cohort_id = %s AND cut_key = %s",
+            (project_id, cohort_id, key),
         ).fetchone()
     if row is None:
         return None
-    try:
-        value = json.loads(row["cut"])
-    except (TypeError, ValueError):
-        return None
-    return value if isinstance(value, dict) else None
+    return row[0] if isinstance(row[0], dict) else None
 
 
-def write_cut(conn: sqlite3.Connection, pool_key: str, cohort_id: str, key: str, cut: dict) -> dict:
+def write_cut(store: Store, pool_key: str, cohort_id: str, key: str, cut: dict) -> dict:
     """Cache one cut. One row, so concurrent cuts of one cohort cannot drop
     each other the way the read-mutate-write of the whole map did."""
-    with _Tx(conn):
+    with store.tx(pool_key) as (conn, project_id):
         conn.execute(
-            """
-            INSERT INTO cohort_cuts (pool, cohort_id, key, cut) VALUES (?, ?, ?, ?)
-            ON CONFLICT (pool, cohort_id, key) DO UPDATE SET cut = excluded.cut
-            """,
-            (pool_key, cohort_id, key, json.dumps(cut)),
+            "INSERT INTO cohort_cuts (project_id, cohort_id, cut_key, cut)"
+            " VALUES (%s, %s, %s, %s::jsonb)"
+            " ON CONFLICT (project_id, cohort_id, cut_key) DO UPDATE SET cut = excluded.cut",
+            (project_id, cohort_id, key, json.dumps(cut)),
         )
     return cut
 
 
-def clear_cut(conn: sqlite3.Connection, pool_key: str, cohort_id: str, key: str) -> bool:
-    with _Tx(conn):
+def clear_cut(store: Store, pool_key: str, cohort_id: str, key: str) -> bool:
+    with store.tx(pool_key) as (conn, project_id):
         cur = conn.execute(
-            "DELETE FROM cohort_cuts WHERE pool = ? AND cohort_id = ? AND key = ?",
-            (pool_key, cohort_id, key),
+            "DELETE FROM cohort_cuts"
+            " WHERE project_id = %s AND cohort_id = %s AND cut_key = %s",
+            (project_id, cohort_id, key),
         )
     return cur.rowcount > 0
 
 
 def migrate_json_cohorts(
-    conn: sqlite3.Connection, pool_key: str, cohorts_dir: Path, cuts_suffix: str
+    store: Store, pool_key: str, cohorts_dir: Path, cuts_suffix: str
 ) -> int:
     """Import cohorts/*.json and *.cuts.json, then delete them.
 
-    Follows `migrate_legacy_cohort`'s precedent: migrate once, leave nothing
-    behind that a later reader could mistake for live state. A cohort already
-    in the table wins — a re-run must not roll back newer state from a file
-    that was never cleaned up.
+    Migrate once and leave nothing behind that a later reader could mistake for
+    live state. A cohort already stored wins — a re-run must not roll back
+    newer state from a file that was never cleaned up.
     """
     directory = Path(cohorts_dir)
     if not directory.is_dir():
         return 0
 
     # One transaction for the whole import, so two servers starting together
-    # cannot both read "not present" for the same cohort and double-write it.
-    # The nested write_cohort / write_cut calls join this transaction rather
-    # than opening their own.
-    with _Tx(conn):
-        moved = _import_dir(conn, pool_key, directory, cuts_suffix)
+    # cannot both read "not present" and double-write. The nested write_cohort
+    # and write_cut calls join it rather than opening their own.
+    with store.tx(pool_key):
+        moved = _import_dir(store, pool_key, directory, cuts_suffix)
 
-    # Leave nothing that reads as live state, and let callers treat a missing
-    # directory as "nothing left to import". Non-empty (an unreadable file we
-    # deliberately kept) means rmdir fails, which is the correct outcome.
+    # Non-empty (an unreadable file deliberately kept) means rmdir fails, which
+    # is the correct outcome.
     try:
         directory.rmdir()
     except OSError:
@@ -574,9 +451,7 @@ def migrate_json_cohorts(
     return moved
 
 
-def _import_dir(
-    conn: sqlite3.Connection, pool_key: str, directory: Path, cuts_suffix: str
-) -> int:
+def _import_dir(store: Store, pool_key: str, directory: Path, cuts_suffix: str) -> int:
     moved = 0
     for path in sorted(directory.glob("*.json")):
         if path.name.endswith(cuts_suffix):
@@ -591,13 +466,10 @@ def _import_dir(
         if not isinstance(data, dict) or not isinstance(data.get("id"), str):
             continue
         cohort_id = data["id"]
-        exists = conn.execute(
-            "SELECT 1 FROM cohorts WHERE pool = ? AND id = ?", (pool_key, cohort_id)
-        ).fetchone()
-        if not exists:
-            # `progress` is a tally of `sessions` that older writers persisted;
-            # it is view-only now and _split_cohort drops it.
-            write_cohort(conn, pool_key, data)
+        if not read_cohort(store, pool_key, cohort_id):
+            # `progress` is a tally of `sessions` older writers persisted; it is
+            # view-only now and _split_cohort drops it.
+            write_cohort(store, pool_key, data)
             moved += 1
 
         cuts_file = directory / f"{cohort_id}{cuts_suffix}"
@@ -609,8 +481,82 @@ def _import_dir(
                 cuts = None
             if isinstance(cuts, dict):
                 for key, cut in cuts.items():
-                    if isinstance(cut, dict) and not read_cut(conn, pool_key, cohort_id, key):
-                        write_cut(conn, pool_key, cohort_id, key, cut)
+                    if isinstance(cut, dict) and not read_cut(store, pool_key, cohort_id, key):
+                        write_cut(store, pool_key, cohort_id, key, cut)
                 cuts_file.unlink(missing_ok=True)
         path.unlink(missing_ok=True)
     return moved
+
+
+def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
+    """Import cohort state written by the SQLite version of this module.
+
+    The intermediate step: cohorts moved out of JSON documents into
+    <data_root>/index.db before they moved here. Existing rows win, so this is
+    safe to re-run and cannot roll back newer state.
+    """
+    counts = {"cohorts": 0, "sessions": 0, "cuts": 0, "skipped_pools": 0}
+    path = Path(sqlite_path)
+    if not path.is_file():
+        return counts
+
+    legacy = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    legacy.row_factory = sqlite3.Row
+    try:
+        names = {r[0] for r in legacy.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+        if "cohorts" not in names:
+            return counts
+
+        for row in legacy.execute("SELECT * FROM cohorts").fetchall():
+            pool_key = row["pool"]
+            if projects.by_handle(pool_key) is None:
+                counts["skipped_pools"] += 1
+                continue
+            cohort = dict(json.loads(row["fields"] or "{}"))
+            cohort.update(
+                id=row["id"], status=row["status"],
+                created_at=row["created_at"], updated_at=row["updated_at"],
+            )
+            if row["label"] is not None:
+                cohort["label"] = row["label"]
+            if row["batch"]:
+                cohort["batch"] = json.loads(row["batch"])
+            sessions = []
+            for s in legacy.execute(
+                "SELECT * FROM cohort_sessions WHERE pool = ? AND cohort_id = ?"
+                " ORDER BY position", (pool_key, row["id"]),
+            ).fetchall():
+                entry = dict(json.loads(s["fields"] or "{}"))
+                entry["session_id"] = s["session_id"]
+                for col in ("status", "analysis", "error"):
+                    if s[col] is not None:
+                        entry[col] = s[col]
+                sessions.append(entry)
+            cohort["sessions"] = sessions
+
+            if read_cohort(_store, pool_key, row["id"]):
+                continue
+            write_cohort(_store, pool_key, cohort)
+            counts["cohorts"] += 1
+            counts["sessions"] += len(sessions)
+
+        if "cohort_cuts" in names:
+            for row in legacy.execute("SELECT * FROM cohort_cuts").fetchall():
+                pool_key = row["pool"]
+                if projects.by_handle(pool_key) is None:
+                    continue
+                try:
+                    cut = json.loads(row["cut"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(cut, dict):
+                    continue
+                if read_cut(_store, pool_key, row["cohort_id"], row["key"]):
+                    continue
+                write_cut(_store, pool_key, row["cohort_id"], row["key"], cut)
+                counts["cuts"] += 1
+    finally:
+        legacy.close()
+    return counts

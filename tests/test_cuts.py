@@ -10,7 +10,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pgfixture
 import analyze
 
 
@@ -951,8 +953,9 @@ class TestCutPromptContent(unittest.TestCase):
         self.assertNotIn("Group B", prompt)
 
 
-class TestCutCache(unittest.TestCase):
+class TestCutCache(pgfixture.CohortStoreMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         self.pool = Path(self.tmp.name) / "sessions"
         self.pool.mkdir(parents=True)

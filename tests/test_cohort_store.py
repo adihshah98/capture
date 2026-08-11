@@ -16,7 +16,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pgfixture
 import analyze
 import analyze_store
 
@@ -31,8 +33,9 @@ def cohort(cohort_id="cohort-1", n=3, **extra):
     }
 
 
-class StoreCase(unittest.TestCase):
+class StoreCase(pgfixture.CohortStoreMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.pool = self.root / "sessions"
@@ -459,7 +462,7 @@ class TestConcurrentMarks(StoreCase):
         self.assertEqual(got, ["done"] * 30)
 
 
-class TestPoolLayout(unittest.TestCase):
+class TestPoolLayout(pgfixture.CohortStoreMixin, unittest.TestCase):
     """data_root_for and pool_key must agree on where a pool sits, or a cohort
     is written under one key and read under another."""
 

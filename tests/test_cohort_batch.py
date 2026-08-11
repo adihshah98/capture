@@ -9,12 +9,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pgfixture
 import analyze
 
 
-class TestCohortBatch(unittest.TestCase):
+class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         self.pool = Path(self.tmp.name) / "sessions"
         self.pool.mkdir()
@@ -159,10 +162,11 @@ class TestCohortBatch(unittest.TestCase):
         self.assertEqual(out["s2"]["error"], "nope")
 
 
-class TestBatchIsNeverPaidForTwice(unittest.TestCase):
+class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase):
     """Once a batch job exists it is billable, so only submission may fall back."""
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.pool = self.root / "sessions"
@@ -325,10 +329,11 @@ class TestBatchIsNeverPaidForTwice(unittest.TestCase):
         )
 
 
-class TestWaitGeminiBatch(unittest.TestCase):
+class TestWaitGeminiBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
     """The poll is bounded and tolerates blips, so neither hangs nor escalates."""
 
     def setUp(self):
+        super().setUp()
         import google.genai as genai
 
         self._client = genai.Client
@@ -393,10 +398,11 @@ class TestWaitGeminiBatch(unittest.TestCase):
                 self.assertEqual(job.state.name, name)
 
 
-class TestPersistableCohort(unittest.TestCase):
+class TestPersistableCohort(pgfixture.CohortStoreMixin, unittest.TestCase):
     """enrich_cohort_status is a read-time view; only part of it belongs on disk."""
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         self.pool = Path(self.tmp.name) / "sessions"
         self.pool.mkdir(parents=True)
