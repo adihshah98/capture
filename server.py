@@ -882,7 +882,6 @@ def delete_session(request: Request, session_id: str, project: Optional[str] = Q
     found = resolve_project(project)
     session_dir = resolve_session(session_id, project)
     freed = storage.delete_session(found.storage_prefix, session_id)
-    shutil.rmtree(session_dir, ignore_errors=True)
     sessionstore.forget(found.id, session_id)
     # Cohort membership references a recording that no longer exists. Left
     # behind, enrich_cohort_status falls back to the stored status and keeps
@@ -1974,7 +1973,10 @@ def sweep_expired_sessions() -> int:
     removed = 0
     for project in projects.all_projects(fresh=True):
         for session_id in sessionstore.expired(project.id, cutoff_ms):
-            shutil.rmtree(project.pool / session_id, ignore_errors=True)
+            # Through storage, not rmtree: dropping only the local directory
+            # would strand the chunks in the bucket with nothing pointing at
+            # them, and no later sweep could ever find them again.
+            storage.delete_session(project.storage_prefix, session_id)
             sessionstore.forget(project.id, session_id)
             # Same rule as delete_session: a session purged here no longer has
             # a directory, so its cohort memberships point at write-ups that
