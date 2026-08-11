@@ -25,15 +25,34 @@ class TestDataRoot(unittest.TestCase):
         self.assertTrue((paths.BASE_DIR / "capture" / "__init__.py").is_file())
         self.assertEqual(paths.DATA_ROOT.parent, paths.BASE_DIR)
 
-    def test_modules_agree_on_the_data_root(self):
-        from capture import projects, server, storage
+    def test_no_module_keeps_a_data_root_that_disagrees(self):
+        """The original bug: storage.py resolved its own BASE_DIR one directory
+        too deep, so its copy pointed somewhere nothing else used.
 
-        for module in (server, projects, storage):
-            self.assertEqual(
-                module.DATA_DIR,
-                paths.DATA_DIR,
-                f"{module.__name__} disagrees about the session pool",
-            )
+        Written over every module rather than a fixed list, and satisfied either
+        by agreeing or by having no copy at all — modules are still shedding
+        theirs, and dropping one should not fail this.
+        """
+        import importlib
+        import pkgutil
+
+        import capture
+
+        checked = []
+        for info in pkgutil.iter_modules(capture.__path__):
+            if info.ispkg:
+                continue
+            module = importlib.import_module(f"capture.{info.name}")
+            for attr in ("BASE_DIR", "DATA_ROOT", "DATA_DIR", "PROJECTS_DIR"):
+                if not hasattr(module, attr):
+                    continue
+                checked.append(f"capture.{info.name}.{attr}")
+                self.assertEqual(
+                    getattr(module, attr),
+                    getattr(paths, attr),
+                    f"capture.{info.name} disagrees with paths about {attr}",
+                )
+        self.assertIn("capture.paths.DATA_DIR", checked)
 
     def test_default_pool_is_the_sessions_dir(self):
         self.assertEqual(paths.pool_for(""), paths.DATA_DIR)

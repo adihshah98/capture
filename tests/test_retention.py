@@ -25,9 +25,10 @@ class TestSweepClearsBothBackends(unittest.TestCase):
     def setUpClass(cls):
         import shutil
 
-        from capture import db, projects, server, storage
+        from capture import config, db, paths, projects, server, storage
 
         cls.server, cls.storage, cls.db, cls.projects = server, storage, db, projects
+        cls.paths, cls.config = paths, config
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-retention-"))
         cls.addClassCleanup(shutil.rmtree, cls.data_dir, ignore_errors=True)
 
@@ -42,15 +43,15 @@ class TestSweepClearsBothBackends(unittest.TestCase):
             storage.PROJECTS_DIR,
             storage.BUCKET,
             storage._client,
-            server.DATA_ROOT,
-            server.RETENTION_DAYS,
+            paths.DATA_ROOT,
+            config.RETENTION_DAYS,
         )
         cls.addClassCleanup(cls.restore)
         os.environ["CAPTURE_DATABASE_URL"] = cls.app_url
         projects.DATA_DIR = storage.DATA_DIR = cls.data_dir / "sessions"
         projects.PROJECTS_DIR = storage.PROJECTS_DIR = cls.data_dir / "projects"
-        server.DATA_ROOT = cls.data_dir
-        server.RETENTION_DAYS = 7
+        paths.DATA_ROOT = cls.data_dir
+        config.RETENTION_DAYS = 7
         storage.BUCKET = "capture-test"
         db.close_pool()
         projects.invalidate()
@@ -66,7 +67,7 @@ class TestSweepClearsBothBackends(unittest.TestCase):
         cls.projects.DATA_DIR, cls.projects.PROJECTS_DIR = p_data, p_proj
         cls.storage.DATA_DIR, cls.storage.PROJECTS_DIR = s_data, s_proj
         cls.storage.BUCKET, cls.storage._client = bucket, client
-        cls.server.DATA_ROOT, cls.server.RETENTION_DAYS = data_root, retention
+        cls.paths.DATA_ROOT, cls.config.RETENTION_DAYS = data_root, retention
         cls.projects.invalidate()
 
     def setUp(self):
@@ -120,11 +121,11 @@ class TestSweepClearsBothBackends(unittest.TestCase):
         import time
 
         self.seed("stale", int((time.time() - 30 * 86400) * 1000))
-        self.server.RETENTION_DAYS = 0
+        self.config.RETENTION_DAYS = 0
         try:
             self.assertEqual(self.server.sweep_expired_sessions(), 0)
         finally:
-            self.server.RETENTION_DAYS = 7
+            self.config.RETENTION_DAYS = 7
         self.assertEqual(self.rows(), ["stale"])
         self.assertEqual(len(self.fake.objects), 1)
 

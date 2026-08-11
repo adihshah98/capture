@@ -10,7 +10,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from . import db, server
+from . import db, paths, server
 
 DEFAULT_PROJECT_NAME = "Default"
 
@@ -18,9 +18,9 @@ DEFAULT_PROJECT_NAME = "Default"
 def legacy_pools() -> list:
     """The on-disk layout as it was before Postgres. Deliberately independent of
     projects.py, which now reads the projects it is this script's job to create."""
-    pools = [server.DATA_DIR]
-    if server.PROJECTS_DIR.is_dir():
-        for entry in sorted(server.PROJECTS_DIR.iterdir()):
+    pools = [paths.DATA_DIR]
+    if paths.PROJECTS_DIR.is_dir():
+        for entry in sorted(paths.PROJECTS_DIR.iterdir()):
             if (entry / "sessions").is_dir():
                 pools.append(entry / "sessions")
     return pools
@@ -28,7 +28,7 @@ def legacy_pools() -> list:
 
 def legacy_projects_file() -> dict:
     try:
-        data = json.loads(server.PROJECTS_PATH.read_text())
+        data = json.loads(paths.PROJECTS_PATH.read_text())
         return data if isinstance(data, dict) else {}
     except FileNotFoundError:
         return {}
@@ -340,7 +340,7 @@ def backfill(verbose: bool = True) -> dict:
     projects = legacy_projects_file()
     counts = {"projects": 0, "sessions": 0, "from_index": 0, "parsed": 0, "skipped": 0}
 
-    index_path = server.DATA_ROOT / "index.db"
+    index_path = paths.DATA_ROOT / "index.db"
     index = None
     if index_path.is_file():
         index = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
@@ -348,7 +348,7 @@ def backfill(verbose: bool = True) -> dict:
     try:
         with db.connection(admin=True) as conn:
             for pool in legacy_pools():
-                token = None if pool == server.DATA_DIR else pool.parent.name
+                token = None if pool == paths.DATA_DIR else pool.parent.name
                 entries = [e for e in pool.iterdir() if e.is_dir()] if pool.is_dir() else []
                 if not entries and token is None:
                     continue

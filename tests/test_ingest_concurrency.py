@@ -34,9 +34,10 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
         # Patch the already-imported modules rather than re-importing them.
         # Popping sys.modules leaves other test files holding a stale module
         # object while the server holds a fresh one, and the two disagree.
-        from capture import db, projects, server, storage
+        from capture import config, db, paths, projects, server, storage
 
         cls.server, cls.storage, cls.db, cls.projects = server, storage, db, projects
+        cls.paths, cls.config = paths, config
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-conc-"))
         cls.addClassCleanup(shutil.rmtree, cls.data_dir, ignore_errors=True)
 
@@ -49,14 +50,14 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
             projects.PROJECTS_DIR,
             storage.DATA_DIR,
             storage.PROJECTS_DIR,
-            server.DATA_ROOT,
+            paths.DATA_ROOT,
         )
         cls.addClassCleanup(cls.restore_environment)
         os.environ["CAPTURE_DATABASE_URL"] = cls.app_url
         projects.DATA_DIR = storage.DATA_DIR = cls.data_dir / "sessions"
         projects.PROJECTS_DIR = storage.PROJECTS_DIR = cls.data_dir / "projects"
         # ingest free-space-checks DATA_ROOT, which is baked at import time.
-        server.DATA_ROOT = cls.data_dir
+        paths.DATA_ROOT = cls.data_dir
         db.close_pool()
         projects.invalidate()
 
@@ -70,7 +71,7 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
             os.environ["CAPTURE_DATABASE_URL"] = url
         cls.projects.DATA_DIR, cls.projects.PROJECTS_DIR = p_data, p_proj
         cls.storage.DATA_DIR, cls.storage.PROJECTS_DIR = s_data, s_proj
-        cls.server.DATA_ROOT = data_root
+        cls.paths.DATA_ROOT = data_root
         cls.projects.invalidate()
 
     def setUp(self):

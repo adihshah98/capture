@@ -3,7 +3,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import random
 import re
 import secrets
@@ -38,7 +37,7 @@ except ImportError:
     pass
 
 from . import analysis_port as ap
-from . import compat, db, paths, projects, sessionstore, snippet, storage, workos
+from . import compat, config, db, paths, projects, sessionstore, snippet, storage, workos
 from .errors import ApiError
 from .fsutil import atomic_write_bytes, atomic_write_text
 from .paths import SAFE_CHUNK, SAFE_ID, chunk_timestamp, chunk_window
@@ -47,27 +46,29 @@ from .projects import ProjectsUnavailable
 
 @asynccontextmanager
 async def lifespan(_app):
-    if REPLAY_AUTH_DISABLED:
+    if config.REPLAY_AUTH_DISABLED:
         print(
-            "warning: REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
+            "warning: config.REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
             "open to anyone who can reach this server"
         )
     elif workos.enabled():
         print(
             "replay auth: WorkOS per-user logins; projects are visible to "
-            "their org_id members" + (" and operators" if OPERATORS else " (no operators set)")
+            "their org_id members"
+            + (" and operators" if config.OPERATORS else " (no operators set)")
         )
-    elif not REPLAY_PASSWORD:
+    elif not config.REPLAY_PASSWORD:
         print(
-            "REPLAY_PASSWORD is not set — the replay UI and read API will " "return 503 until it is"
+            "config.REPLAY_PASSWORD is not set — the replay UI and read API will "
+            "return 503 until it is"
         )
 
-    if READ_ONLY:
+    if config.READ_ONLY:
         print(
             "CAPTURE_READ_ONLY=1 — recording is refused and retention is disabled; "
             "this server only reads the database it is pointed at"
         )
-    if PREFLIGHT:
+    if config.PREFLIGHT:
         print("CAPTURE_PREFLIGHT=1 — no retention sweep, no cohort resume")
 
     async def loop():
@@ -77,14 +78,14 @@ async def lifespan(_app):
                 print(f"retention: removed {removed} expired session(s)")
             await asyncio.sleep(24 * 3600)
 
-    task = None if (READ_ONLY or PREFLIGHT) else asyncio.create_task(loop())
+    task = None if (config.READ_ONLY or config.PREFLIGHT) else asyncio.create_task(loop())
 
     # Cohorts mid-Batch lose their asyncio task on restart — pick them back up.
     # Cohort state moved to Postgres, so this now depends on the database being
     # reachable. Failing to resume must not stop the server booting: it comes up
     # degraded and reports so, where before it would exit and never serve.
     def _resumable():
-        if PREFLIGHT:
+        if config.PREFLIGHT:
             return []
         try:
             return ap.pending_batch_resumes()
@@ -122,20 +123,20 @@ app.add_middleware(
 async def replay_auth(request: Request, call_next):
     path = re.sub(r"/+", "/", request.url.path).lower()
     protected = path.startswith("/api/") or path == "/replay.html"
-    if protected and not REPLAY_AUTH_DISABLED:
+    if protected and not config.REPLAY_AUTH_DISABLED:
         if workos.enabled():
-            session = read_session(request.cookies.get(SESSION_COOKIE))
+            session = read_session(request.cookies.get(config.SESSION_COOKIE))
 
             if not session or not session.get("user_id"):
                 if path == "/replay.html":
                     return RedirectResponse("/login", status_code=302)
                 return JSONResponse({"error": "login required", "login": "/login"}, status_code=401)
             request.state.auth = session
-        elif not REPLAY_PASSWORD:
+        elif not config.REPLAY_PASSWORD:
             return Response(
-                "Replay access is unconfigured. Set REPLAY_PASSWORD to a secret "
+                "Replay access is unconfigured. Set config.REPLAY_PASSWORD to a secret "
                 "(or WORKOS_API_KEY + WORKOS_CLIENT_ID for per-user logins), "
-                "or REPLAY_AUTH_DISABLED=1 to serve recordings to anyone.\n",
+                "or config.REPLAY_AUTH_DISABLED=1 to serve recordings to anyone.\n",
                 status_code=503,
                 media_type="text/plain",
             )
@@ -147,7 +148,7 @@ async def replay_auth(request: Request, call_next):
                     supplied = base64.b64decode(header[6:]).decode().partition(":")[2]
                 except Exception:
                     supplied = ""
-            if not secrets.compare_digest(supplied, REPLAY_PASSWORD):
+            if not secrets.compare_digest(supplied, config.REPLAY_PASSWORD):
                 return Response(
                     status_code=401,
                     headers={"WWW-Authenticate": 'Basic realm="capture replay"'},
@@ -174,33 +175,11 @@ async def revalidate_static(request: Request, call_next):
     return response
 
 
-BASE_DIR = paths.BASE_DIR
-DATA_ROOT = paths.DATA_ROOT
-DATA_DIR = paths.DATA_DIR
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-PROJECTS_PATH = paths.PROJECTS_PATH
-PROJECTS_DIR = paths.PROJECTS_DIR
-
-REPLAY_PASSWORD = os.environ.get("REPLAY_PASSWORD", "")
-REPLAY_AUTH_DISABLED = os.environ.get("REPLAY_AUTH_DISABLED") == "1"
-
-
-OPERATORS = {
-    e.strip().lower() for e in os.environ.get("CAPTURE_OPERATORS", "").split(",") if e.strip()
-}
-
-SESSION_SECRET = (
-    os.environ.get("SESSION_SECRET")
-    or hashlib.sha256(f"session:{workos.API_KEY}".encode()).hexdigest()
-)
-SESSION_TTL_S = 7 * 24 * 3600
-SESSION_COOKIE = "capture_session"
-STATE_COOKIE = "capture_login_state"
+paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _sign(raw: str) -> str:
-    return hmac.new(SESSION_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(config.SESSION_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
 
 
 def make_session(payload: dict) -> str:
@@ -246,29 +225,6 @@ def require_allowed_domain(request: Request, project: projects.Project | None) -
         raise ApiError(403, "domain not allowed for this project")
 
 
-MAX_BODY_BYTES = 50 * 1024 * 1024
-
-MAX_DECOMPRESSED_BYTES = int(os.environ.get("MAX_DECOMPRESSED_BYTES", 32 * 1024 * 1024))
-
-MAX_PROJECT_BYTES = int(os.environ.get("MAX_PROJECT_BYTES", 2 * 1024**3))
-MIN_FREE_DISK_BYTES = int(os.environ.get("MIN_FREE_DISK_BYTES", 1024**3))
-
-RETENTION_DAYS = float(os.environ.get("RETENTION_DAYS", "30"))
-
-# A mirror pointed at someone else's database — staging reading production.
-# Recording and retention are refused outright rather than left to fail on a
-# permission error: the sweep would otherwise try to DELETE rows it can see but
-# does not own, which is production data one careless GRANT away from deletion.
-READ_ONLY = os.environ.get("CAPTURE_READ_ONLY") == "1"
-
-# A throwaway instance a deploy starts on a spare port to prove the release
-# boots before the live one is replaced. It must not do any of the background
-# work startup normally kicks off: the retention sweep would race the running
-# server's, and resuming a Gemini batch alongside it would pay for that batch
-# a second time.
-PREFLIGHT = os.environ.get("CAPTURE_PREFLIGHT") == "1"
-
-
 def gunzip(body: bytes, limit: int) -> bytes:
     stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
     raw = stream.decompress(body, limit)
@@ -286,9 +242,6 @@ def project_bytes_used(project) -> int:
     if project.id not in _bytes_used:
         _bytes_used[project.id] = sessionstore.project_bytes(project.id)
     return _bytes_used[project.id]
-
-
-CONFIG_PATH = paths.CONFIG_PATH
 
 
 @app.exception_handler(ApiError)
@@ -329,7 +282,7 @@ async def ingest(
     compression: str | None = Query(None),
     token: str | None = Query(None),
 ):
-    if READ_ONLY:
+    if config.READ_ONLY:
         raise ApiError(403, "this server is read-only and does not accept recordings")
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
@@ -339,17 +292,20 @@ async def ingest(
         raise ApiError(401, "unknown project token")
     require_allowed_domain(request, project)
 
-    if MIN_FREE_DISK_BYTES and shutil.disk_usage(DATA_ROOT).free < MIN_FREE_DISK_BYTES:
+    if (
+        config.MIN_FREE_DISK_BYTES
+        and shutil.disk_usage(paths.DATA_ROOT).free < config.MIN_FREE_DISK_BYTES
+    ):
         raise ApiError(507, "server storage full")
-    if MAX_PROJECT_BYTES and project_bytes_used(project) >= MAX_PROJECT_BYTES:
+    if config.MAX_PROJECT_BYTES and project_bytes_used(project) >= config.MAX_PROJECT_BYTES:
         raise ApiError(429, "project storage quota reached")
 
     body = await request.body()
-    if len(body) > MAX_BODY_BYTES:
+    if len(body) > config.MAX_BODY_BYTES:
         raise ApiError(413, "payload too large")
 
     try:
-        raw = gunzip(body, MAX_DECOMPRESSED_BYTES) if compression == "gzip-js" else body
+        raw = gunzip(body, config.MAX_DECOMPRESSED_BYTES) if compression == "gzip-js" else body
         payload = json.loads(raw)
     except Exception as exc:
         raise ApiError(400, "bad payload") from exc
@@ -424,8 +380,6 @@ async def ingest(
 
 
 ORDER_FILE = "order.json"
-ORDER_MAX_BODY_BYTES = 4096
-
 VISITOR_FILE = "visitor.json"
 
 INTERACTIONS_FILE = "interactions.json"
@@ -469,7 +423,7 @@ async def order_event(
     session_id: str = Query(""),
     token: str | None = Query(None),
 ):
-    if READ_ONLY:
+    if config.READ_ONLY:
         raise ApiError(403, "this server is read-only and does not accept recordings")
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
@@ -478,7 +432,7 @@ async def order_event(
         raise ApiError(401, "unknown project token")
 
     body = await request.body()
-    if len(body) > ORDER_MAX_BODY_BYTES:
+    if len(body) > config.ORDER_MAX_BODY_BYTES:
         raise ApiError(413, "payload too large")
     try:
         payload = json.loads(body)
@@ -502,7 +456,7 @@ def healthz():
     checks = {}
 
     try:
-        probe = DATA_ROOT / ".healthz"
+        probe = paths.DATA_ROOT / ".healthz"
         atomic_write_text(probe, "ok")
         probe.unlink()
         checks["storage_writable"] = True
@@ -510,8 +464,10 @@ def healthz():
         checks["storage_writable"] = False
 
     try:
-        free = shutil.disk_usage(DATA_ROOT).free
-        checks["disk_above_floor"] = not MIN_FREE_DISK_BYTES or free >= MIN_FREE_DISK_BYTES
+        free = shutil.disk_usage(paths.DATA_ROOT).free
+        checks["disk_above_floor"] = (
+            not config.MIN_FREE_DISK_BYTES or free >= config.MIN_FREE_DISK_BYTES
+        )
     except Exception:
         checks["disk_above_floor"] = False
 
@@ -522,15 +478,15 @@ def healthz():
         checks["projects_readable"] = False
 
     checks["bundles_present"] = all(
-        (BASE_DIR / "public" / name).is_file()
+        (paths.BASE_DIR / "public" / name).is_file()
         for name in ("capture.js", "recorder.bundle.js", "replay.bundle.js")
     )
     checks["replay_auth_enabled"] = (
-        bool(REPLAY_PASSWORD or workos.enabled()) and not REPLAY_AUTH_DISABLED
+        bool(config.REPLAY_PASSWORD or workos.enabled()) and not config.REPLAY_AUTH_DISABLED
     )
     # Reported, not health-gating: analysis is an optional extra, and a box
     # without a key or a browser is still a perfectly healthy recorder.
-    checks["read_only"] = READ_ONLY
+    checks["read_only"] = config.READ_ONLY
     checks["analysis_configured"] = ap.enabled()
     checks["analysis_runtime_present"] = ap.runtime_present()
 
@@ -554,9 +510,9 @@ def remote_config(token: str | None = Query(None)):
         response = JSONResponse(project.config)
         response.headers["Cache-Control"] = "no-cache"
         return response
-    config_path = CONFIG_PATH
+    config_path = paths.CONFIG_PATH
     if project is not None and project.storage_prefix:
-        project_config = PROJECTS_DIR / project.storage_prefix / "config.json"
+        project_config = paths.PROJECTS_DIR / project.storage_prefix / "config.json"
         if project_config.is_file():
             config_path = project_config
     try:
@@ -755,7 +711,7 @@ def login():
     target = workos.authorize_url(snippet.public_base_url() + "/auth/callback", state)
     response = RedirectResponse(target, status_code=302)
     response.set_cookie(
-        STATE_COOKIE, state, max_age=600, httponly=True, secure=True, samesite="lax"
+        config.STATE_COOKIE, state, max_age=600, httponly=True, secure=True, samesite="lax"
     )
     return response
 
@@ -766,7 +722,7 @@ def auth_callback(
 ):
     if not workos.enabled():
         raise ApiError(503, "login not configured")
-    if not code or not state or state != request.cookies.get(STATE_COOKIE):
+    if not code or not state or state != request.cookies.get(config.STATE_COOKIE):
         return RedirectResponse("/login", status_code=302)
     try:
         email, user_id = workos.authenticate(code)
@@ -776,26 +732,31 @@ def auth_callback(
     if not user_id:
         raise ApiError(401, "login failed — start again at /login")
     session = make_session(
-        {"email": email, "user_id": user_id, "exp": int(time.time()) + SESSION_TTL_S}
+        {"email": email, "user_id": user_id, "exp": int(time.time()) + config.SESSION_TTL_S}
     )
     response = RedirectResponse("/replay.html", status_code=302)
     response.set_cookie(
-        SESSION_COOKIE, session, max_age=SESSION_TTL_S, httponly=True, secure=True, samesite="lax"
+        config.SESSION_COOKIE,
+        session,
+        max_age=config.SESSION_TTL_S,
+        httponly=True,
+        secure=True,
+        samesite="lax",
     )
-    response.delete_cookie(STATE_COOKIE)
+    response.delete_cookie(config.STATE_COOKIE)
     return response
 
 
 @app.get("/logout")
 def logout():
     response = RedirectResponse("/", status_code=302)
-    response.delete_cookie(SESSION_COOKIE)
+    response.delete_cookie(config.SESSION_COOKIE)
     return response
 
 
 def allowed_projects(request: Request) -> set | None:
     auth = getattr(request.state, "auth", None)
-    if auth is None or (auth.get("email") or "").lower() in OPERATORS:
+    if auth is None or (auth.get("email") or "").lower() in config.OPERATORS:
         return None
     orgs = workos.user_orgs(auth.get("user_id") or "")
     return {p.handle for p in projects.for_orgs(orgs)}
@@ -1948,9 +1909,9 @@ def _slice_from_params(
 def sweep_expired_sessions() -> int:
     # Expiry is decided in SQL rather than by walking every session directory,
     # which is what made startup take ~23s at 9k sessions.
-    if RETENTION_DAYS <= 0:
+    if config.RETENTION_DAYS <= 0:
         return 0
-    cutoff_ms = int((time.time() - RETENTION_DAYS * 86400) * 1000)
+    cutoff_ms = int((time.time() - config.RETENTION_DAYS * 86400) * 1000)
     removed = 0
     for project in projects.all_projects(fresh=True):
         for session_id in sessionstore.expired(project.id, cutoff_ms):
@@ -1972,4 +1933,4 @@ def sweep_expired_sessions() -> int:
     return removed
 
 
-app.mount("/", StaticFiles(directory=BASE_DIR / "public", html=True), name="static")
+app.mount("/", StaticFiles(directory=paths.BASE_DIR / "public", html=True), name="static")
