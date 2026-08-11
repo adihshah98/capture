@@ -10,12 +10,10 @@ two values tests monkeypatch are read at call time rather than copied at import.
 """
 
 import ast
-import sys
+import re
 import unittest
 from pathlib import Path
 from unittest import mock
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from capture import analysis_port as port
 from capture.projects import Project
@@ -155,15 +153,38 @@ class TestNoOneElseImportsAnalyze(unittest.TestCase):
     nothing else in capture/ may, except this module."""
 
     def test_only_the_port_reaches_the_analysis_package(self):
+        """Recursive on purpose. This globbed capture/*.py when the package was
+        flat, so once the routers moved under capture/api/ any one of them could
+        have imported analyze directly and walked straight past the guard.
+        """
         root = Path(__file__).resolve().parent.parent / "capture"
         offenders = []
-        for source in root.glob("*.py"):
+        for source in root.rglob("*.py"):
             if source.name == "analysis_port.py":
                 continue
+            if "analyze" in source.relative_to(root).parts:
+                continue  # the analysis package may import itself
             text = source.read_text()
-            if "import analyze" in text or "from .analyze" in text:
-                offenders.append(source.name)
-        self.assertEqual(offenders, [], f"these import analyze directly: {offenders}")
+            if re.search(
+                r"^\s*(?:from \.*analyze|from \.\. import .*\banalyze\b|"
+                r"from \. import .*\banalyze\b|import analyze)",
+                text,
+                re.M,
+            ):
+                offenders.append(str(source.relative_to(root)))
+        self.assertEqual(sorted(offenders), [], f"these import analyze directly: {offenders}")
+
+    def test_the_guard_covers_the_routers(self):
+        """The above is only meaningful if it actually reaches capture/api/."""
+        root = Path(__file__).resolve().parent.parent / "capture"
+        scanned = {
+            str(p.relative_to(root))
+            for p in root.rglob("*.py")
+            if "analyze" not in p.relative_to(root).parts
+        }
+        self.assertIn("api/cohorts.py", scanned)
+        self.assertIn("api/ingest.py", scanned)
+        self.assertIn("server.py", scanned)
 
 
 if __name__ == "__main__":

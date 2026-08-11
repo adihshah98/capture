@@ -4,12 +4,9 @@ The S3 backend runs against a fake client. The point is to exercise key
 construction, the disk fallback and the merged listing — not boto3.
 """
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from capture import storage
 

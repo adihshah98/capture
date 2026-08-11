@@ -10,11 +10,7 @@ fallback looked in capture/data while server.py and projects.py used <repo>/data
 Every other test monkeypatches DATA_DIR, which is exactly why none of them saw it.
 """
 
-import sys
 import unittest
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from capture import paths
 

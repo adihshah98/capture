@@ -1,4 +1,23 @@
-# Tool configuration only. Dependencies stay in requirements.txt for now.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "capture"
+version = "1.0.0"
+description = "Self-hosted session recording and replay built on rrweb"
+requires-python = ">=3.11"
+# Read from requirements.txt rather than duplicated here: deploy.sh builds its
+# venv with `pip install -r requirements.txt`, and two dependency lists drift.
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+# Listed explicitly. Auto-discovery would sweep in `src`, `tests` and `migrations`
+# as top-level packages, which is how a test helper ends up importable in prod.
+[tool.setuptools]
+packages = ["capture", "capture.api", "capture.analyze"]
 
 [tool.ruff]
 line-length = 100

@@ -5,8 +5,6 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from capture import analyze
 
 
@@ -164,8 +162,6 @@ class TestChatEndpoint(unittest.TestCase):
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-chat-"))
         os.environ["CAPTURE_DATA_DIR"] = str(cls.data_dir)
         os.environ["REPLAY_AUTH_DISABLED"] = "1"
-
-        import sys
 
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import pgfixture

@@ -130,9 +130,6 @@ def cluster() -> Cluster:
 
 def fresh_database() -> tuple:
     """A new database with migrations applied. Returns (admin_url, app_url)."""
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from capture import db
 
     name = f"capture_test_{uuid.uuid4().hex[:12]}"

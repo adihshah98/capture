@@ -16,12 +16,7 @@ Postgres, and it should grow as configuration stops being read at import time.
 unittest discover ignores this file, so `npm run test:server` is unaffected.
 """
 
-import sys
-from pathlib import Path
-
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from capture import db
 

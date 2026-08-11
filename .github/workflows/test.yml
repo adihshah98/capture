@@ -18,7 +18,9 @@ jobs:
           python-version: '3.11'
 
       - name: Install dev tooling
-        run: pip install --quiet -r requirements-dev.txt
+        run: |
+          pip install --quiet -r requirements-dev.txt
+          pip install --quiet -e .
 
       # capture/analyze is excluded in pyproject.toml — it belongs to the
       # analysis refactor and must not be reformatted from here.
@@ -72,6 +74,9 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install --quiet -r requirements.txt
+          # Editable, so tests import capture the way production does rather than
+          # by prepending the repo root to sys.path.
+          .venv/bin/pip install --quiet --no-deps -e .
 
       # Client tests build the bundles first, so this also catches build breaks.
       - run: npm test
