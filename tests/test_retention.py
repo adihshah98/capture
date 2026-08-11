@@ -25,10 +25,11 @@ class TestSweepClearsBothBackends(unittest.TestCase):
     def setUpClass(cls):
         import shutil
 
-        from capture import config, db, paths, projects, server, storage
+        from capture import config, db, paths, projects, retention, server, storage
 
         cls.server, cls.storage, cls.db, cls.projects = server, storage, db, projects
         cls.paths, cls.config = paths, config
+        cls.retention = retention
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-retention-"))
         cls.addClassCleanup(shutil.rmtree, cls.data_dir, ignore_errors=True)
 
@@ -100,7 +101,7 @@ class TestSweepClearsBothBackends(unittest.TestCase):
         old = int((time.time() - 30 * 86400) * 1000)
         name = self.seed("stale", old)
 
-        removed = self.server.sweep_expired_sessions()
+        removed = self.retention.sweep_expired_sessions()
 
         self.assertEqual(removed, 1)
         self.assertEqual(self.rows(), [])
@@ -112,7 +113,7 @@ class TestSweepClearsBothBackends(unittest.TestCase):
 
         name = self.seed("fresh", int(time.time() * 1000) - 3600_000)
 
-        self.assertEqual(self.server.sweep_expired_sessions(), 0)
+        self.assertEqual(self.retention.sweep_expired_sessions(), 0)
         self.assertEqual(self.rows(), ["fresh"])
         self.assertEqual(len(self.fake.objects), 1)
         self.assertTrue((self.storage.local_dir("cap_r", "fresh") / name).exists())
@@ -123,7 +124,7 @@ class TestSweepClearsBothBackends(unittest.TestCase):
         self.seed("stale", int((time.time() - 30 * 86400) * 1000))
         self.config.RETENTION_DAYS = 0
         try:
-            self.assertEqual(self.server.sweep_expired_sessions(), 0)
+            self.assertEqual(self.retention.sweep_expired_sessions(), 0)
         finally:
             self.config.RETENTION_DAYS = 7
         self.assertEqual(self.rows(), ["stale"])
