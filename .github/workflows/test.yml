@@ -6,6 +6,26 @@ on:
   pull_request:
 
 jobs:
+  # Runs in ~20s with no Postgres and no npm install, so a formatting or typing
+  # mistake fails before the 3-minute test job has finished booting a database.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dev tooling
+        run: pip install --quiet -r requirements-dev.txt
+
+      # capture/analyze is excluded in pyproject.toml — it belongs to the
+      # analysis refactor and must not be reformatted from here.
+      - run: ruff check --output-format=github .
+      - run: ruff format --check .
+      - run: mypy capture/
+
   test:
     runs-on: ubuntu-latest
 
@@ -50,3 +70,19 @@ jobs:
 
       # Client tests build the bundles first, so this also catches build breaks.
       - run: npm test
+
+  # Advisory only, and deliberately non-blocking: seven pinned runtime deps had
+  # no advisory check at all, but a new CVE must not be able to wedge a deploy.
+  audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install --quiet pip-audit
+
+      - run: pip-audit --requirement requirements.txt --strict

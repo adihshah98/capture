@@ -279,7 +279,8 @@ def listing(
     filter: str | None = None,
     q: str | None = None,
 ) -> dict:
-    where, params = ["TRUE"], []
+    where: list[str] = ["TRUE"]
+    params: list = []
     if filter in FILTERS:
         where.append(FILTERS[filter])
     if q:

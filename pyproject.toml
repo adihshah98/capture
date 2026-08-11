@@ -27,11 +27,17 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.11"
-exclude = ["^capture/analyze/", "^\\.venv/", "^tests/"]
+exclude = ["^\\.venv/", "^tests/"]
 ignore_missing_imports = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
+
+# `exclude` only skips directory crawling, not import-following, so the
+# co-founder's package needs ignore_errors to actually stay out of our report.
+[[tool.mypy.overrides]]
+module = "capture.analyze.*"
+ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -94,7 +94,7 @@ def all_projects(fresh: bool = False) -> list:
             except Exception as exc:
                 raise ProjectsUnavailable(str(exc)) from exc
             _cache_at = time.monotonic()
-        return list(_cache)
+        return list(_cache or ())
 
 
 def invalidate() -> None:
@@ -152,7 +152,12 @@ def create(name: str, token: str, *, is_default: bool = False) -> Project:
         ).fetchone()[0]
         conn.execute("INSERT INTO project_tokens (token, project_id) VALUES (%s, %s)", (token, pid))
     invalidate()
-    return by_id(str(pid))
+    created = by_id(str(pid))
+    if created is None:
+        # Inserted and committed, then not readable back. Fail loudly rather
+        # than hand out a None the caller will dereference.
+        raise ProjectsUnavailable(f"project {pid} is unreadable immediately after creation")
+    return created
 
 
 def set_org(project: Project, org_id: str) -> None:

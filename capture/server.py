@@ -290,14 +290,6 @@ def gunzip(body: bytes, limit: int) -> bytes:
     return raw
 
 
-def dir_bytes(path: Path) -> int:
-    # Only recorded chunks count toward the ingest quota. Analysis output is
-    # derived, is bounded per session, and must never throttle recording.
-    return sum(
-        f.stat().st_size for f in path.rglob("*.json") if f.is_file() and SAFE_CHUNK.match(f.name)
-    )
-
-
 _bytes_used: dict = {}
 
 
@@ -624,7 +616,8 @@ def last_active_scan(events: list, state: dict) -> int | None:
         if not isinstance(ts, (int, float)):
             continue
         kind = e.get("type")
-        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        payload = e.get("data")
+        data = payload if isinstance(payload, dict) else {}
         active = False
         if kind == 4:
             href = data.get("href")
@@ -696,7 +689,7 @@ def parse_attribution(url: str | None) -> dict | None:
         for key, values in urllib.parse.parse_qs(fragment, keep_blank_values=False).items():
             if key not in params and values and values[0]:
                 params[key] = values[0]
-    out = {}
+    out: dict[str, str | bool] = {}
     for key in ATTRIBUTION_KEYS:
         if key not in params:
             continue
@@ -2013,7 +2006,7 @@ def _slice_from_params(
     utm_content,
     fbclid,
 ) -> dict:
-    spec = {}
+    spec: dict = {}
     outcomes = _multi_param(outcome, analyze.OUTCOME_VALUES, "outcome")
     if outcomes:
         spec["outcome"] = outcomes
