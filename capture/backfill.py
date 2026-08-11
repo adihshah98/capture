@@ -10,7 +10,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from . import db, paths, server
+from . import db, legacy_sessions, paths
 
 DEFAULT_PROJECT_NAME = "Default"
 
@@ -180,12 +180,12 @@ def read_states(session_dir: Path, parse_chunks: bool = True) -> dict:
     The index path passes parse_chunks=False — re-reading every chunk is the
     whole cost this migration is trying to avoid."""
     try:
-        states = json.loads((session_dir / server.WINDOW_STATE_FILE).read_text())
+        states = json.loads((session_dir / legacy_sessions.WINDOW_STATE_FILE).read_text())
         if isinstance(states, dict) and states:
             return states
     except Exception:
         pass
-    return server.session_states(session_dir)[0] if parse_chunks else {}
+    return legacy_sessions.session_states(session_dir)[0] if parse_chunks else {}
 
 
 def _loads(raw):
@@ -374,7 +374,7 @@ def backfill(verbose: bool = True) -> dict:
                 for entry in entries:
                     if entry.name in imported:
                         continue
-                    info = server.session_info(entry)
+                    info = legacy_sessions.session_info(entry)
                     if not info:
                         counts["skipped"] += 1
                         continue

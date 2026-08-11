@@ -1,16 +1,9 @@
 import asyncio
 import base64
 import json
-import random
 import re
 import secrets
-import shutil
-import string
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-import zlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import NamedTuple
@@ -35,14 +28,27 @@ except ImportError:
     pass
 
 from . import analysis_port as ap
-from . import compat, config, db, paths, projects, session, sessionstore, storage, workos
-from .api import auth, meta
+from . import (
+    compat,
+    config,
+    db,
+    legacy_sessions,
+    paths,
+    projects,
+    quota,
+    session,
+    sessionstore,
+    storage,
+    workos,
+)
+from .api import auth, ingest, meta
 from .api.deps import (
     allowed_projects,
     require_read_access,
     resolve_project,
     resolve_session,
 )
+from .attribution import parse_attribution
 from .errors import ApiError
 from .fsutil import atomic_write_bytes
 from .paths import SAFE_CHUNK, SAFE_ID, chunk_timestamp, chunk_window
@@ -117,6 +123,7 @@ app = FastAPI(title="capture", lifespan=lifespan)
 
 app.include_router(meta.router)
 app.include_router(auth.router)
+app.include_router(ingest.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -185,35 +192,6 @@ async def revalidate_static(request: Request, call_next):
 paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def require_allowed_domain(request: Request, project: projects.Project | None) -> None:
-    domains = list(project.domains) if project else []
-    if not domains:
-        return
-    source = request.headers.get("origin") or request.headers.get("referer") or ""
-    host = (urllib.parse.urlparse(source).hostname or "").lower()
-    if not any(host == d or host.endswith("." + d) for d in domains):
-        raise ApiError(403, "domain not allowed for this project")
-
-
-def gunzip(body: bytes, limit: int) -> bytes:
-    stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
-    raw = stream.decompress(body, limit)
-    if stream.unconsumed_tail:
-        raise ValueError("decompressed payload too large")
-    return raw
-
-
-_bytes_used: dict = {}
-
-
-def project_bytes_used(project) -> int:
-    """Cached so the quota check is not a query per ingest; the running total is
-    maintained in SQL and re-read only on a cold cache."""
-    if project.id not in _bytes_used:
-        _bytes_used[project.id] = sessionstore.project_bytes(project.id)
-    return _bytes_used[project.id]
-
-
 @app.exception_handler(ApiError)
 async def api_error_response(_request, exc: ApiError) -> JSONResponse:
     return JSONResponse({"error": exc.message}, status_code=exc.status)
@@ -223,347 +201,6 @@ async def api_error_response(_request, exc: ApiError) -> JSONResponse:
 async def projects_unavailable_response(_request, exc: ProjectsUnavailable) -> JSONResponse:
     print(f"projects: refusing to serve — {exc}")
     return JSONResponse({"error": "project configuration unavailable"}, status_code=503)
-
-
-@app.post("/ingest")
-async def ingest(
-    request: Request,
-    session_id: str = Query(""),
-    compression: str | None = Query(None),
-    token: str | None = Query(None),
-):
-    if config.READ_ONLY:
-        raise ApiError(403, "this server is read-only and does not accept recordings")
-    if not SAFE_ID.match(session_id):
-        raise ApiError(400, "invalid session_id")
-
-    project = projects.by_token(token)
-    if project is None:
-        raise ApiError(401, "unknown project token")
-    require_allowed_domain(request, project)
-
-    if (
-        config.MIN_FREE_DISK_BYTES
-        and shutil.disk_usage(paths.DATA_ROOT).free < config.MIN_FREE_DISK_BYTES
-    ):
-        raise ApiError(507, "server storage full")
-    if config.MAX_PROJECT_BYTES and project_bytes_used(project) >= config.MAX_PROJECT_BYTES:
-        raise ApiError(429, "project storage quota reached")
-
-    body = await request.body()
-    if len(body) > config.MAX_BODY_BYTES:
-        raise ApiError(413, "payload too large")
-
-    try:
-        raw = gunzip(body, config.MAX_DECOMPRESSED_BYTES) if compression == "gzip-js" else body
-        payload = json.loads(raw)
-    except Exception as exc:
-        raise ApiError(400, "bad payload") from exc
-
-    if not isinstance(payload, dict):
-        raise ApiError(400, "bad payload")
-
-    events = payload.get("events")
-    if not isinstance(events, list) or not events:
-        raise ApiError(400, "no events")
-
-    # No directory is created here any more: chunks go to storage and the last
-    # two sidecars are columns. Analysis makes one when it stages frames.
-    meta = {}
-    visitor, url = payload.get("visitor_id"), payload.get("url")
-    if isinstance(visitor, str) and SAFE_ID.match(visitor):
-        meta["visitor_id"] = visitor
-    if isinstance(url, str) and url:
-        meta["url"] = url[:2048]
-
-    now = int(time.time() * 1000)
-    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    window_prefix = re.sub(r"[^a-f0-9]", "", str(payload.get("window_id") or ""))[:8]
-    parts = [str(now), window_prefix, suffix]
-    chunk_name = "-".join(p for p in parts if p) + ".json"
-    stored = json.dumps(
-        {
-            "window_id": payload.get("window_id"),
-            "url": payload.get("url"),
-            "received_at": now,
-            "events": events,
-        }
-    ).encode()
-    # Off the loop deliberately. A 380KB PUT to S3 takes ~64ms; run inline it
-    # would serialise every other request behind it and cap one worker at
-    # roughly 15 req/s, against ~70 when this was a local write.
-    await asyncio.to_thread(
-        storage.put_chunk, project.storage_prefix, session_id, chunk_name, stored
-    )
-    clicks, rage = count_clicks(events)
-    device = read_device(events)
-    size = len(stored)
-    first_ts, last_ts = event_span(events) or (now, now)
-
-    window_id = str(payload.get("window_id") or "default")
-    state = await asyncio.to_thread(sessionstore.window_state, project.id, session_id, window_id)
-    active_ts = last_active_scan(events, state)
-    if active_ts:
-        state["active"] = max(state.get("active", 0), active_ts)
-    state["first"] = min(state.get("first", first_ts), first_ts)
-    state["last"] = max(state.get("last", last_ts), last_ts)
-
-    await asyncio.to_thread(
-        sessionstore.record_chunk,
-        project.id,
-        session_id,
-        window_id=window_id,
-        first_ts=first_ts,
-        last_ts=last_ts,
-        active_ts=active_ts,
-        size=size,
-        meta=meta,
-        clicks=clicks,
-        rage=rage,
-        device=device,
-        attribution=parse_attribution(meta.get("url")),
-        state=state,
-    )
-    _bytes_used[project.id] = _bytes_used.get(project.id, 0) + size
-
-    return {"status": "ok", "stored": len(events)}
-
-
-ORDER_FILE = "order.json"
-VISITOR_FILE = "visitor.json"
-
-INTERACTIONS_FILE = "interactions.json"
-
-DEVICE_FILE = "device.json"
-
-
-def read_device(events: list) -> dict | None:
-    for event in events:
-        if not isinstance(event, dict) or event.get("type") != 4:
-            continue
-        data = event.get("data")
-        if not isinstance(data, dict):
-            continue
-        width, height = data.get("width"), data.get("height")
-        if isinstance(width, int) and isinstance(height, int) and width > 0:
-            return {"width": width, "height": height}
-    return None
-
-
-def count_clicks(events: list) -> tuple:
-    """This batch's clicks only. The running totals accumulate in SQL, where an
-    increment cannot be lost between a read and a write."""
-    clicks = rage = 0
-    for event in events:
-        if not isinstance(event, dict) or event.get("type") != 5:
-            continue
-        data = event.get("data")
-        if not isinstance(data, dict) or data.get("tag") != "capture-click":
-            continue
-        clicks += 1
-        payload = data.get("payload")
-        if isinstance(payload, dict) and payload.get("rage"):
-            rage += 1
-    return clicks, rage
-
-
-@app.post("/order")
-async def order_event(
-    request: Request,
-    session_id: str = Query(""),
-    token: str | None = Query(None),
-):
-    if config.READ_ONLY:
-        raise ApiError(403, "this server is read-only and does not accept recordings")
-    if not SAFE_ID.match(session_id):
-        raise ApiError(400, "invalid session_id")
-    project = projects.by_token(token)
-    if project is None:
-        raise ApiError(401, "unknown project token")
-
-    body = await request.body()
-    if len(body) > config.ORDER_MAX_BODY_BYTES:
-        raise ApiError(413, "payload too large")
-    try:
-        payload = json.loads(body)
-    except Exception as exc:
-        raise ApiError(400, "bad payload") from exc
-    if not isinstance(payload, dict):
-        raise ApiError(400, "bad payload")
-    event = payload.get("event")
-    if event not in ("checkout_started", "checkout_completed"):
-        raise ApiError(400, "unknown event")
-
-    now = int(time.time() * 1000)
-    order = sessionstore.record_order(project.id, session_id, event, payload, now)
-    if order is None:
-        raise ApiError(404, "unknown session")
-    return {"status": "ok"}
-
-
-ACTIVE_SOURCES = {1, 2, 3, 4, 5, 6, 7, 12}
-SNAPSHOT_META_WINDOW_MS = 500
-WINDOW_STATE_FILE = "window-state.json"
-
-
-def last_active_scan(events: list, state: dict) -> int | None:
-    """Mirror the player's buildSegments activity rules; `state` carries the
-    per-window href/nav position across chunks."""
-    nav = state.get("nav", -(10**15))
-    last = None
-    for e in events:
-        if not isinstance(e, dict):
-            continue
-        ts = e.get("timestamp")
-        if not isinstance(ts, (int, float)):
-            continue
-        kind = e.get("type")
-        payload = e.get("data")
-        data = payload if isinstance(payload, dict) else {}
-        active = False
-        if kind == 4:
-            href = data.get("href")
-            if href != state.get("href"):
-                state["href"] = href
-                nav = ts
-                active = True
-        elif kind == 2:
-            active = ts - nav <= SNAPSHOT_META_WINDOW_MS
-        elif kind == 3:
-            active = data.get("source") in ACTIVE_SOURCES
-        if active:
-            last = ts
-    state["nav"] = nav
-    return int(last) if last is not None else None
-
-
-def event_span(events: list) -> tuple | None:
-    ts = [
-        e["timestamp"]
-        for e in events
-        if isinstance(e, dict) and isinstance(e.get("timestamp"), (int, float))
-    ]
-    return (int(min(ts)), int(max(ts))) if ts else None
-
-
-def window_duration(states: dict) -> int | None:
-    """Clamped span of the primary (biggest) window — the one the player
-    opens by default."""
-    spans = [w for w in states.values() if isinstance(w.get("first"), (int, float))]
-    if not spans:
-        return None
-    primary = max(spans, key=lambda w: w.get("bytes", 0))
-    end = primary["last"]
-    if primary.get("active"):
-        end = min(end, primary["active"] + 1500)
-    return max(int(end - primary["first"]), 0)
-
-
-def chunk_files(session_dir: Path) -> list:
-    return sorted(
-        (c for c in session_dir.glob("*.json") if SAFE_CHUNK.match(c.name)),
-        key=lambda c: chunk_timestamp(c.name),
-    )
-
-
-ATTRIBUTION_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid")
-
-
-def parse_attribution(url: str | None) -> dict | None:
-    """Pull utm_* / fbclid from an entry URL for indexing and segment rollups."""
-    if not isinstance(url, str) or not url.strip():
-        return None
-    try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception:
-        return None
-    params: dict = {}
-    for key, values in urllib.parse.parse_qs(parsed.query, keep_blank_values=False).items():
-        if values and values[0]:
-            params[key] = values[0]
-    fragment = parsed.fragment or ""
-    if fragment and re.match(r"^[^/]+=", fragment):
-        for key, values in urllib.parse.parse_qs(fragment, keep_blank_values=False).items():
-            if key not in params and values and values[0]:
-                params[key] = values[0]
-    out: dict[str, str | bool] = {}
-    for key in ATTRIBUTION_KEYS:
-        if key not in params:
-            continue
-        if key == "fbclid":
-            out["fbclid"] = True
-        else:
-            out[key] = str(params[key])[:256]
-    return out or None
-
-
-def session_states(entry: Path) -> tuple:
-    """Rebuild per-window spans from the chunks themselves, so a session that
-    predates window-state.json still resolves. Returns (states, first, last, active)."""
-    first = last = None
-    active = 0
-    states: dict = {}
-    for chunk in chunk_files(entry):
-        try:
-            data = json.loads(chunk.read_text())
-        except Exception:
-            continue
-        events = data.get("events") or []
-        span = event_span(events)
-        if not span:
-            continue
-        first = span[0] if first is None else min(first, span[0])
-        last = span[1] if last is None else max(last, span[1])
-        state = states.setdefault(str(data.get("window_id") or "default"), {})
-        chunk_active = last_active_scan(events, state)
-        if chunk_active:
-            active = max(active, chunk_active)
-            state["active"] = max(state.get("active", 0), chunk_active)
-        state["first"] = min(state.get("first", span[0]), span[0])
-        state["last"] = max(state.get("last", span[1]), span[1])
-        state["bytes"] = state.get("bytes", 0) + chunk.stat().st_size
-    return states, first, last, active
-
-
-def session_info(entry: Path) -> dict | None:
-    chunks = chunk_files(entry)
-    if not chunks:
-        return None
-    states, first, last, active = session_states(entry)
-    info = {
-        "session_id": entry.name,
-        "first_seen": first if first is not None else chunk_timestamp(chunks[0].name),
-        "last_seen": last if last is not None else chunk_timestamp(chunks[-1].name),
-        "last_active": active,
-        "duration": window_duration(states),
-        "windows": len(states) or 1,
-        "chunk_count": len(chunks),
-        "bytes": sum(c.stat().st_size for c in chunks),
-    }
-    for key, name in (
-        ("order", ORDER_FILE),
-        ("interactions", INTERACTIONS_FILE),
-        ("device", DEVICE_FILE),
-    ):
-        path = entry / name
-        if path.is_file():
-            try:
-                value = json.loads(path.read_text())
-                if isinstance(value, dict):
-                    info[key] = value
-            except Exception:
-                pass
-    meta_path = entry / VISITOR_FILE
-    if meta_path.is_file():
-        try:
-            meta = json.loads(meta_path.read_text())
-            info.update({k: meta[k] for k in ("visitor_id", "url") if isinstance(meta.get(k), str)})
-        except Exception:
-            pass
-    attribution = parse_attribution(info.get("url"))
-    if attribution:
-        info["attribution"] = attribution
-    return info
 
 
 @app.get("/api/projects")
@@ -604,7 +241,7 @@ def list_sessions(
 def get_session(request: Request, session_id: str, project: str | None = Query(None)):
     require_read_access(request, project)
     found = resolve_project(project)
-    info = sessionstore.get(found.id, session_id) or session_info(
+    info = sessionstore.get(found.id, session_id) or legacy_sessions.session_info(
         resolve_session(session_id, project)
     )
     if info is None:
@@ -629,7 +266,7 @@ def delete_session(request: Request, session_id: str, project: str | None = Quer
         # The session is already gone from the index; a failure here leaves a
         # stale membership row, which is bad but not worth failing the delete.
         print(f"cohort cleanup after forgetting {session_id}: {exc}")
-    _bytes_used.pop(found.id, None)
+    quota.forget(found.id)
     print(f"deleted session {session_id} ({freed} bytes)")
     return {"status": "deleted", "session_id": session_id, "bytes_freed": freed}
 
@@ -892,7 +529,7 @@ def get_analysis(request: Request, session_id: str, project: str | None = Query(
     if cached:
         if "status" not in cached:
             cached = {**cached, "status": "done"}
-        info = session_info(session_dir)
+        info = legacy_sessions.session_info(session_dir)
         if info:
             if info.get("order"):
                 cached = {**cached, "order": info["order"]}
@@ -1724,7 +1361,7 @@ def sweep_expired_sessions() -> int:
                 print(f"cohort cleanup after expiring {session_id}: {exc}")
             removed += 1
     if removed:
-        _bytes_used.clear()
+        quota.clear()
     return removed
 
 
