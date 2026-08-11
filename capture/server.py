@@ -38,7 +38,8 @@ except ImportError:
     pass
 
 from . import analysis_port as ap
-from . import compat, db, paths, projects, sessionstore, storage
+from . import compat, db, paths, projects, sessionstore, snippet, storage, workos
+from .errors import ApiError
 from .fsutil import atomic_write_bytes, atomic_write_text
 from .paths import SAFE_CHUNK, SAFE_ID, chunk_timestamp, chunk_window
 from .projects import ProjectsUnavailable
@@ -51,7 +52,7 @@ async def lifespan(_app):
             "warning: REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
             "open to anyone who can reach this server"
         )
-    elif WORKOS_ENABLED:
+    elif workos.enabled():
         print(
             "replay auth: WorkOS per-user logins; projects are visible to "
             "their org_id members" + (" and operators" if OPERATORS else " (no operators set)")
@@ -122,7 +123,7 @@ async def replay_auth(request: Request, call_next):
     path = re.sub(r"/+", "/", request.url.path).lower()
     protected = path.startswith("/api/") or path == "/replay.html"
     if protected and not REPLAY_AUTH_DISABLED:
-        if WORKOS_ENABLED:
+        if workos.enabled():
             session = read_session(request.cookies.get(SESSION_COOKIE))
 
             if not session or not session.get("user_id"):
@@ -184,11 +185,6 @@ PROJECTS_DIR = paths.PROJECTS_DIR
 REPLAY_PASSWORD = os.environ.get("REPLAY_PASSWORD", "")
 REPLAY_AUTH_DISABLED = os.environ.get("REPLAY_AUTH_DISABLED") == "1"
 
-WORKOS_API_KEY = os.environ.get("WORKOS_API_KEY", "")
-WORKOS_CLIENT_ID = os.environ.get("WORKOS_CLIENT_ID", "")
-WORKOS_ENABLED = bool(WORKOS_API_KEY and WORKOS_CLIENT_ID)
-WORKOS_API = os.environ.get("WORKOS_API") or "https://api.workos.com"
-ORG_CACHE_TTL_S = float(os.environ.get("ORG_CACHE_TTL_S", "60"))
 
 OPERATORS = {
     e.strip().lower() for e in os.environ.get("CAPTURE_OPERATORS", "").split(",") if e.strip()
@@ -196,7 +192,7 @@ OPERATORS = {
 
 SESSION_SECRET = (
     os.environ.get("SESSION_SECRET")
-    or hashlib.sha256(f"session:{WORKOS_API_KEY}".encode()).hexdigest()
+    or hashlib.sha256(f"session:{workos.API_KEY}".encode()).hexdigest()
 )
 SESSION_TTL_S = 7 * 24 * 3600
 SESSION_COOKIE = "capture_session"
@@ -293,12 +289,6 @@ def project_bytes_used(project) -> int:
 
 
 CONFIG_PATH = paths.CONFIG_PATH
-
-
-class ApiError(Exception):
-    def __init__(self, status: int, message: str):
-        self.status = status
-        self.message = message
 
 
 @app.exception_handler(ApiError)
@@ -536,7 +526,7 @@ def healthz():
         for name in ("capture.js", "recorder.bundle.js", "replay.bundle.js")
     )
     checks["replay_auth_enabled"] = (
-        bool(REPLAY_PASSWORD or WORKOS_ENABLED) and not REPLAY_AUTH_DISABLED
+        bool(REPLAY_PASSWORD or workos.enabled()) and not REPLAY_AUTH_DISABLED
     )
     # Reported, not health-gating: analysis is an optional extra, and a box
     # without a key or a browser is still a perfectly healthy recorder.
@@ -753,78 +743,17 @@ def session_info(entry: Path) -> dict | None:
     return info
 
 
-def workos_call(path: str, payload: dict | None = None, bearer: bool = False) -> dict:
-    req = urllib.request.Request(
-        WORKOS_API + path,
-        data=json.dumps(payload).encode() if payload is not None else None,
-        headers={
-            "Content-Type": "application/json",
-            **({"Authorization": f"Bearer {WORKOS_API_KEY}"} if bearer else {}),
-        },
-    )
-    with urllib.request.urlopen(req, timeout=10) as res:
-        return json.load(res)
-
-
-def workos_authenticate(code: str) -> tuple:
-    auth = workos_call(
-        "/user_management/authenticate",
-        {
-            "client_id": WORKOS_CLIENT_ID,
-            "client_secret": WORKOS_API_KEY,
-            "grant_type": "authorization_code",
-            "code": code,
-        },
-    )
-    user = auth.get("user") or {}
-    return (user.get("email") or "").lower(), user.get("id") or ""
-
-
-_org_cache: dict = {}
-
-
-def user_orgs(user_id: str) -> set:
-    now = time.time()
-    cached = _org_cache.get(user_id)
-    if cached and cached[0] > now:
-        return cached[1]
-    try:
-        memberships = workos_call(
-            "/user_management/organization_memberships"
-            f"?user_id={urllib.parse.quote(user_id)}&statuses=active&limit=100",
-            bearer=True,
-        )
-        orgs = {
-            m["organization_id"] for m in memberships.get("data", []) if m.get("organization_id")
-        }
-    except Exception as exc:
-        print(f"auth: membership lookup failed for {user_id}: {exc}")
-        if cached:
-            return cached[1]
-        raise ApiError(503, "could not verify project access — try again shortly") from exc
-    _org_cache[user_id] = (now + ORG_CACHE_TTL_S, orgs)
-    return orgs
-
-
 @app.get("/login")
 def login():
-    if not WORKOS_ENABLED:
+    if not workos.enabled():
         return Response(
             "Per-user login is not configured; set WORKOS_API_KEY and WORKOS_CLIENT_ID.\n",
             status_code=503,
             media_type="text/plain",
         )
     state = secrets.token_urlsafe(24)
-    query = urllib.parse.urlencode(
-        {
-            "client_id": WORKOS_CLIENT_ID,
-            "redirect_uri": public_base_url() + "/auth/callback",
-            "response_type": "code",
-            "provider": "authkit",
-            "state": state,
-        }
-    )
-    response = RedirectResponse(f"{WORKOS_API}/user_management/authorize?{query}", status_code=302)
+    target = workos.authorize_url(snippet.public_base_url() + "/auth/callback", state)
+    response = RedirectResponse(target, status_code=302)
     response.set_cookie(
         STATE_COOKIE, state, max_age=600, httponly=True, secure=True, samesite="lax"
     )
@@ -835,12 +764,12 @@ def login():
 def auth_callback(
     request: Request, code: str | None = Query(None), state: str | None = Query(None)
 ):
-    if not WORKOS_ENABLED:
+    if not workos.enabled():
         raise ApiError(503, "login not configured")
     if not code or not state or state != request.cookies.get(STATE_COOKIE):
         return RedirectResponse("/login", status_code=302)
     try:
-        email, user_id = workos_authenticate(code)
+        email, user_id = workos.authenticate(code)
     except Exception as exc:
         print(f"auth: WorkOS code exchange failed: {exc}")
         raise ApiError(401, "login failed — start again at /login") from exc
@@ -868,7 +797,7 @@ def allowed_projects(request: Request) -> set | None:
     auth = getattr(request.state, "auth", None)
     if auth is None or (auth.get("email") or "").lower() in OPERATORS:
         return None
-    orgs = user_orgs(auth.get("user_id") or "")
+    orgs = workos.user_orgs(auth.get("user_id") or "")
     return {p.handle for p in projects.for_orgs(orgs)}
 
 
@@ -2044,204 +1973,3 @@ def sweep_expired_sessions() -> int:
 
 
 app.mount("/", StaticFiles(directory=BASE_DIR / "public", html=True), name="static")
-
-PUBLIC_URL_FILE = DATA_ROOT / "public_url"
-
-
-def public_base_url() -> str:
-    try:
-        from_file = PUBLIC_URL_FILE.read_text()
-    except Exception:
-        from_file = ""
-    for value in (os.environ.get("CAPTURE_PUBLIC_URL"), from_file):
-        if value:
-            return value.strip().rstrip("/")
-    return "https://capture.example.com"
-
-
-# Byte-identical to the block in docs/integration.md; a test pins them.
-INTEGRATION_SNIPPET = """<script>
-(function () {
-  var host = '__HOST__';
-  window.CAPTURE_CONFIG = Object.assign(
-    { endpoint: host + '/ingest', configUrl: host + '/config', token: '__TOKEN__' },
-    window.CAPTURE_CONFIG || {}
-  );
-  function load() {
-    if (window.__captureLoaded) return;
-    window.__captureLoaded = 1;
-    var s = document.createElement('script');
-    s.async = 1;
-    s.src = host + '/recorder.bundle.js';
-    s.onerror = function () { window.__captureLoaded = 0; };
-    document.head.appendChild(s);
-  }
-  function schedule() {
-    if ('requestIdleCallback' in window) requestIdleCallback(load, { timeout: 3000 });
-    else setTimeout(load, 1500);
-  }
-  if (document.readyState === 'complete') schedule();
-  else addEventListener('load', schedule);
-})();
-</script>"""
-
-
-def integration_snippet(base: str, token: str, indent: str = "  ") -> str:
-    body = INTEGRATION_SNIPPET.replace("__HOST__", base).replace("__TOKEN__", token)
-    return "\n".join(indent + line if line else line for line in body.split("\n"))
-
-
-def add_project(name: str) -> None:
-    token = "cap_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=24))
-    project = projects.create(name, token)
-    project.pool.mkdir(parents=True, exist_ok=True)
-    base = public_base_url()
-    print(f"project '{name}' created — token: {token}")
-    print("\nAdd this snippet to the brand's site, on every page:\n")
-    print(integration_snippet(base, token))
-    if base == "https://capture.example.com":
-        print(
-            "\n  (placeholder host — set CAPTURE_PUBLIC_URL or run ./setup.sh "
-            "to record your real one)"
-        )
-    print(
-        "\nOptional per-project recording config: "
-        f"data/projects/{token}/config.json (falls back to data/config.json)"
-    )
-
-
-def find_project(handle: str):
-    """CLI lookup: accepts the project handle or any of its ingest tokens."""
-    return projects.by_handle(handle) or projects.by_token(handle)
-
-
-def list_projects_cli() -> None:
-    known = projects.all_projects(fresh=True)
-    if not known:
-        print("no projects configured — run add-project, or backfill.py to import existing data")
-        return
-    for project in known:
-        count, used = projects.usage(project)
-        org = project.org_id or "no org — operators only"
-        tokens = ", ".join(project.tokens) or "no live token"
-        label = project.handle or "(default)"
-        print(
-            f"{label}  {project.name}  —  {count} session(s), {used / 1024**2:.1f} MB"
-            f"  —  {org}  —  {tokens}"
-        )
-
-
-def set_project_org(handle: str, org_id: str) -> None:
-    project = find_project(handle)
-    if project is None:
-        print(f"no such project: {handle}")
-        return
-    projects.set_org(project, org_id)
-    print(f"'{project.name}' is now readable by members of WorkOS organization {org_id}")
-
-
-def set_project_domains(handle: str, domains: list) -> None:
-    project = find_project(handle)
-    if project is None:
-        print(f"no such project: {handle}")
-        return
-    cleaned = [
-        host.lower()
-        for d in domains
-        if (host := urllib.parse.urlparse(d if "://" in d else f"//{d}").hostname)
-    ]
-    projects.set_domains(project, cleaned)
-    if cleaned:
-        print(
-            f"'{project.name}' now accepts recordings only from {', '.join(cleaned)} (and subdomains)"
-        )
-    else:
-        print(f"'{project.name}' now accepts recordings from any domain")
-
-
-def invite_user(email: str, target: str) -> None:
-    if not WORKOS_ENABLED:
-        print("invites need WORKOS_API_KEY and WORKOS_CLIENT_ID in the environment")
-        return
-    project = find_project(target)
-    org_id = project.org_id if project else target
-    if not (org_id or "").startswith("org_"):
-        print(f"'{target}' has no WorkOS org — pass an org_… id or run set-org first")
-        return
-    try:
-        invitation = workos_call(
-            "/user_management/invitations",
-            {"email": email, "organization_id": org_id},
-            bearer=True,
-        )
-    except urllib.error.HTTPError as err:
-        print(f"invite failed: {err.read().decode(errors='replace')}")
-        return
-    expires = invitation.get("expires_at") or "?"
-    print(f"invited {email} to {org_id} — they'll get an email link, valid until {expires}")
-
-
-def remove_project(handle: str, purge: bool) -> None:
-    project = find_project(handle)
-    if project is None:
-        print(f"no such project: {handle}")
-        return
-    count, used = projects.usage(project)
-    for token in project.tokens:
-        projects.revoke_token(token)
-    print(f"revoked '{project.name}' — batches sent with its tokens are now rejected")
-
-    if purge:
-        shutil.rmtree(project.pool.parent, ignore_errors=True)
-        projects.delete(project)
-        print(f"deleted {count} stored session(s), {used / 1024**2:.1f} MB")
-    elif count:
-        print(f"kept {count} session(s), {used / 1024**2:.1f} MB — re-run with --purge to erase")
-
-
-def _cli(argv: list) -> None:
-    if len(argv) >= 2 and argv[0] == "add-project":
-        add_project(argv[1])
-    elif argv[:1] == ["list-projects"]:
-        list_projects_cli()
-    elif len(argv) >= 2 and argv[0] == "remove-project":
-        remove_project(argv[1], purge="--purge" in argv[2:])
-    elif len(argv) >= 3 and argv[0] == "set-org":
-        set_project_org(argv[1], argv[2])
-    elif len(argv) >= 2 and argv[0] == "set-domains":
-        set_project_domains(argv[1], argv[2:])
-    elif len(argv) >= 3 and argv[0] == "invite":
-        invite_user(argv[1], argv[2])
-    elif argv[:1] == ["reindex"]:
-        from . import backfill
-
-        db.migrate()
-        result = backfill.backfill()
-        print(
-            f"{result['sessions']} session(s) across {result['projects']} project(s);"
-            f" {result['skipped']} empty dir(s) skipped"
-        )
-    else:
-        print("usage: python -m capture.server add-project <name>")
-        print("       python -m capture.server list-projects")
-        print("       python -m capture.server remove-project <token> [--purge]")
-        print("       python -m capture.server set-org <token> <workos_org_id>")
-        print("       python -m capture.server set-domains <token> [domain ...]")
-        print("       python -m capture.server invite <email> <project_token_or_org_id>")
-        print("       python -m capture.server reindex")
-        print("run the server with: .venv/bin/uvicorn server:app --port 3000")
-
-
-if __name__ == "__main__":
-    import sys
-
-    try:
-        _cli(sys.argv[1:])
-    except ProjectsUnavailable as exc:
-        print(f"error: {exc}")
-        print("the projects table is unreadable — refusing to guess at tenant routing")
-        sys.exit(1)
-    finally:
-        # Without this the pool's worker threads outlive the command and print
-        # shutdown warnings over its output.
-        db.close_pool()

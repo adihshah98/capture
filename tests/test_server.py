@@ -581,11 +581,11 @@ def request_headers(url):
 class TestIntegrationSnippetMatchesDocs(unittest.TestCase):
     def test_cli_snippet_is_the_documented_snippet(self):
         sys.path.insert(0, str(REPO))
-        from capture import server
+        from capture import snippet
 
         doc = (REPO / "docs" / "integration.md").read_text()
         documented = doc.split("```html\n", 1)[1].split("```", 1)[0].strip()
-        generated = server.integration_snippet(
+        generated = snippet.integration_snippet(
             "https://capture.example.com", "cap_YOURTOKEN", indent=""
         ).strip()
         self.assertEqual(documented, generated)
@@ -721,7 +721,7 @@ class TestProjectCli(unittest.TestCase):
 
     def run_cli(self, *args, env=None):
         result = subprocess.run(
-            [str(REPO / ".venv" / "bin" / "python"), "-m", "capture.server", *args],
+            [str(REPO / ".venv" / "bin" / "python"), "-m", "capture.cli", *args],
             cwd=REPO,
             env={
                 **os.environ,
@@ -741,6 +741,30 @@ class TestProjectCli(unittest.TestCase):
         out = self.run_cli("list-projects")
         self.assertNotIn("DeprecationWarning", out)
         self.assertNotIn("on_event is deprecated", out)
+
+    def test_the_cli_does_not_load_the_web_app(self):
+        """It used to live in server.py, so inserting one row imported FastAPI and
+        registered every route. Warnings from that import also landed in CLI
+        output, which is what the test above was originally written to catch."""
+        out = self.run_cli(
+            "list-projects",
+            env={"PYTHONWARNINGS": "error"},
+        )
+        self.assertNotIn("Traceback", out)
+
+        loaded = subprocess.run(
+            [
+                str(REPO / ".venv" / "bin" / "python"),
+                "-c",
+                "import sys; from capture import cli; "
+                "print(int('fastapi' in sys.modules), int('capture.server' in sys.modules))",
+            ],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(loaded.stdout.strip(), "0 0", loaded.stderr)
 
     def test_add_project_uses_the_configured_public_url(self):
         out = self.run_cli(
