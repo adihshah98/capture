@@ -293,16 +293,16 @@ class TestAttribution(ServerCase):
         self.assertNotIn("attribution", self.listed(sid))
 
     def test_parse_attribution_helpers(self):
-        from capture import server
+        # Lives in capture/attribution.py now: it is a pure parser both the web
+        # layer and the analysis package need, so it belongs to neither.
+        from capture.attribution import parse_attribution
 
         self.assertEqual(
-            server.parse_attribution(
-                "https://x.test/?utm_campaign=fall&fbclid=abc&utm_source=meta"
-            ),
+            parse_attribution("https://x.test/?utm_campaign=fall&fbclid=abc&utm_source=meta"),
             {"utm_campaign": "fall", "fbclid": True, "utm_source": "meta"},
         )
-        self.assertIsNone(server.parse_attribution("https://x.test/path"))
-        self.assertIsNone(server.parse_attribution(None))
+        self.assertIsNone(parse_attribution("https://x.test/path"))
+        self.assertIsNone(parse_attribution(None))
 
 
 if __name__ == "__main__":

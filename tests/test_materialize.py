@@ -28,9 +28,9 @@ class Project:
 
 class MaterializeCase(unittest.TestCase):
     def setUp(self):
-        from capture import server
+        from capture import jobs
 
-        self.server = server
+        self.jobs = jobs
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
@@ -55,7 +55,7 @@ class MaterializeCase(unittest.TestCase):
 
     def run_with_staging(self, body):
         async def main():
-            async with self.server.chunks_on_disk(self.project, [self.session]):
+            async with self.jobs.chunks_on_disk(self.project, [self.session]):
                 body()
 
         asyncio.run(main())
@@ -116,7 +116,7 @@ class TestStaging(MaterializeCase):
         present = {}
 
         async def main():
-            async with self.server.chunks_on_disk(self.project, ["s1", "s2", "s3"]):
+            async with self.jobs.chunks_on_disk(self.project, ["s1", "s2", "s3"]):
                 for sid in ("s1", "s2", "s3"):
                     present[sid] = (self.project.pool / sid / chunk_name(1000)).exists()
 
@@ -130,7 +130,7 @@ class TestStaging(MaterializeCase):
         self.put_remote(name, b"x")
 
         async def main():
-            async with self.server.chunks_on_disk(self.project, [self.session]):
+            async with self.jobs.chunks_on_disk(self.project, [self.session]):
                 raise RuntimeError("analysis blew up")
 
         with self.assertRaises(RuntimeError):
@@ -149,15 +149,15 @@ class TestStaging(MaterializeCase):
 
 class TestCohortSessionIds(unittest.TestCase):
     def test_it_reads_ids_and_skips_malformed_rows(self):
-        from capture import server
+        from capture import jobs
 
         cohort = {"sessions": [{"session_id": "a"}, {}, None, {"session_id": "b"}]}
-        self.assertEqual(server._cohort_session_ids(cohort), ["a", "b"])
+        self.assertEqual(jobs.cohort_session_ids(cohort), ["a", "b"])
 
     def test_an_empty_cohort_is_fine(self):
-        from capture import server
+        from capture import jobs
 
-        self.assertEqual(server._cohort_session_ids({}), [])
+        self.assertEqual(jobs.cohort_session_ids({}), [])
 
 
 if __name__ == "__main__":
