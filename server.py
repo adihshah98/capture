@@ -8,9 +8,7 @@ import random
 import re
 import secrets
 import shutil
-import sqlite3
 import string
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -41,6 +39,12 @@ except ImportError:
     pass
 
 import analyze
+import compat
+import db
+import projects
+import sessionstore
+from projects import ProjectsUnavailable
+from fsutil import atomic_write_json, atomic_write_text
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -62,7 +66,6 @@ async def lifespan(_app):
         )
 
     async def loop():
-        await asyncio.to_thread(reconcile_index)
         while True:
             removed = await asyncio.to_thread(sweep_expired_sessions)
             if removed:
@@ -82,6 +85,8 @@ async def lifespan(_app):
         yield
     finally:
         task.cancel()
+        await _stop_background_jobs()
+        await asyncio.to_thread(db.close_pool)
 
 app = FastAPI(title="capture", lifespan=lifespan)
 
@@ -197,41 +202,25 @@ def read_session(cookie: Optional[str]) -> Optional[dict]:
     return payload
 
 def load_projects() -> dict:
+    """Kept for the read paths that only need name/org/domains by handle. The
+    record of truth is Postgres; a database that will not answer must fail
+    closed rather than degrade to {} and route every token into one pool."""
     try:
-        projects = json.loads(PROJECTS_PATH.read_text())
-        return projects if isinstance(projects, dict) else {}
-    except FileNotFoundError:
-        return {}
+        return {
+            p.handle: {"name": p.name, "org_id": p.org_id, "domains": list(p.domains)}
+            for p in projects.all_projects()
+        }
     except Exception as exc:
-        print(f"projects: data/projects.json unusable: {exc}")
-        return {}
+        raise ProjectsUnavailable(f"cannot read projects: {exc}") from exc
 
-def project_sessions_dir(token: str) -> Path:
-    return PROJECTS_DIR / token / "sessions"
-
-def resolve_sessions_dir(token: Optional[str], projects: dict) -> Optional[Path]:
-    if not projects:
-        return DATA_DIR
-    if token and SAFE_ID.match(token) and token in projects:
-        return project_sessions_dir(token)
-    return None
-
-def require_allowed_domain(request: Request, meta: Optional[dict]) -> None:
-    domains = (meta or {}).get("domains") or []
+def require_allowed_domain(request: Request, project: Optional[projects.Project]) -> None:
+    domains = list(project.domains) if project else []
     if not domains:
         return
     source = request.headers.get("origin") or request.headers.get("referer") or ""
     host = (urllib.parse.urlparse(source).hostname or "").lower()
     if not any(host == d or host.endswith("." + d) for d in domains):
         raise ApiError(403, "domain not allowed for this project")
-
-def session_pools() -> list:
-    pools = [DATA_DIR]
-    if PROJECTS_DIR.is_dir():
-        for entry in PROJECTS_DIR.iterdir():
-            if (entry / "sessions").is_dir():
-                pools.append(entry / "sessions")
-    return pools
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -266,12 +255,14 @@ def dir_bytes(path: Path) -> int:
         if f.is_file() and SAFE_CHUNK.match(f.name)
     )
 
-_pool_bytes: dict = {}
+_bytes_used: dict = {}
 
-def pool_bytes(pool: Path) -> int:
-    if pool not in _pool_bytes:
-        _pool_bytes[pool] = dir_bytes(pool)
-    return _pool_bytes[pool]
+def project_bytes_used(project) -> int:
+    """Cached so the quota check is not a query per ingest; the running total is
+    maintained in SQL and re-read only on a cold cache."""
+    if project.id not in _bytes_used:
+        _bytes_used[project.id] = sessionstore.project_bytes(project.id)
+    return _bytes_used[project.id]
 
 CONFIG_PATH = DATA_ROOT / "config.json"
 
@@ -284,11 +275,19 @@ class ApiError(Exception):
 async def api_error_response(_request, exc: ApiError) -> JSONResponse:
     return JSONResponse({"error": exc.message}, status_code=exc.status)
 
-def resolve_pool(project: Optional[str]) -> Path:
-    pool = read_pool(project)
-    if pool is None:
+@app.exception_handler(ProjectsUnavailable)
+async def projects_unavailable_response(_request, exc: ProjectsUnavailable) -> JSONResponse:
+    print(f"projects: refusing to serve — {exc}")
+    return JSONResponse({"error": "project configuration unavailable"}, status_code=503)
+
+def resolve_project(handle: Optional[str]) -> projects.Project:
+    found = projects.by_handle(handle)
+    if found is None:
         raise ApiError(404, "unknown project")
-    return pool
+    return found
+
+def resolve_pool(project: Optional[str]) -> Path:
+    return resolve_project(project).pool
 
 def resolve_session(session_id: str, project: Optional[str]) -> Path:
     if not SAFE_ID.match(session_id):
@@ -308,20 +307,16 @@ async def ingest(
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
 
-    projects = load_projects()
-    pool = resolve_sessions_dir(token, projects)
-    if pool is None:
+    project = projects.by_token(token)
+    if project is None:
         raise ApiError(401, "unknown project token")
-    require_allowed_domain(request, projects.get(token))
+    require_allowed_domain(request, project)
+    pool = project.pool
 
     if MIN_FREE_DISK_BYTES and shutil.disk_usage(DATA_ROOT).free < MIN_FREE_DISK_BYTES:
         raise ApiError(507, "server storage full")
-    if MAX_PROJECT_BYTES:
-        used = _pool_bytes.get(pool)
-        if used is None:
-            used = await asyncio.to_thread(pool_bytes, pool)
-        if used >= MAX_PROJECT_BYTES:
-            raise ApiError(429, "project storage quota reached")
+    if MAX_PROJECT_BYTES and project_bytes_used(project) >= MAX_PROJECT_BYTES:
+        raise ApiError(429, "project storage quota reached")
 
     body = await request.body()
     if len(body) > MAX_BODY_BYTES:
@@ -351,45 +346,42 @@ async def ingest(
         meta["url"] = url[:2048]
     meta_path = session_dir / VISITOR_FILE
     if meta and not meta_path.is_file():
-        meta_path.write_text(json.dumps(meta))
+        atomic_write_json(meta_path, meta)
 
     now = int(time.time() * 1000)
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     window_prefix = re.sub(r"[^a-f0-9]", "", str(payload.get("window_id") or ""))[:8]
     parts = [str(now), window_prefix, suffix]
     chunk_path = session_dir / ("-".join(p for p in parts if p) + ".json")
-    chunk_path.write_text(
-        json.dumps(
-            {
-                "window_id": payload.get("window_id"),
-                "url": payload.get("url"),
-                "received_at": now,
-                "events": events,
-            }
-        )
+    atomic_write_json(
+        chunk_path,
+        {
+            "window_id": payload.get("window_id"),
+            "url": payload.get("url"),
+            "received_at": now,
+            "events": events,
+        },
     )
-    interactions = index_interactions(session_dir, events)
-    device = index_device(session_dir, events)
+    clicks, rage = count_clicks(events)
+    device = read_device(events)
     size = chunk_path.stat().st_size
     first_ts, last_ts = event_span(events) or (now, now)
-    state_path = session_dir / WINDOW_STATE_FILE
-    try:
-        states = json.loads(state_path.read_text())
-    except Exception:
-        states = {}
-    state = states.setdefault(str(payload.get("window_id") or "default"), {})
+
+    window_id = str(payload.get("window_id") or "default")
+    state = sessionstore.window_state(project.id, session_id, window_id)
     active_ts = last_active_scan(events, state)
     if active_ts:
         state["active"] = max(state.get("active", 0), active_ts)
     state["first"] = min(state.get("first", first_ts), first_ts)
     state["last"] = max(state.get("last", last_ts), last_ts)
-    state["bytes"] = state.get("bytes", 0) + size
-    state_path.write_text(json.dumps(states))
-    index_ingest(
-        pool, session_id, first_ts, last_ts, active_ts or 0, window_duration(states),
-        len(states), size, meta, interactions, device,
+
+    sessionstore.record_chunk(
+        project.id, session_id,
+        window_id=window_id, first_ts=first_ts, last_ts=last_ts, active_ts=active_ts,
+        size=size, meta=meta, clicks=clicks, rage=rage, device=device,
+        attribution=parse_attribution(meta.get("url")), state=state,
     )
-    _pool_bytes[pool] = pool_bytes(pool) + size
+    _bytes_used[project.id] = _bytes_used.get(project.id, 0) + size
 
     return {"status": "ok", "stored": len(events)}
 
@@ -402,10 +394,7 @@ INTERACTIONS_FILE = "interactions.json"
 
 DEVICE_FILE = "device.json"
 
-def index_device(session_dir: Path, events: list) -> Optional[dict]:
-    path = session_dir / DEVICE_FILE
-    if path.exists():
-        return None
+def read_device(events: list) -> Optional[dict]:
     for event in events:
         if not isinstance(event, dict) or event.get("type") != 4:
             continue
@@ -414,12 +403,12 @@ def index_device(session_dir: Path, events: list) -> Optional[dict]:
             continue
         width, height = data.get("width"), data.get("height")
         if isinstance(width, int) and isinstance(height, int) and width > 0:
-            device = {"width": width, "height": height}
-            path.write_text(json.dumps(device))
-            return device
+            return {"width": width, "height": height}
     return None
 
-def index_interactions(session_dir: Path, events: list) -> Optional[dict]:
+def count_clicks(events: list) -> tuple:
+    """This batch's clicks only. The running totals accumulate in SQL, where an
+    increment cannot be lost between a read and a write."""
     clicks = rage = 0
     for event in events:
         if not isinstance(event, dict) or event.get("type") != 5:
@@ -431,19 +420,7 @@ def index_interactions(session_dir: Path, events: list) -> Optional[dict]:
         payload = data.get("payload")
         if isinstance(payload, dict) and payload.get("rage"):
             rage += 1
-    if not clicks:
-        return None
-    path = session_dir / INTERACTIONS_FILE
-    try:
-        counts = json.loads(path.read_text())
-        if not isinstance(counts, dict):
-            counts = {}
-    except Exception:
-        counts = {}
-    counts["clicks"] = int(counts.get("clicks") or 0) + clicks
-    counts["rage"] = int(counts.get("rage") or 0) + rage
-    path.write_text(json.dumps(counts))
-    return counts
+    return clicks, rage
 
 @app.post("/order")
 async def order_event(
@@ -454,13 +431,10 @@ async def order_event(
 
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
-    pool = resolve_sessions_dir(token, load_projects())
-    if pool is None:
+    project = projects.by_token(token)
+    if project is None:
         raise ApiError(401, "unknown project token")
-    session_dir = pool / session_id
-
-    if not session_dir.is_dir():
-        raise ApiError(404, "unknown session")
+    session_dir = project.pool / session_id
 
     body = await request.body()
     if len(body) > ORDER_MAX_BODY_BYTES:
@@ -475,29 +449,13 @@ async def order_event(
     if event not in ("checkout_started", "checkout_completed"):
         raise ApiError(400, "unknown event")
 
-    path = session_dir / ORDER_FILE
-    try:
-        order = json.loads(path.read_text())
-        if not isinstance(order, dict):
-            order = {}
-    except Exception:
-        order = {}
-
     now = int(time.time() * 1000)
-    if event == "checkout_started":
-        order.setdefault("checkout_started_at", now)
-    else:
-        order["purchased_at"] = now
-        if isinstance(payload.get("order_id"), str):
-            order["order_id"] = payload["order_id"][:128]
-        total = payload.get("total")
-
-        if isinstance(total, (int, float)) and not isinstance(total, bool) and -1e15 < total < 1e15:
-            order["total"] = total
-        if isinstance(payload.get("currency"), str):
-            order["currency"] = payload["currency"][:8]
-    path.write_text(json.dumps(order))
-    index_order(pool, session_id, order)
+    order = sessionstore.record_order(project.id, session_id, event, payload, now)
+    if order is None:
+        raise ApiError(404, "unknown session")
+    # analyze.py reads order.json straight off disk, so it stays written until
+    # those five functions move to Postgres. Postgres is the record; this mirrors it.
+    atomic_write_json(session_dir / ORDER_FILE, order)
     return {"status": "ok"}
 
 @app.get("/healthz")
@@ -507,7 +465,7 @@ def healthz():
 
     try:
         probe = DATA_ROOT / ".healthz"
-        probe.write_text("ok")
+        atomic_write_text(probe, "ok")
         probe.unlink()
         checks["storage_writable"] = True
     except Exception:
@@ -518,6 +476,12 @@ def healthz():
         checks["disk_above_floor"] = not MIN_FREE_DISK_BYTES or free >= MIN_FREE_DISK_BYTES
     except Exception:
         checks["disk_above_floor"] = False
+
+    try:
+        load_projects()
+        checks["projects_readable"] = True
+    except ProjectsUnavailable:
+        checks["projects_readable"] = False
 
     checks["bundles_present"] = all(
         (BASE_DIR / "public" / name).is_file()
@@ -539,9 +503,14 @@ def healthz():
 @app.get("/config")
 def remote_config(token: Optional[str] = Query(None)):
 
+    project = projects.by_token(token) if token else None
+    if project is not None and project.config:
+        response = JSONResponse(project.config)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
     config_path = CONFIG_PATH
-    if token and SAFE_ID.match(token) and token in load_projects():
-        project_config = PROJECTS_DIR / token / "config.json"
+    if project is not None and project.storage_prefix:
+        project_config = PROJECTS_DIR / project.storage_prefix / "config.json"
         if project_config.is_file():
             config_path = project_config
     try:
@@ -624,15 +593,8 @@ def chunk_files(session_dir: Path) -> list:
     )
 
 def read_pool(project: Optional[str]) -> Optional[Path]:
-    if not project:
-        return DATA_DIR
-    if SAFE_ID.match(project) and project in load_projects():
-        return project_sessions_dir(project)
-    return None
-
-INDEX_PATH = DATA_ROOT / "index.db"
-_index_lock = threading.Lock()
-_index_conn: Optional[sqlite3.Connection] = None
+    found = projects.by_handle(project)
+    return found.pool if found else None
 
 ATTRIBUTION_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid")
 
@@ -663,115 +625,13 @@ def parse_attribution(url: Optional[str]) -> Optional[dict]:
             out[key] = str(params[key])[:256]
     return out or None
 
-def ensure_index_schema(conn: sqlite3.Connection) -> None:
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-    if "attribution" not in cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN attribution TEXT")
-    if "last_active" not in cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN last_active INTEGER NOT NULL DEFAULT 0")
-    if "duration" not in cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN duration INTEGER")
-    if "windows" not in cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN windows INTEGER")
-
-def index_conn() -> sqlite3.Connection:
-    global _index_conn
-    if _index_conn is None:
-        conn = sqlite3.connect(INDEX_PATH, check_same_thread=False)
-        conn.executescript(
-            """
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=NORMAL;
-            CREATE TABLE IF NOT EXISTS sessions (
-                pool TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                first_seen INTEGER NOT NULL,
-                last_seen INTEGER NOT NULL,
-                chunk_count INTEGER NOT NULL,
-                bytes INTEGER NOT NULL,
-                visitor_id TEXT,
-                url TEXT,
-                "order" TEXT,
-                interactions TEXT,
-                device TEXT,
-                attribution TEXT,
-                PRIMARY KEY (pool, session_id)
-            );
-            CREATE INDEX IF NOT EXISTS sessions_recency
-                ON sessions (pool, last_seen DESC, session_id DESC);
-            """
-        )
-        ensure_index_schema(conn)
-        conn.commit()
-        _index_conn = conn
-    return _index_conn
-
-def pool_key(pool: Path) -> str:
-    return "" if pool == DATA_DIR else pool.parent.name
-
-def index_ingest(pool, session_id, first_ts, last_ts, active_ts, duration, windows, size, meta, interactions, device) -> None:
-    attribution = parse_attribution(meta.get("url"))
-    with _index_lock:
-        conn = index_conn()
-        conn.execute(
-            """
-            INSERT INTO sessions
-                (pool, session_id, first_seen, last_seen, last_active, duration, windows, chunk_count, bytes,
-                 visitor_id, url, interactions, device, attribution)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (pool, session_id) DO UPDATE SET
-                first_seen = min(first_seen, excluded.first_seen),
-                last_seen = max(last_seen, excluded.last_seen),
-                last_active = max(coalesce(last_active, 0), excluded.last_active),
-                duration = coalesce(excluded.duration, duration),
-                windows = max(coalesce(windows, 1), excluded.windows),
-                chunk_count = chunk_count + 1,
-                bytes = bytes + excluded.bytes,
-                visitor_id = coalesce(visitor_id, excluded.visitor_id),
-                url = coalesce(url, excluded.url),
-                interactions = coalesce(excluded.interactions, interactions),
-                device = coalesce(device, excluded.device),
-                attribution = coalesce(attribution, excluded.attribution)
-            """,
-            (
-                pool_key(pool), session_id, first_ts, last_ts, active_ts, duration, windows, size,
-                meta.get("visitor_id"), meta.get("url"),
-                json.dumps(interactions) if interactions else None,
-                json.dumps(device) if device else None,
-                json.dumps(attribution) if attribution else None,
-            ),
-        )
-        conn.commit()
-
-def index_order(pool: Path, session_id: str, order: dict) -> None:
-    with _index_lock:
-        conn = index_conn()
-        conn.execute(
-            'UPDATE sessions SET "order" = ? WHERE pool = ? AND session_id = ?',
-            (json.dumps(order), pool_key(pool), session_id),
-        )
-        conn.commit()
-
-def index_forget(pool: Path, session_id: Optional[str] = None) -> None:
-    with _index_lock:
-        conn = index_conn()
-        if session_id is None:
-            conn.execute("DELETE FROM sessions WHERE pool = ?", (pool_key(pool),))
-        else:
-            conn.execute(
-                "DELETE FROM sessions WHERE pool = ? AND session_id = ?",
-                (pool_key(pool), session_id),
-            )
-        conn.commit()
-
-def session_info(entry: Path) -> Optional[dict]:
-    chunks = chunk_files(entry)
-    if not chunks:
-        return None
+def session_states(entry: Path) -> tuple:
+    """Rebuild per-window spans from the chunks themselves, so a session that
+    predates window-state.json still resolves. Returns (states, first, last, active)."""
     first = last = None
     active = 0
-    states = {}
-    for chunk in chunks:
+    states: dict = {}
+    for chunk in chunk_files(entry):
         try:
             data = json.loads(chunk.read_text())
         except Exception:
@@ -790,6 +650,13 @@ def session_info(entry: Path) -> Optional[dict]:
         state["first"] = min(state.get("first", span[0]), span[0])
         state["last"] = max(state.get("last", span[1]), span[1])
         state["bytes"] = state.get("bytes", 0) + chunk.stat().st_size
+    return states, first, last, active
+
+def session_info(entry: Path) -> Optional[dict]:
+    chunks = chunk_files(entry)
+    if not chunks:
+        return None
+    states, first, last, active = session_states(entry)
     info = {
         "session_id": entry.name,
         "first_seen": first if first is not None else chunk_timestamp(chunks[0]),
@@ -824,94 +691,6 @@ def session_info(entry: Path) -> Optional[dict]:
     if attribution:
         info["attribution"] = attribution
     return info
-
-def rebuild_index(pool: Path) -> int:
-    infos = []
-    for entry in pool.iterdir() if pool.is_dir() else []:
-        if not entry.is_dir():
-            continue
-        info = session_info(entry)
-        if info:
-            infos.append(info)
-    key = pool_key(pool)
-    with _index_lock:
-        conn = index_conn()
-        keep = {i["session_id"] for i in infos}
-        stale = [
-            (key, sid)
-            for (sid,) in conn.execute("SELECT session_id FROM sessions WHERE pool = ?", (key,))
-            if sid not in keep
-        ]
-        conn.executemany("DELETE FROM sessions WHERE pool = ? AND session_id = ?", stale)
-        conn.executemany(
-            """
-            INSERT INTO sessions
-                (pool, session_id, first_seen, last_seen, last_active, duration, windows, chunk_count, bytes,
-                 visitor_id, url, "order", interactions, device, attribution)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (pool, session_id) DO UPDATE SET
-                first_seen = min(first_seen, excluded.first_seen),
-                last_seen = max(last_seen, excluded.last_seen),
-                last_active = max(coalesce(last_active, 0), excluded.last_active),
-                duration = coalesce(excluded.duration, duration),
-                windows = max(coalesce(windows, 1), excluded.windows),
-                chunk_count = max(chunk_count, excluded.chunk_count),
-                bytes = max(bytes, excluded.bytes),
-                visitor_id = coalesce(excluded.visitor_id, visitor_id),
-                url = coalesce(excluded.url, url),
-                "order" = coalesce(excluded."order", "order"),
-                interactions = coalesce(excluded.interactions, interactions),
-                device = coalesce(excluded.device, device),
-                attribution = coalesce(excluded.attribution, attribution)
-            """,
-            [
-                (
-                    key, i["session_id"], i["first_seen"], i["last_seen"], i.get("last_active", 0),
-                    i.get("duration"), i.get("windows", 1), i["chunk_count"], i["bytes"],
-                    i.get("visitor_id"), i.get("url"),
-                    json.dumps(i["order"]) if "order" in i else None,
-                    json.dumps(i["interactions"]) if "interactions" in i else None,
-                    json.dumps(i["device"]) if "device" in i else None,
-                    json.dumps(i["attribution"]) if "attribution" in i else None,
-                )
-                for i in infos
-            ],
-        )
-        conn.commit()
-    return len(infos)
-
-def reconcile_index() -> None:
-    for pool in session_pools():
-        key = pool_key(pool)
-        with _index_lock:
-            (count,) = index_conn().execute(
-                "SELECT count(*) FROM sessions WHERE pool = ?", (key,)
-            ).fetchone()
-        if count == 0 and any(entry.is_dir() for entry in pool.iterdir()):
-            print(f"index: rebuilt '{key or '(no project)'}' — {rebuild_index(pool)} session(s)")
-    backfill_attribution()
-
-def backfill_attribution() -> int:
-    """Fill attribution from stored entry URLs for rows indexed before this column existed."""
-    updated = 0
-    with _index_lock:
-        conn = index_conn()
-        rows = conn.execute(
-            "SELECT pool, session_id, url FROM sessions "
-            "WHERE attribution IS NULL AND url IS NOT NULL AND url != ''"
-        ).fetchall()
-        for key, sid, url in rows:
-            attr = parse_attribution(url)
-            if not attr:
-                continue
-            conn.execute(
-                "UPDATE sessions SET attribution = ? WHERE pool = ? AND session_id = ?",
-                (json.dumps(attr), key, sid),
-            )
-            updated += 1
-        if updated:
-            conn.commit()
-    return updated
 
 def workos_call(path: str, payload: Optional[dict] = None, bearer: bool = False) -> dict:
     req = urllib.request.Request(
@@ -1015,7 +794,7 @@ def allowed_projects(request: Request) -> Optional[set]:
     if auth is None or (auth.get("email") or "").lower() in OPERATORS:
         return None
     orgs = user_orgs(auth.get("user_id") or "")
-    return {t for t, meta in load_projects().items() if (meta or {}).get("org_id") in orgs}
+    return {p.handle for p in projects.for_orgs(orgs)}
 
 def require_read_access(request: Request, project: Optional[str]) -> None:
     allowed = allowed_projects(request)
@@ -1025,26 +804,19 @@ def require_read_access(request: Request, project: Optional[str]) -> None:
 @app.get("/api/projects")
 def list_projects(request: Request):
     allowed = allowed_projects(request)
-    projects = [
-        {"token": token, "name": (meta or {}).get("name") or token}
-        for token, meta in load_projects().items()
-        if allowed is None or token in allowed
+    visible = [
+        {"token": p.handle, "name": p.name}
+        for p in projects.all_projects()
+        if allowed is None or p.handle in allowed
     ]
-
-    if allowed is None and projects and any(entry.is_dir() for entry in DATA_DIR.iterdir()):
-        projects.append({"token": "", "name": "(no project)"})
     email = (getattr(request.state, "auth", None) or {}).get("email")
     return {
-        "projects": projects,
+        "projects": visible,
         "analysis_enabled": analyze.ANALYSIS_ENABLED and analyze.runtime_present(),
         **({"email": email} if email else {}),
     }
 
-SESSION_FILTERS = {
-    "checkout": '"order" IS NOT NULL',
-    "purchased": "json_extract(\"order\", '$.purchased_at') IS NOT NULL",
-    "rage": "json_extract(interactions, '$.rage') > 0",
-}
+SESSION_FILTERS = sessionstore.FILTERS
 
 @app.get("/api/sessions")
 def list_sessions(
@@ -1056,68 +828,20 @@ def list_sessions(
     q: Optional[str] = Query(None),
 ):
     require_read_access(request, project)
-    pool = resolve_pool(project)
-    where, params = ["pool = ?"], [pool_key(pool)]
-    if filter in SESSION_FILTERS:
-        where.append(SESSION_FILTERS[filter])
-    if q:
-        like = f"%{q}%"
-        where.append("(session_id LIKE ? OR visitor_id LIKE ? OR url LIKE ?)")
-        params += [like, like, like]
-    with _index_lock:
-        conn = index_conn()
-        (total,) = conn.execute(
-            f"SELECT count(*) FROM sessions WHERE {' AND '.join(where)}", params
-        ).fetchone()
-        if cursor:
-            try:
-                seen, _, sid = cursor.partition(":")
-                where.append("(last_seen < ? OR (last_seen = ? AND session_id < ?))")
-                params += [int(seen), int(seen), sid]
-            except ValueError:
-                raise ApiError(400, "bad cursor")
-        rows = conn.execute(
-            f"""
-            SELECT session_id, first_seen, last_seen, last_active, duration, windows, chunk_count, bytes,
-                   visitor_id, url, "order", interactions, device, attribution
-            FROM sessions WHERE {' AND '.join(where)}
-            ORDER BY last_seen DESC, session_id DESC LIMIT ?
-            """,
-            params + [limit + 1],
-        ).fetchall()
-    more = len(rows) > limit
-    sessions = []
-    for sid, first, last, active, duration, windows, count, size, visitor, url, order, interactions, device, attribution in rows[:limit]:
-        info = {
-            "session_id": sid,
-            "first_seen": first,
-            "last_seen": last,
-            "last_active": active or 0,
-            "duration": duration,
-            "windows": windows or 1,
-            "chunk_count": count,
-            "bytes": size,
-        }
-        if visitor:
-            info["visitor_id"] = visitor
-        if url:
-            info["url"] = url
-        for key, value in (
-            ("order", order),
-            ("interactions", interactions),
-            ("device", device),
-            ("attribution", attribution),
-        ):
-            if value:
-                info[key] = json.loads(value)
-        sessions.append(info)
-    next_cursor = f"{sessions[-1]['last_seen']}:{sessions[-1]['session_id']}" if more else None
-    return {"sessions": sessions, "total": total, "cursor": next_cursor}
+    try:
+        return sessionstore.listing(
+            resolve_project(project).id, limit=limit, cursor=cursor, filter=filter, q=q
+        )
+    except ValueError:
+        raise ApiError(400, "bad cursor")
 
 @app.get("/api/sessions/{session_id}")
 def get_session(request: Request, session_id: str, project: Optional[str] = Query(None)):
     require_read_access(request, project)
-    info = session_info(resolve_session(session_id, project))
+    found = resolve_project(project)
+    info = sessionstore.get(found.id, session_id) or session_info(
+        resolve_session(session_id, project)
+    )
     if info is None:
         raise ApiError(404, "not found")
     return info
@@ -1126,11 +850,12 @@ def get_session(request: Request, session_id: str, project: Optional[str] = Quer
 def delete_session(request: Request, session_id: str, project: Optional[str] = Query(None)):
 
     require_read_access(request, project)
+    found = resolve_project(project)
     session_dir = resolve_session(session_id, project)
     freed = dir_bytes(session_dir)
     shutil.rmtree(session_dir, ignore_errors=True)
-    index_forget(session_dir.parent, session_id)
-    _pool_bytes.pop(session_dir.parent, None)
+    sessionstore.forget(found.id, session_id)
+    _bytes_used.pop(found.id, None)
     print(f"deleted session {session_id} ({freed} bytes)")
     return {"status": "deleted", "session_id": session_id, "bytes_freed": freed}
 
@@ -1173,6 +898,18 @@ _analysis_tasks: dict = {}
 # Concurrency lives in analyze.py: one Chromium at a time for reconstruction,
 # a few overlapping Gemini calls. Both gates are shared by every caller here.
 _cohort_tasks: dict = {}
+
+async def _stop_background_jobs() -> None:
+    """On a clean stop, leave no job claiming to be running with no task behind it."""
+    pending = [t for t in (*_analysis_tasks.values(), *_cohort_tasks.values()) if not t.done()]
+    for key, task in _analysis_tasks.items():
+        if not task.done():
+            analyze.write_job(Path(key), "error", error="server restarted mid-analysis")
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        print(f"shutdown: cancelled {len(pending)} background job(s)")
 
 def _analysis_key(session_dir: Path) -> str:
     return str(session_dir.resolve())
@@ -1422,14 +1159,9 @@ def get_pool_facets(
 ):
     """Facet values available in the pool — same fields as the Insights cut picker."""
     require_read_access(request, project)
-    pool = resolve_pool(project)
-    with _index_lock:
-        facets = analyze.pool_facets(
-            index_conn(),
-            pool_key(pool),
-            min_duration_ms=min_duration_ms,
-        )
-    return facets
+    found = resolve_project(project)
+    with compat.cohort_connection(found.id) as conn:
+        return analyze.pool_facets(conn, found.id, min_duration_ms=min_duration_ms)
 
 
 @app.post("/api/cohorts")
@@ -1543,11 +1275,10 @@ async def create_cohort(
     if total > analyze.COHORT_MAX_SESSIONS:
         raise ApiError(400, f"cohort size capped at {analyze.COHORT_MAX_SESSIONS} sessions")
 
-    with _index_lock:
-        conn = index_conn()
+    with compat.cohort_connection(resolve_project(project).id) as conn:
         cohort = analyze.build_cohort(
             conn,
-            pool_key(pool),
+            resolve_project(project).id,
             purchased_n,
             all_count,
             any_n=any_count,
@@ -1951,26 +1682,6 @@ async def post_cohort_chat(
     )
 
 
-def _attribution_map(pool: Path) -> dict:
-    """session_id → attribution dict from the index."""
-    with _index_lock:
-        rows = index_conn().execute(
-            "SELECT session_id, attribution FROM sessions WHERE pool = ?",
-            (pool_key(pool),),
-        ).fetchall()
-    out = {}
-    for sid, raw in rows:
-        if not raw:
-            continue
-        try:
-            value = json.loads(raw)
-        except Exception:
-            continue
-        if isinstance(value, dict) and value:
-            out[sid] = value
-    return out
-
-
 def stamp_cohort_attribution(pool: Path, cohort: dict) -> dict:
     """Attach attribution, device, outcome and page so the UI can slice client-side."""
     facts = _session_facts(pool)
@@ -2001,30 +1712,30 @@ def cohort_response(pool: Path, cohort: dict) -> dict:
     )
 
 
+def project_for_pool(pool: Path) -> projects.Project:
+    """Reverse of Project.pool, so the cohort helpers can keep passing a path."""
+    for candidate in projects.all_projects():
+        if candidate.pool == pool:
+            return candidate
+    raise ApiError(404, "unknown project")
+
 def _session_facts(pool: Path) -> dict:
     """session_id → {attribution, device, outcome, page} straight from the index."""
-    with _index_lock:
-        rows = index_conn().execute(
-            'SELECT session_id, attribution, device, "order", url '
-            "FROM sessions WHERE pool = ?",
-            (pool_key(pool),),
+    with db.connection(project_for_pool(pool).id) as conn:
+        rows = conn.execute(
+            "SELECT s.session_id, s.attribution, s.device, s.url,"
+            " o.checkout_started_at, o.purchased_at, o.total, o.currency"
+            " FROM sessions s LEFT JOIN orders o"
+            "   ON o.project_id = s.project_id AND o.session_id = s.session_id"
         ).fetchall()
 
-    def _json(raw):
-        if not raw:
-            return None
-        try:
-            value = json.loads(raw)
-        except Exception:
-            return None
-        return value if isinstance(value, dict) else None
-
     out = {}
-    for sid, attribution, device, order, url in rows:
+    for sid, attribution, device, url, started, purchased, total, currency in rows:
+        order = sessionstore._order((started, purchased, None, total, currency))
         out[sid] = {
-            "attribution": _json(attribution),
-            "device": analyze.device_class(_json(device)),
-            "outcome": analyze.outcome_class(_json(order)),
+            "attribution": attribution,
+            "device": analyze.device_class(device),
+            "outcome": analyze.outcome_class(order),
             "page": analyze.page_path(url),
         }
     return out
@@ -2139,35 +1850,19 @@ def _slice_from_params(
 
 def sweep_expired_sessions() -> int:
 
+    # Expiry is decided in SQL rather than by walking every session directory,
+    # which is what made startup take ~23s at 9k sessions.
     if RETENTION_DAYS <= 0:
         return 0
-    cutoff_ms = (time.time() - RETENTION_DAYS * 86400) * 1000
+    cutoff_ms = int((time.time() - RETENTION_DAYS * 86400) * 1000)
     removed = 0
-    for pool in session_pools():
-        alive = 0
-        for entry in pool.iterdir():
-            if not entry.is_dir():
-                continue
-            chunks = chunk_files(entry)
-            newest = chunk_timestamp(chunks[-1]) if chunks else 0
-            if newest < cutoff_ms:
-                shutil.rmtree(entry, ignore_errors=True)
-                index_forget(pool, entry.name)
-                removed += 1
-            elif chunks:
-                alive += 1
-        key = pool_key(pool)
-        with _index_lock:
-            (indexed,) = index_conn().execute(
-                "SELECT count(*) FROM sessions WHERE pool = ?", (key,)
-            ).fetchone()
-        if indexed != alive:
-            print(
-                f"index: drift in '{key or '(no project)'}' "
-                f"({indexed} indexed, {alive} on disk) — rebuilt {rebuild_index(pool)}"
-            )
+    for project in projects.all_projects(fresh=True):
+        for session_id in sessionstore.expired(project.id, cutoff_ms):
+            shutil.rmtree(project.pool / session_id, ignore_errors=True)
+            sessionstore.forget(project.id, session_id)
+            removed += 1
     if removed:
-        _pool_bytes.clear()
+        _bytes_used.clear()
     return removed
 
 app.mount("/", StaticFiles(directory=BASE_DIR / "public", html=True), name="static")
@@ -2217,11 +1912,8 @@ def integration_snippet(base: str, token: str, indent: str = "  ") -> str:
 
 def add_project(name: str) -> None:
     token = "cap_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=24))
-    projects = load_projects()
-    projects[token] = {"name": name, "created_at": int(time.time() * 1000)}
-    PROJECTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PROJECTS_PATH.write_text(json.dumps(projects, indent=2))
-    project_sessions_dir(token).mkdir(parents=True, exist_ok=True)
+    project = projects.create(name, token)
+    project.pool.mkdir(parents=True, exist_ok=True)
     base = public_base_url()
     print(f"project '{name}' created — token: {token}")
     print("\nAdd this snippet to the brand's site, on every page:\n")
@@ -2236,56 +1928,55 @@ def add_project(name: str) -> None:
         f"data/projects/{token}/config.json (falls back to data/config.json)"
     )
 
-def pool_usage(pool: Path) -> tuple:
-    if not pool.is_dir():
-        return 0, 0
-    return sum(1 for d in pool.iterdir() if d.is_dir()), dir_bytes(pool)
+def find_project(handle: str):
+    """CLI lookup: accepts the project handle or any of its ingest tokens."""
+    return projects.by_handle(handle) or projects.by_token(handle)
 
 def list_projects_cli() -> None:
-    projects = load_projects()
-    if not projects:
-        print("no projects configured — single-tenant mode, tokens are ignored")
+    known = projects.all_projects(fresh=True)
+    if not known:
+        print("no projects configured — run add-project, or backfill.py to import existing data")
         return
-    for token, meta in projects.items():
-        count, used = pool_usage(project_sessions_dir(token))
-        name = (meta or {}).get("name") or "?"
-        org = (meta or {}).get("org_id") or "no org — operators only"
-        print(f"{token}  {name}  —  {count} session(s), {used / 1024**2:.1f} MB  —  {org}")
+    for project in known:
+        count, used = projects.usage(project)
+        org = project.org_id or "no org — operators only"
+        tokens = ", ".join(project.tokens) or "no live token"
+        label = project.handle or "(default)"
+        print(
+            f"{label}  {project.name}  —  {count} session(s), {used / 1024**2:.1f} MB"
+            f"  —  {org}  —  {tokens}"
+        )
 
-def set_project_org(token: str, org_id: str) -> None:
-    projects = load_projects()
-    if token not in projects:
-        print(f"no such project: {token}")
+def set_project_org(handle: str, org_id: str) -> None:
+    project = find_project(handle)
+    if project is None:
+        print(f"no such project: {handle}")
         return
-    projects[token] = {**(projects[token] or {}), "org_id": org_id}
-    PROJECTS_PATH.write_text(json.dumps(projects, indent=2))
-    name = (projects[token] or {}).get("name") or token
-    print(f"'{name}' is now readable by members of WorkOS organization {org_id}")
+    projects.set_org(project, org_id)
+    print(f"'{project.name}' is now readable by members of WorkOS organization {org_id}")
 
-def set_project_domains(token: str, domains: list) -> None:
-    projects = load_projects()
-    if token not in projects:
-        print(f"no such project: {token}")
+def set_project_domains(handle: str, domains: list) -> None:
+    project = find_project(handle)
+    if project is None:
+        print(f"no such project: {handle}")
         return
     cleaned = [
         host.lower()
         for d in domains
         if (host := urllib.parse.urlparse(d if "://" in d else f"//{d}").hostname)
     ]
-    projects[token] = {**(projects[token] or {}), "domains": cleaned}
-    PROJECTS_PATH.write_text(json.dumps(projects, indent=2))
-    name = (projects[token] or {}).get("name") or token
+    projects.set_domains(project, cleaned)
     if cleaned:
-        print(f"'{name}' now accepts recordings only from {', '.join(cleaned)} (and subdomains)")
+        print(f"'{project.name}' now accepts recordings only from {', '.join(cleaned)} (and subdomains)")
     else:
-        print(f"'{name}' now accepts recordings from any domain")
+        print(f"'{project.name}' now accepts recordings from any domain")
 
 def invite_user(email: str, target: str) -> None:
     if not WORKOS_ENABLED:
         print("invites need WORKOS_API_KEY and WORKOS_CLIENT_ID in the environment")
         return
-    meta = load_projects().get(target)
-    org_id = (meta or {}).get("org_id") if meta is not None else target
+    project = find_project(target)
+    org_id = project.org_id if project else target
     if not (org_id or "").startswith("org_"):
         print(f"'{target}' has no WorkOS org — pass an org_… id or run set-org first")
         return
@@ -2301,28 +1992,24 @@ def invite_user(email: str, target: str) -> None:
     expires = invitation.get("expires_at") or "?"
     print(f"invited {email} to {org_id} — they'll get an email link, valid until {expires}")
 
-def remove_project(token: str, purge: bool) -> None:
-    projects = load_projects()
-    if token not in projects:
-        print(f"no such project: {token}")
+def remove_project(handle: str, purge: bool) -> None:
+    project = find_project(handle)
+    if project is None:
+        print(f"no such project: {handle}")
         return
-    name = (projects.pop(token) or {}).get("name") or token
-    PROJECTS_PATH.write_text(json.dumps(projects, indent=2))
-    print(f"revoked '{name}' — batches sent with that token are now rejected")
+    count, used = projects.usage(project)
+    for token in project.tokens:
+        projects.revoke_token(token)
+    print(f"revoked '{project.name}' — batches sent with its tokens are now rejected")
 
-    pool = project_sessions_dir(token)
-    count, used = pool_usage(pool)
     if purge:
-        shutil.rmtree(pool.parent, ignore_errors=True)
-        index_forget(pool)
+        shutil.rmtree(project.pool.parent, ignore_errors=True)
+        projects.delete(project)
         print(f"deleted {count} stored session(s), {used / 1024**2:.1f} MB")
     elif count:
         print(f"kept {count} session(s), {used / 1024**2:.1f} MB — re-run with --purge to erase")
 
-if __name__ == "__main__":
-    import sys
-
-    argv = sys.argv[1:]
+def _cli(argv: list) -> None:
     if len(argv) >= 2 and argv[0] == "add-project":
         add_project(argv[1])
     elif argv[:1] == ["list-projects"]:
@@ -2336,8 +2023,14 @@ if __name__ == "__main__":
     elif len(argv) >= 3 and argv[0] == "invite":
         invite_user(argv[1], argv[2])
     elif argv[:1] == ["reindex"]:
-        for pool in session_pools():
-            print(f"{pool_key(pool) or '(no project)'}: {rebuild_index(pool)} session(s)")
+        import backfill
+
+        db.migrate()
+        result = backfill.backfill()
+        print(
+            f"{result['sessions']} session(s) across {result['projects']} project(s);"
+            f" {result['skipped']} empty dir(s) skipped"
+        )
     else:
         print("usage: python server.py add-project <name>")
         print("       python server.py list-projects")
@@ -2347,3 +2040,18 @@ if __name__ == "__main__":
         print("       python server.py invite <email> <project_token_or_org_id>")
         print("       python server.py reindex")
         print("run the server with: .venv/bin/uvicorn server:app --port 3000")
+
+
+if __name__ == "__main__":
+    import sys
+
+    try:
+        _cli(sys.argv[1:])
+    except ProjectsUnavailable as exc:
+        print(f"error: {exc}")
+        print("the projects table is unreadable — refusing to guess at tenant routing")
+        sys.exit(1)
+    finally:
+        # Without this the pool's worker threads outlive the command and print
+        # shutdown warnings over its output.
+        db.close_pool()

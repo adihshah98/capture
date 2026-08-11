@@ -14,6 +14,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import pgfixture
+
 REPO = Path(__file__).resolve().parent.parent
 UVICORN = REPO / ".venv" / "bin" / "uvicorn"
 
@@ -34,14 +38,27 @@ def request(url, method="GET", data=None, headers=None):
 class ServerCase(unittest.TestCase):
     env: dict = {}
 
+    default_project: bool = True
+
+    @classmethod
+    def prepare_data_dir(cls):
+        """Seed the data dir before the server boots. Override to test bad state."""
+
     @classmethod
     def setUpClass(cls):
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-test-"))
+        cls.prepare_data_dir()
+        cls.admin_url, cls.app_url = pgfixture.fresh_database()
+        if cls.default_project:
+            cls.project_id = pgfixture.seed_default_project(cls.admin_url)
         cls.port = free_port()
         cls.base = f"http://127.0.0.1:{cls.port}"
         cls.run_env = {
             **os.environ,
             "CAPTURE_DATA_DIR": str(cls.data_dir),
+            "CAPTURE_DATABASE_URL": cls.app_url,
+            "CAPTURE_DATABASE_ADMIN_URL": cls.admin_url,
+            "CAPTURE_PROJECT_CACHE_TTL_S": "0",
             "REPLAY_AUTH_DISABLED": "1",
             **cls.env,
         }
@@ -56,7 +73,11 @@ class ServerCase(unittest.TestCase):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        for _ in range(100):
+        # Generous: each class now also provisions a database, and this can run
+        # straight after a test that saturates the box.
+        for _ in range(300):
+            if cls.proc.poll() is not None:
+                raise RuntimeError(f"server exited during startup ({cls.proc.returncode})")
             try:
                 if request(f"{cls.base}/config")[0] == 200:
                     return
@@ -69,7 +90,12 @@ class ServerCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.proc.terminate()
-        cls.proc.wait(timeout=10)
+        try:
+            cls.proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            cls.proc.kill()
+            cls.proc.wait(timeout=10)
+            raise
         shutil.rmtree(cls.data_dir, ignore_errors=True)
 
     def ingest(self, session_id, payload=None, gzipped=True, token=None, raw=None, headers=None):
@@ -450,14 +476,14 @@ class TestVisitorAssetCaching(ServerCase):
                 self.assertEqual(request_headers(self.base + path)[1].get("Cache-Control"), "no-cache")
 
 class TestProjectTokens(ServerCase):
+    # No default project, so a tokenless batch has nowhere to land.
+    default_project = False
+    token = "cap_testtokentesttokentest"
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-
-        cls.token = "cap_testtokentesttokentest"
-        (cls.data_dir / "projects.json").write_text(
-            json.dumps({cls.token: {"name": "Test", "created_at": 0}})
-        )
+        pgfixture.seed_project(cls.admin_url, "Test", cls.token)
 
     def test_known_token_is_accepted(self):
         self.assertEqual(self.ingest("g" * 32, token=self.token), 200)
@@ -479,21 +505,38 @@ class TestProjectTokens(ServerCase):
             request(f"{self.base}/order?session_id={session}&token={self.token}", "POST", body)[0], 200
         )
 
-    def test_project_sessions_are_isolated_from_the_default_pool(self):
-        self.assertEqual(self.ingest("j" * 32, token=self.token), 200)
-        scoped = json.loads(request(f"{self.base}/api/sessions?project={self.token}")[1])
-        default = json.loads(request(f"{self.base}/api/sessions")[1])
-        self.assertIn("j" * 32, [s["session_id"] for s in scoped["sessions"]])
-        self.assertNotIn("j" * 32, [s["session_id"] for s in default["sessions"]])
+    def test_listing_an_unconfigured_default_pool_is_a_404(self):
+        """With no default project there is no pool to fall back to, which is
+        what used to make a corrupt config leak every tenant into one bucket."""
+        self.assertEqual(request(f"{self.base}/api/sessions")[0], 404)
 
-class TestDomainAllowlist(ServerCase):
+
+class TestProjectIsolation(ServerCase):
+    """A default project and a tenant project side by side."""
+
+    token = "cap_isolationtokentesttoken"
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.token = "cap_domainstesttokentest"
-        (cls.data_dir / "projects.json").write_text(
-            json.dumps({cls.token: {"name": "Test", "domains": ["brand.com"]}})
-        )
+        pgfixture.seed_project(cls.admin_url, "Tenant", cls.token)
+
+    def test_a_tenant_session_never_appears_in_the_default_pool(self):
+        self.assertEqual(self.ingest("j" * 32, token=self.token), 200)
+        self.assertEqual(self.ingest("k" * 32), 200)
+        scoped = json.loads(request(f"{self.base}/api/sessions?project={self.token}")[1])
+        default = json.loads(request(f"{self.base}/api/sessions")[1])
+        self.assertEqual([s["session_id"] for s in scoped["sessions"]], ["j" * 32])
+        self.assertEqual([s["session_id"] for s in default["sessions"]], ["k" * 32])
+
+class TestDomainAllowlist(ServerCase):
+    default_project = False
+    token = "cap_domainstesttokentest"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        pgfixture.seed_project(cls.admin_url, "Test", cls.token, domains=["brand.com"])
 
     def send(self, session_id, **headers):
         return self.ingest(session_id, token=self.token, headers=headers)
@@ -521,12 +564,38 @@ class TestProjectCli(unittest.TestCase):
     def setUp(self):
         self.data_dir = Path(tempfile.mkdtemp(prefix="capture-cli-"))
         self.addCleanup(shutil.rmtree, self.data_dir, ignore_errors=True)
+        self.admin_url, self.app_url = pgfixture.fresh_database()
+
+    def projects_in_db(self) -> dict:
+        import psycopg
+
+        with psycopg.connect(self.admin_url) as conn:
+            rows = conn.execute(
+                "SELECT p.storage_prefix, p.domains FROM projects p"
+            ).fetchall()
+        return {prefix: domains for prefix, domains in rows}
+
+    def live_tokens(self) -> list:
+        import psycopg
+
+        with psycopg.connect(self.admin_url) as conn:
+            rows = conn.execute(
+                "SELECT token FROM project_tokens WHERE revoked_at IS NULL"
+            ).fetchall()
+        return [r[0] for r in rows]
 
     def run_cli(self, *args, env=None):
         result = subprocess.run(
             [str(REPO / ".venv" / "bin" / "python"), "server.py", *args],
             cwd=REPO,
-            env={**os.environ, "CAPTURE_DATA_DIR": str(self.data_dir), **(env or {})},
+            env={
+                **os.environ,
+                "CAPTURE_DATA_DIR": str(self.data_dir),
+                "CAPTURE_DATABASE_URL": self.app_url,
+                "CAPTURE_DATABASE_ADMIN_URL": self.admin_url,
+                "CAPTURE_PROJECT_CACHE_TTL_S": "0",
+                **(env or {}),
+            },
             capture_output=True,
             text=True,
             timeout=60,
@@ -559,13 +628,11 @@ class TestProjectCli(unittest.TestCase):
         token = created.split("token: ")[1].split()[0]
         out = self.run_cli("set-domains", token, "https://Brand.com/path", "shop.example")
         self.assertIn("brand.com, shop.example", out)
-        stored = json.loads((self.data_dir / "projects.json").read_text())
-        self.assertEqual(stored[token]["domains"], ["brand.com", "shop.example"])
+        self.assertEqual(self.projects_in_db()[token], ["brand.com", "shop.example"])
 
         out = self.run_cli("set-domains", token)
         self.assertIn("any domain", out)
-        stored = json.loads((self.data_dir / "projects.json").read_text())
-        self.assertEqual(stored[token]["domains"], [])
+        self.assertEqual(self.projects_in_db()[token], [])
 
     def test_list_and_remove_round_trip(self):
         created = self.run_cli("add-project", "Acme")
@@ -579,7 +646,10 @@ class TestProjectCli(unittest.TestCase):
         out = self.run_cli("remove-project", token)
         self.assertIn("revoked", out)
         self.assertTrue(sessions.exists(), "recordings must survive a plain revoke")
-        self.assertNotIn(token, self.run_cli("list-projects"))
+        # The project stays listed with its token revoked. Dropping the row
+        # outright would orphan recordings that are still on disk.
+        self.assertIn("no live token", self.run_cli("list-projects"))
+        self.assertEqual(self.live_tokens(), [])
 
     def test_purge_deletes_the_recordings(self):
         created = self.run_cli("add-project", "Acme")

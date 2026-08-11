@@ -13,14 +13,27 @@ sudo dnf install -y -q python3.11 >/dev/null
 
 sudo mkdir -p /opt/capture && sudo chown ec2-user /opt/capture
 
-mkdir -p /opt/capture/data
-printf '%s\n' "$PUBLIC_URL" > /opt/capture/data/public_url
+# State lives outside the deploy directory so releases can be replaced wholesale.
+sudo mkdir -p /var/lib/capture && sudo chown ec2-user /var/lib/capture
+if [ -d /opt/capture/data ] && [ ! -e /var/lib/capture/.migrated ]; then
+  cp -a /opt/capture/data/. /var/lib/capture/
+  touch /var/lib/capture/.migrated
+  echo "moved existing data to /var/lib/capture (original left at /opt/capture/data)"
+fi
+
+printf '%s\n' "$PUBLIC_URL" > /var/lib/capture/public_url
 echo "public URL recorded: $PUBLIC_URL"
 
 if ! sudo test -f /etc/capture.env; then
   {
     echo "REPLAY_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=')"
     echo "RETENTION_DAYS=30"
+    echo "# Required. The app role must be NOSUPERUSER so row level security binds it."
+    echo "CAPTURE_DATABASE_URL="
+    echo "# Runs migrations; needs CREATE on the database."
+    echo "CAPTURE_DATABASE_ADMIN_URL="
+    echo "# Only needed on PostgreSQL 14, which has no security_invoker views."
+    echo "CAPTURE_DB_APP_ROLE="
   } | sudo tee /etc/capture.env >/dev/null
   sudo chmod 600 /etc/capture.env
   echo "generated new replay password (save it now):"
@@ -55,10 +68,13 @@ After=network.target
 User=ec2-user
 WorkingDirectory=/opt/capture
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/capture/.playwright
+Environment=CAPTURE_DATA_DIR=/var/lib/capture
 EnvironmentFile=/etc/capture.env
 EnvironmentFile=/etc/capture-cloudfront.env
-ExecStart=/opt/capture/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 80 --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS}
+ExecStart=/opt/capture/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 80 --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS} --timeout-graceful-shutdown 25
 AmbientCapabilities=CAP_NET_BIND_SERVICE
+# Above uvicorn's own 25s drain, so systemd never has to SIGKILL mid-write.
+TimeoutStopSec=40
 Restart=always
 
 [Install]

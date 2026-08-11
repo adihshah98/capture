@@ -11,6 +11,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import pgfixture
 from test_server import ServerCase, request
 
 SECRET = "test-session-secret"
@@ -73,39 +79,26 @@ def session_cookie(email, user_id, secret=SECRET, exp_in=3600):
 
 class TestWorkOSScoping(ServerCase):
 
+    # Only the two org-scoped projects exist here, as before.
+    default_project = False
     env = {**WORKOS_ENV, "ORG_CACHE_TTL_S": "0"}
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        (cls.data_dir / "projects.json").write_text(
-            json.dumps(
-                {
-                    "cap_alpha": {"name": "Alpha", "org_id": "org_alpha"},
-                    "cap_beta": {"name": "Beta", "org_id": "org_beta"},
-                }
-            )
-        )
-        for token in ("cap_alpha", "cap_beta"):
+        for token, name, org in (
+            ("cap_alpha", "Alpha", "org_alpha"),
+            ("cap_beta", "Beta", "org_beta"),
+        ):
+            pgfixture.seed_project(cls.admin_url, name, token)
+            pgfixture.set_project_org(cls.admin_url, token, org)
+            pgfixture.seed_session(cls.admin_url, token, "s" * 32)
+            # The read and delete paths still resolve the chunk directory.
             session = cls.data_dir / "projects" / token / "sessions" / ("s" * 32)
-            session.mkdir(parents=True)
+            session.mkdir(parents=True, exist_ok=True)
             (session / f"{int(time.time() * 1000)}-abc123.json").write_text(
                 json.dumps({"events": [{"type": 4, "data": {}}]})
             )
-        cls.proc.terminate()
-        cls.proc.wait(timeout=10)
-        cls.start_server()
-        cookie = session_cookie("op@example.com", "user_op")
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            body = request(f"{cls.base}/api/sessions?project=cap_alpha", headers={"Cookie": cookie})[1]
-            try:
-                if json.loads(body)["sessions"]:
-                    return
-            except Exception:
-                pass
-            time.sleep(0.1)
-        raise RuntimeError("seeded sessions never appeared in the index")
 
     def api(self, path, cookie):
         return request(f"{self.base}{path}", headers={"Cookie": cookie})
@@ -235,9 +228,8 @@ class TestMembershipCache(ServerCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        (cls.data_dir / "projects.json").write_text(
-            json.dumps({"cap_alpha": {"name": "Alpha", "org_id": "org_alpha"}})
-        )
+        pgfixture.seed_project(cls.admin_url, "Alpha", "cap_alpha")
+        pgfixture.set_project_org(cls.admin_url, "cap_alpha", "org_alpha")
 
     def test_membership_lookup_is_cached(self):
         cookie = session_cookie("a@alpha.com", "user_cached")

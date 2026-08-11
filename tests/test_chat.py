@@ -166,6 +166,16 @@ class TestChatEndpoint(unittest.TestCase):
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-chat-"))
         os.environ["CAPTURE_DATA_DIR"] = str(cls.data_dir)
         os.environ["REPLAY_AUTH_DISABLED"] = "1"
+
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import pgfixture
+
+        cls.admin_url, cls.app_url = pgfixture.fresh_database()
+        os.environ["CAPTURE_DATABASE_URL"] = cls.app_url
+        os.environ["CAPTURE_PROJECT_CACHE_TTL_S"] = "0"
+        pgfixture.seed_default_project(cls.admin_url)
         import server
 
         cls.server = server
@@ -195,8 +205,13 @@ class TestChatEndpoint(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        import os
         import shutil
 
+        import db
+
+        db.close_pool()
+        os.environ.pop("CAPTURE_DATABASE_URL", None)
         shutil.rmtree(cls.data_dir, ignore_errors=True)
 
     def setUp(self):

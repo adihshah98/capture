@@ -8,7 +8,8 @@ PUBLIC_URL="${CAPTURE_PUBLIC_URL:-https://d1lt8dgxjrizij.cloudfront.net}"
 cd "$(dirname "$0")"
 npm run build
 tar czf /tmp/capture-deploy.tar.gz \
-  server.py analyze.py requirements.txt public \
+  server.py analyze.py db.py projects.py sessionstore.py compat.py fsutil.py backfill.py \
+  migrations requirements.txt public \
   package.json package-lock.json \
   src/analyze/extract.mjs src/analyze/replayer.bundle.js
 scp -q -i "$KEY" -o StrictHostKeyChecking=accept-new /tmp/capture-deploy.tar.gz "$HOST:/tmp/"
@@ -19,6 +20,8 @@ cd /opt/capture
 
 rm -rf .rollback && mkdir .rollback
 cp -a server.py analyze.py requirements.txt public src .rollback/ 2>/dev/null || true
+cp -a db.py projects.py sessionstore.py compat.py fsutil.py backfill.py migrations \
+  .rollback/ 2>/dev/null || true
 
 tar xzf /tmp/capture-deploy.tar.gz
 [ -d .venv ] || python3.11 -m venv .venv
@@ -49,6 +52,62 @@ if command -v node >/dev/null 2>&1; then
   fi
 else
   echo "warning: node not installed — AI analysis will be unavailable" >&2
+fi
+
+UNIT=/etc/systemd/system/capture.service
+patched=0
+
+# State used to live in /opt/capture/data, inside the directory a deploy
+# overwrites. Move it out once, with the service stopped so nothing is written
+# to the old location after the copy.
+if ! grep -q CAPTURE_DATA_DIR "$UNIT"; then
+  sudo systemctl stop capture 2>/dev/null || true
+  if [ -d /opt/capture/data ] && [ ! -d /var/lib/capture ]; then
+    # Recordings run to tens of GB. On one filesystem this is a rename and
+    # returns instantly; copying would hold the service down for minutes and
+    # briefly need twice the disk.
+    if [ "$(stat -c %d /opt/capture)" = "$(stat -c %d /var/lib)" ]; then
+      sudo mv /opt/capture/data /var/lib/capture
+      echo "state moved to /var/lib/capture (rename, same filesystem)"
+    else
+      sudo mkdir -p /var/lib/capture
+      sudo cp -a /opt/capture/data/. /var/lib/capture/
+      echo "state copied to /var/lib/capture (different filesystem)"
+    fi
+  else
+    sudo mkdir -p /var/lib/capture
+  fi
+  sudo chown -R ec2-user /var/lib/capture
+  sudo sed -i '/^WorkingDirectory=/a Environment=CAPTURE_DATA_DIR=/var/lib/capture' "$UNIT"
+  patched=1
+fi
+
+# A SIGKILL mid-write is what corrupts session files. Let uvicorn bound its own
+# drain and give systemd more room than uvicorn takes, so it never has to.
+if ! grep -q timeout-graceful-shutdown "$UNIT"; then
+  sudo sed -i '/^ExecStart=.*uvicorn/ s/$/ --timeout-graceful-shutdown 25/' "$UNIT"
+  patched=1
+fi
+if ! grep -q TimeoutStopSec "$UNIT"; then
+  sudo sed -i '/^Restart=always/i TimeoutStopSec=40' "$UNIT"
+  patched=1
+fi
+if [ "$patched" -eq 1 ]; then
+  sudo systemctl daemon-reload
+  echo "patched capture.service (data dir + graceful shutdown)"
+fi
+
+# Migrations run before the new code starts, as the admin role. Schema changes
+# are additive per phase, so the old build keeps working if this deploy fails.
+if grep -q CAPTURE_DATABASE_URL /etc/capture.env 2>/dev/null; then
+  set -a; . /etc/capture.env; set +a
+  if ! .venv/bin/python db.py; then
+    echo "migrations failed — not restarting" >&2
+    exit 1
+  fi
+else
+  echo "CAPTURE_DATABASE_URL is not in /etc/capture.env — the server will not start" >&2
+  exit 1
 fi
 
 sudo systemctl restart capture

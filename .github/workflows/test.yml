@@ -8,6 +8,26 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      # Matches the production RDS instance.
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      CAPTURE_TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      # Never let the tenant isolation guard skip itself into a green build.
+      CAPTURE_REQUIRE_POSTGRES: '1'
+
     steps:
       - uses: actions/checkout@v4
 

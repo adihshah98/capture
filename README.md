@@ -167,7 +167,7 @@ Optional config, before the tag (inline values win over the derived ones):
 | Component | What it does |
 |---|---|
 | `public/capture.js` (~1 KB) | Fallback loader for sites that can't run an inline script; the documented snippet injects `recorder.bundle.js` directly and never fetches this |
-| `data/projects.json` + `?token=` on ingest/config | Per-brand projects: token-gated ingest, isolated storage, per-project config |
+| `projects` / `project_tokens` tables + `?token=` on ingest/config | Per-brand projects: token-gated ingest, storage isolated by Postgres row level security, per-project config. Tokens rotate without touching data |
 | `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you; unset means the read side is refused, not open |
 | `WORKOS_API_KEY` + `WORKOS_CLIENT_ID` (per-user logins) | Replaces the Basic password with WorkOS AuthKit; each project's `org_id` scopes which brand team can read it |
 | `src/recorder.js` → `recorder.bundle.js` | rrweb `record()`, session/window ids, batching, gzip, keepalive flush |
@@ -176,7 +176,7 @@ Optional config, before the tag (inline values win over the derived ones):
 | `POST /order?session_id&token` | Checkout outcome from a Shopify custom pixel (checkout pages run no theme code); stored as `order.json` beside the session's chunks and shown as a Purchased / Reached checkout badge in the session list |
 | `data/sessions/<id>/<ts>-<rand>.json` | Immutable chunk per batch |
 | `data/sessions/<id>/visitor.json` | Per-session metadata from the first batch: anonymous visitor id (groups return visits) and entry URL |
-| `GET /api/sessions?limit&cursor&filter&q` | Paged session list, newest first, served from the SQLite index in `data/index.db` (maintained at ingest time; rebuilt at startup or with `server.py reindex`). Filtering (`checkout`, `purchased`, `rage`) and search happen server-side. Returns `{sessions, total, cursor}`; follow `cursor` until it is null |
+| `GET /api/sessions?limit&cursor&filter&q` | Paged session list, newest first, served from Postgres and scoped to one project by row level security. Filtering (`checkout`, `purchased`, `rage`) and search happen server-side. Returns `{sessions, total, cursor}`; follow `cursor` until it is null |
 | `GET /api/sessions/:id`, `/:id/chunks`, `/:id/chunks/:name` | Single session's metadata (used by deep links to sessions below the loaded pages), chunk manifest, single immutable chunk |
 | `GET /healthz` | 200 when storage is writable, disk is above the floor and the bundles exist; 503 otherwise. Unauthenticated and boolean-only, so `deploy.sh` and uptime checks can use it |
 | `public/replay.html` + `replay.bundle.js` | rrweb-player + synced Timeline panel |
