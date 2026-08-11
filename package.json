@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "description": "Self-hosted session recording and replay built on rrweb",
   "scripts": {
-    "build": "esbuild src/recorder/index.js --bundle --minify --outfile=public/recorder.bundle.js && esbuild src/replay/index.js --bundle --minify --outfile=public/replay.bundle.js && esbuild src/snippet.js --minify --outfile=public/capture.js && esbuild src/analyze/replayer-entry.js --bundle --minify --outfile=src/analyze/replayer.bundle.js",
+    "build": "npm run build:js && npm run build:html",
+    "build:js": "esbuild src/recorder/index.js --bundle --minify --outfile=public/recorder.bundle.js && esbuild src/replay/index.js --bundle --minify --outfile=public/replay.bundle.js && esbuild src/snippet.js --minify --outfile=public/capture.js && esbuild src/analyze/replayer-entry.js --bundle --minify --outfile=src/analyze/replayer.bundle.js",
+    "build:html": "mkdir -p public && cp web/*.html public/",
     "test": "npm run build && node --test tests/client/*.test.mjs && .venv/bin/python -m unittest discover -s tests/server",
     "test:client": "npm run build && node --test tests/client/*.test.mjs",
     "test:server": ".venv/bin/python -m unittest discover -s tests/server",

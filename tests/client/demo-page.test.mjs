@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-const html = fs.readFileSync(new URL('../../public/demo-triggers.html', import.meta.url), 'utf8');
+const html = fs.readFileSync(new URL('../../web/demo-triggers.html', import.meta.url), 'utf8');
 const inlineScript = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 function configFor(queryString) {
