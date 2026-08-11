@@ -16,6 +16,7 @@ import urllib.request
 import zlib
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,7 +37,8 @@ try:
 except ImportError:
     pass
 
-from . import analyze, compat, db, paths, projects, sessionstore, storage
+from . import analysis_port as ap
+from . import compat, db, paths, projects, sessionstore, storage
 from .fsutil import atomic_write_bytes, atomic_write_text
 from .paths import SAFE_CHUNK, SAFE_ID, chunk_timestamp, chunk_window
 from .projects import ProjectsUnavailable
@@ -84,18 +86,18 @@ async def lifespan(_app):
         if PREFLIGHT:
             return []
         try:
-            return analyze.cohorts_needing_batch_resume(DATA_ROOT)
+            return ap.pending_batch_resumes()
         except Exception as exc:
             print(f"cohort resume unavailable at startup: {exc}")
             return []
 
-    for pool, cohort in _resumable():
-        key = _cohort_key(pool, cohort["id"])
+    for owner, cohort in _resumable():
+        key = _cohort_key(owner, cohort["id"])
         if key not in _cohort_tasks:
             print(
                 f"resuming cohort batch {cohort['id']} ({(cohort.get('batch') or {}).get('name')})"
             )
-            _cohort_tasks[key] = asyncio.create_task(_resume_cohort_batch(pool, cohort["id"]))
+            _cohort_tasks[key] = asyncio.create_task(_resume_cohort_batch(owner, cohort["id"]))
     try:
         yield
     finally:
@@ -539,8 +541,8 @@ def healthz():
     # Reported, not health-gating: analysis is an optional extra, and a box
     # without a key or a browser is still a perfectly healthy recorder.
     checks["read_only"] = READ_ONLY
-    checks["analysis_configured"] = analyze.ANALYSIS_ENABLED
-    checks["analysis_runtime_present"] = analyze.runtime_present()
+    checks["analysis_configured"] = ap.enabled()
+    checks["analysis_runtime_present"] = ap.runtime_present()
 
     informational = (
         "replay_auth_enabled",
@@ -887,7 +889,7 @@ def list_projects(request: Request):
     email = (getattr(request.state, "auth", None) or {}).get("email")
     return {
         "projects": visible,
-        "analysis_enabled": analyze.ANALYSIS_ENABLED and analyze.runtime_present(),
+        "analysis_enabled": ap.enabled() and ap.runtime_present(),
         **({"email": email} if email else {}),
     }
 
@@ -937,7 +939,7 @@ def delete_session(request: Request, session_id: str, project: str | None = Quer
     # behind, enrich_cohort_status falls back to the stored status and keeps
     # counting the session as analyzed.
     try:
-        analyze.forget_session(found.pool, session_id)
+        ap.forget_session(found, session_id)
     except Exception as exc:
         # The session is already gone from the index; a failure here leaves a
         # stale membership row, which is bad but not worth failing the delete.
@@ -1001,18 +1003,30 @@ def session_chunk(
     )
 
 
+class _Running(NamedTuple):
+    """The project is carried alongside the task so shutdown can report a job as
+    failed without looking anything up — at shutdown the database may already be
+    going away, and the registry used to reconstruct a Path from its own key."""
+
+    project: projects.Project
+    task: asyncio.Task
+
+
+# Keyed by (project_id, session_id) rather than a resolved directory: the tenant
+# is a project, and two projects must never collide on a session id.
 _analysis_tasks: dict = {}
-# Concurrency lives in analyze.py: one Chromium at a time for reconstruction,
-# a few overlapping Gemini calls. Both gates are shared by every caller here.
+# Concurrency lives in the analysis package: one Chromium at a time for
+# reconstruction, a few overlapping Gemini calls. Both gates are shared here.
 _cohort_tasks: dict = {}
 
 
 async def _stop_background_jobs() -> None:
     """On a clean stop, leave no job claiming to be running with no task behind it."""
-    pending = [t for t in (*_analysis_tasks.values(), *_cohort_tasks.values()) if not t.done()]
-    for key, task in _analysis_tasks.items():
-        if not task.done():
-            analyze.write_job(Path(key), "error", error="server restarted mid-analysis")
+    pending = [r.task for r in _analysis_tasks.values() if not r.task.done()]
+    pending += [t for t in _cohort_tasks.values() if not t.done()]
+    for (_project_id, session_id), running in _analysis_tasks.items():
+        if not running.task.done():
+            ap.set_job(running.project, session_id, "error", error="server restarted mid-analysis")
     for task in pending:
         task.cancel()
     if pending:
@@ -1020,12 +1034,12 @@ async def _stop_background_jobs() -> None:
         print(f"shutdown: cancelled {len(pending)} background job(s)")
 
 
-def _analysis_key(session_dir: Path) -> str:
-    return str(session_dir.resolve())
+def _analysis_key(project: projects.Project, session_id: str) -> tuple:
+    return (project.id, session_id)
 
 
-def _cohort_key(pool: Path, cohort_id: str) -> str:
-    return f"{pool.resolve()}::{cohort_id}"
+def _cohort_key(project: projects.Project, cohort_id: str) -> tuple:
+    return (project.id, cohort_id)
 
 
 def _stage_chunks(project, session_ids: list) -> list:
@@ -1069,71 +1083,76 @@ async def chunks_on_disk(project, session_ids: list):
         await asyncio.to_thread(_unstage_chunks, staged)
 
 
-async def _run_analysis_job(session_dir: Path, chunk_names: list, force: bool = True) -> None:
-    analyze.write_job(session_dir, "running")
+async def _run_analysis_job(
+    project: projects.Project, session_id: str, chunk_names: list, force: bool = True
+) -> None:
+    ap.set_job(project, session_id, "running")
     try:
-        project = project_for_pool(session_dir.parent)
-        async with chunks_on_disk(project, [session_dir.name]):
-            await analyze.analyze_session(session_dir, chunk_names, force=force)
+        async with chunks_on_disk(project, [session_id]):
+            await ap.run_session(project, session_id, chunk_names, force=force)
     except Exception as exc:
-        analyze.write_job(session_dir, "error", error=str(exc))
+        ap.set_job(project, session_id, "error", error=str(exc))
     finally:
-        _analysis_tasks.pop(_analysis_key(session_dir), None)
+        _analysis_tasks.pop(_analysis_key(project, session_id), None)
 
 
 def _require_analysis_runtime() -> None:
-    if not analyze.ANALYSIS_ENABLED:
+    if not ap.enabled():
         raise ApiError(503, "analysis is not configured on this server")
-    if not analyze.runtime_present():
+    if not ap.runtime_present():
         raise ApiError(503, "analysis runtime is unavailable on this server")
 
 
-async def _start_session_analysis(session_dir: Path, force: bool = False) -> dict:
+async def _start_session_analysis(
+    project: projects.Project, session_id: str, force: bool = False
+) -> dict:
     """Queue (or return) per-session analysis — shared by the single-session API and cohorts."""
-    project = project_for_pool(session_dir.parent)
-    chunks = storage.list_chunks(project.storage_prefix, session_dir.name)
+    chunks = storage.list_chunks(project.storage_prefix, session_id)
     if not chunks:
         raise ApiError(400, "this session has no chunks to analyze")
 
     if not force:
-        cached = analyze.read_analysis(session_dir)
+        cached = ap.session_analysis(project, session_id)
         if cached:
             if "status" not in cached:
                 cached = {**cached, "status": "done"}
             return cached
 
-    key = _analysis_key(session_dir)
+    key = _analysis_key(project, session_id)
     existing = _analysis_tasks.get(key)
-    if existing and not existing.done():
+    if existing and not existing.task.done():
         return {"status": "running", "accepted": True}
 
-    job = analyze.read_job(session_dir)
-    if job and job.get("status") == "running" and (existing is None or existing.done()):
+    job = ap.job(project, session_id)
+    if job and job.get("status") == "running" and (existing is None or existing.task.done()):
         # Stale status from a crashed worker — allow a fresh start.
-        analyze.clear_job(session_dir)
+        ap.clear_job(project, session_id)
 
     if force:
-        analyze.clear_analysis(session_dir)
+        ap.clear_session_analysis(project, session_id)
 
-    analyze.write_job(session_dir, "running")
-    task = asyncio.create_task(_run_analysis_job(session_dir, [c.name for c in chunks], force=True))
-    _analysis_tasks[key] = task
+    ap.set_job(project, session_id, "running")
+    task = asyncio.create_task(
+        _run_analysis_job(project, session_id, [c.name for c in chunks], force=True)
+    )
+    _analysis_tasks[key] = _Running(project, task)
     return {"status": "running", "accepted": True}
 
 
-async def _await_session_analysis(session_dir: Path, force: bool = False) -> None:
+async def _await_session_analysis(
+    project: projects.Project, session_id: str, force: bool = False
+) -> None:
     """Run one session through the shared analysis queue and wait until it settles."""
-    result = await _start_session_analysis(session_dir, force=force)
+    result = await _start_session_analysis(project, session_id, force=force)
     if result.get("status") == "done":
         return
-    key = _analysis_key(session_dir)
-    task = _analysis_tasks.get(key)
-    if task is not None:
-        await task
-    job = analyze.read_job(session_dir)
+    running = _analysis_tasks.get(_analysis_key(project, session_id))
+    if running is not None:
+        await running.task
+    job = ap.job(project, session_id)
     if job and job.get("status") == "error":
         raise RuntimeError(job.get("error") or "analysis failed")
-    if not analyze.read_analysis(session_dir):
+    if not ap.session_analysis(project, session_id):
         raise RuntimeError("analysis finished without a result")
 
 
@@ -1145,36 +1164,36 @@ def _cohort_session_ids(cohort: dict) -> list:
     ]
 
 
-async def _run_cohort_job(pool: Path, cohort_id: str, force: bool = False) -> None:
-    """Analyze one cohort in the background. Other cohorts on disk are untouched."""
-    key = _cohort_key(pool, cohort_id)
+async def _run_cohort_job(project: projects.Project, cohort_id: str, force: bool = False) -> None:
+    """Analyze one cohort in the background. Other cohorts are untouched."""
+    key = _cohort_key(project, cohort_id)
     try:
-        cohort = analyze.read_cohort(pool, cohort_id)
+        cohort = ap.cohort(project, cohort_id)
         if not cohort:
             return
-        async with chunks_on_disk(project_for_pool(pool), _cohort_session_ids(cohort)):
-            await analyze.run_cohort_job(pool, cohort, force=force)
+        async with chunks_on_disk(project, _cohort_session_ids(cohort)):
+            await ap.run_cohort(project, cohort, force=force)
     except asyncio.CancelledError:
-        cohort = analyze.read_cohort(pool, cohort_id)
+        cohort = ap.cohort(project, cohort_id)
         if cohort:
             batch_name = (cohort.get("batch") or {}).get("name")
             if batch_name:
-                await analyze.cancel_gemini_batch(batch_name)
-            analyze.mark_cohort_paused(pool, cohort)
+                await ap.cancel_batch(batch_name)
+            ap.mark_paused(project, cohort)
         raise
     finally:
         _cohort_tasks.pop(key, None)
 
 
-async def _resume_cohort_batch(pool: Path, cohort_id: str) -> None:
+async def _resume_cohort_batch(project: projects.Project, cohort_id: str) -> None:
     """Re-attach to a Batch job after a process restart."""
-    key = _cohort_key(pool, cohort_id)
+    key = _cohort_key(project, cohort_id)
     try:
-        cohort = analyze.read_cohort(pool, cohort_id)
+        cohort = ap.cohort(project, cohort_id)
         if not cohort:
             return
-        async with chunks_on_disk(project_for_pool(pool), _cohort_session_ids(cohort)):
-            await analyze.resume_cohort_batch(pool, cohort)
+        async with chunks_on_disk(project, _cohort_session_ids(cohort)):
+            await ap.resume_cohort(project, cohort)
     finally:
         _cohort_tasks.pop(key, None)
 
@@ -1182,8 +1201,9 @@ async def _resume_cohort_batch(pool: Path, cohort_id: str) -> None:
 @app.get("/api/sessions/{session_id}/analysis")
 def get_analysis(request: Request, session_id: str, project: str | None = Query(None)):
     require_read_access(request, project)
+    found = resolve_project(project)
     session_dir = resolve_session(session_id, project)
-    cached = analyze.read_analysis(session_dir)
+    cached = ap.session_analysis(found, session_id)
     if cached:
         if "status" not in cached:
             cached = {**cached, "status": "done"}
@@ -1198,7 +1218,7 @@ def get_analysis(request: Request, session_id: str, project: str | None = Query(
                 if attr:
                     cached = {**cached, "attribution": attr}
         return cached
-    job = analyze.read_job(session_dir)
+    job = ap.job(found, session_id)
     if job and job.get("status") in ("running", "error"):
         return job
     raise ApiError(404, "not analyzed yet")
@@ -1213,22 +1233,23 @@ async def create_analysis(
 ):
     require_read_access(request, project)
     _require_analysis_runtime()
-    session_dir = resolve_session(session_id, project)
-    result = await _start_session_analysis(session_dir, force=force)
+    found = resolve_project(project)
+    resolve_session(session_id, project)
+    result = await _start_session_analysis(found, session_id, force=force)
     if result.get("accepted"):
         return JSONResponse({"status": "running"}, status_code=202)
     return result
 
 
-def _resolve_cohort_or_404(pool: Path, cohort_id: str | None) -> dict:
+def _resolve_cohort_or_404(project: projects.Project, cohort_id: str | None) -> dict:
     """A cohort by id, or the newest one when the caller did not name one."""
     if cohort_id:
-        cohort = analyze.read_cohort(pool, cohort_id)
+        cohort = ap.cohort(project, cohort_id)
         if not cohort:
             raise ApiError(404, "no such cohort")
         return cohort
-    analyze.migrate_legacy_cohort(pool)
-    cohort = analyze.latest_cohort(pool)
+    ap.import_legacy_cohorts(project)
+    cohort = ap.latest_cohort(project)
     if not cohort:
         raise ApiError(404, "no cohort yet")
     return cohort
@@ -1238,10 +1259,10 @@ def _resolve_cohort_or_404(pool: Path, cohort_id: str | None) -> dict:
 def list_cohorts(request: Request, project: str | None = Query(None)):
     """Every cohort in this pool, newest first — membership counts only."""
     require_read_access(request, project)
-    pool = resolve_pool(project)
+    found = resolve_project(project)
     out = []
-    for cohort in analyze.list_cohorts(pool):
-        live = analyze.enrich_cohort_status(pool, cohort)
+    for cohort in ap.cohorts(found):
+        live = ap.cohort_view(found, cohort)
         out.append(
             {
                 "id": live["id"],
@@ -1258,22 +1279,22 @@ def list_cohorts(request: Request, project: str | None = Query(None)):
 @app.get("/api/cohorts/{cohort_id}")
 def get_cohort(request: Request, cohort_id: str, project: str | None = Query(None)):
     require_read_access(request, project)
-    pool = resolve_pool(project)
-    cohort = _resolve_cohort_or_404(pool, cohort_id)
-    live = analyze.enrich_cohort_status(pool, cohort)
+    found = resolve_project(project)
+    cohort = _resolve_cohort_or_404(found, cohort_id)
+    live = ap.cohort_view(found, cohort)
     # Persist refreshed status so a crashed runner still shows accurate counts.
     # Status only — persistable_cohort drops the derived view enrich lays over
     # it, so a poll cannot freeze a guessed `selection` into the file.
     if live.get("sessions") != cohort.get("sessions") or live.get("status") != cohort.get("status"):
-        analyze.write_cohort(pool, analyze.persistable_cohort(live, cohort))
-    return cohort_response(pool, live)
+        ap.save_cohort(found, ap.storable_cohort(live, cohort))
+    return cohort_response(found, live)
 
 
 @app.patch("/api/cohorts/{cohort_id}")
 async def rename_cohort(request: Request, cohort_id: str, project: str | None = Query(None)):
     """Rename a cohort. Membership is frozen — only the label is editable."""
     require_read_access(request, project)
-    pool = resolve_pool(project)
+    found = resolve_project(project)
     try:
         payload = await request.json()
     except Exception as exc:
@@ -1281,24 +1302,24 @@ async def rename_cohort(request: Request, cohort_id: str, project: str | None = 
     if not isinstance(payload, dict) or not isinstance(payload.get("label"), str):
         raise ApiError(400, "label is required")
     try:
-        renamed = analyze.rename_cohort(pool, cohort_id, payload["label"])
+        renamed = ap.rename_cohort(found, cohort_id, payload["label"])
     except ValueError as exc:
         raise ApiError(400, str(exc)) from exc
     if not renamed:
         raise ApiError(404, "no such cohort")
-    return cohort_response(pool, analyze.enrich_cohort_status(pool, renamed))
+    return cohort_response(found, ap.cohort_view(found, renamed))
 
 
 @app.delete("/api/cohorts/{cohort_id}")
 async def delete_cohort(request: Request, cohort_id: str, project: str | None = Query(None)):
     """Delete a cohort and its cached cuts. Per-session write-ups are kept."""
     require_read_access(request, project)
-    pool = resolve_pool(project)
-    cohort = analyze.read_cohort(pool, cohort_id)
+    found = resolve_project(project)
+    cohort = ap.cohort(found, cohort_id)
     if not cohort:
         raise ApiError(404, "no such cohort")
 
-    key = _cohort_key(pool, cohort_id)
+    key = _cohort_key(found, cohort_id)
     task = _cohort_tasks.get(key)
     if task and not task.done():
         task.cancel()
@@ -1309,15 +1330,15 @@ async def delete_cohort(request: Request, cohort_id: str, project: str | None = 
     else:
         batch_name = (cohort.get("batch") or {}).get("name")
         if batch_name:
-            await analyze.cancel_gemini_batch(batch_name)
+            await ap.cancel_batch(batch_name)
 
-    # Drop any in-flight cut for this cohort.
-    prefix = f"{key}:"
+    # Drop any in-flight cut for this cohort. Compared as a tuple prefix: the
+    # old string form could false-match a cohort id that contained the separator.
     for cut_key, cut_task in list(_cut_tasks.items()):
-        if cut_key.startswith(prefix) and cut_task and not cut_task.done():
+        if cut_key[:2] == key and cut_task and not cut_task.done():
             cut_task.cancel()
 
-    if not analyze.delete_cohort(pool, cohort_id):
+    if not ap.delete_cohort(found, cohort_id):
         raise ApiError(404, "no such cohort")
     return {"ok": True, "id": cohort_id}
 
@@ -1326,29 +1347,29 @@ async def delete_cohort(request: Request, cohort_id: str, project: str | None = 
 def get_pool_facets(
     request: Request,
     project: str | None = Query(None),
-    min_duration_ms: int = Query(analyze.COHORT_MIN_DURATION_MS, ge=0),
+    min_duration_ms: int = Query(ap.MIN_DURATION_MS, ge=0),
 ):
     """Facet values available in the pool — same fields as the Insights cut picker."""
     require_read_access(request, project)
     found = resolve_project(project)
     with compat.cohort_connection(found.id) as conn:
-        return analyze.pool_facets(conn, found.id, min_duration_ms=min_duration_ms)
+        return ap.pool_facets(conn, found, min_duration_ms=min_duration_ms)
 
 
 @app.post("/api/cohorts")
 async def create_cohort(
     request: Request,
     project: str | None = Query(None),
-    purchased: int | None = Query(None, ge=0, le=analyze.COHORT_MAX_SESSIONS),
-    all_n: int | None = Query(None, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="all"),
-    any_n: int = Query(0, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="any"),
-    a_n: int = Query(0, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="a"),
-    b_n: int = Query(0, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="b"),
-    min_duration_ms: int = Query(analyze.COHORT_MIN_DURATION_MS, ge=0),
-    url_contains: str = Query(analyze.COHORT_URL_CONTAINS),
+    purchased: int | None = Query(None, ge=0, le=ap.MAX_SESSIONS),
+    all_n: int | None = Query(None, ge=0, le=ap.MAX_SESSIONS, alias="all"),
+    any_n: int = Query(0, ge=0, le=ap.MAX_SESSIONS, alias="any"),
+    a_n: int = Query(0, ge=0, le=ap.MAX_SESSIONS, alias="a"),
+    b_n: int = Query(0, ge=0, le=ap.MAX_SESSIONS, alias="b"),
+    min_duration_ms: int = Query(ap.MIN_DURATION_MS, ge=0),
+    url_contains: str = Query(ap.URL_CONTAINS),
     start_ms: int | None = Query(None, ge=0),
     end_ms: int | None = Query(None, ge=0),
-    order: str = Query(analyze.COHORT_ORDER_LATEST),
+    order: str = Query(ap.ORDER_LATEST),
     label: str | None = Query(None, max_length=120),
     outcome: list | None = Query(None),
     device: list | None = Query(None),
@@ -1379,14 +1400,14 @@ async def create_cohort(
     Total sessions are capped at COHORT_MAX_SESSIONS (500).
     """
     require_read_access(request, project)
-    pool = resolve_pool(project)
+    found = resolve_project(project)
 
     sort = (order or "").strip().lower()
-    if sort not in analyze.COHORT_ORDERS:
+    if sort not in ap.ORDERS:
         raise ApiError(400, "order must be latest or earliest")
     if start_ms is not None and end_ms is not None and start_ms > end_ms:
         raise ApiError(400, "start_ms must be <= end_ms")
-    chosen_label = analyze.clean_cohort_label(label)
+    chosen_label = ap.clean_label(label)
 
     slice_a = _slice_from_params(
         outcome,
@@ -1427,8 +1448,8 @@ async def create_cohort(
         any_count = any_n
         total = any_n
     else:
-        purchased_n = analyze.COHORT_DEFAULT_PURCHASED_N if purchased is None else purchased
-        all_count = analyze.COHORT_DEFAULT_ALL_N if all_n is None else all_n
+        purchased_n = ap.DEFAULT_PURCHASED_N if purchased is None else purchased
+        all_count = ap.DEFAULT_ALL_N if all_n is None else all_n
         # If only one side was set, the other defaults to 0 (not the 50/50 preset).
         if purchased is not None and all_n is None:
             all_count = 0
@@ -1441,15 +1462,15 @@ async def create_cohort(
 
     if total < 1:
         raise ApiError(400, "request at least one session")
-    if total > analyze.COHORT_MAX_SESSIONS:
-        raise ApiError(400, f"cohort size capped at {analyze.COHORT_MAX_SESSIONS} sessions")
+    if total > ap.MAX_SESSIONS:
+        raise ApiError(400, f"cohort size capped at {ap.MAX_SESSIONS} sessions")
 
     with compat.cohort_connection(resolve_project(project).id) as conn:
-        cohort = analyze.build_cohort(
+        cohort = ap.build_cohort(
             conn,
-            resolve_project(project).id,
-            purchased_n,
-            all_count,
+            found,
+            purchased_n=purchased_n,
+            all_n=all_count,
             any_n=any_count,
             a_n=a_n if use_groups else 0,
             b_n=b_n if use_groups else 0,
@@ -1466,9 +1487,9 @@ async def create_cohort(
     if not cohort["sessions"]:
         raise ApiError(400, "no sessions matched the sample filters")
 
-    analyze.write_cohort(pool, cohort)
+    ap.save_cohort(found, cohort)
     return JSONResponse(
-        cohort_response(pool, analyze.enrich_cohort_status(pool, cohort)),
+        cohort_response(found, ap.cohort_view(found, cohort)),
         status_code=201,
     )
 
@@ -1483,23 +1504,23 @@ async def start_cohort_analysis(
     """Start (or resume) analysis for an existing idle/paused cohort."""
     require_read_access(request, project)
     _require_analysis_runtime()
-    pool = resolve_pool(project)
-    cohort = _resolve_cohort_or_404(pool, cohort_id)
+    found = resolve_project(project)
+    cohort = _resolve_cohort_or_404(found, cohort_id)
 
-    key = _cohort_key(pool, cohort["id"])
+    key = _cohort_key(found, cohort["id"])
     existing = _cohort_tasks.get(key)
     if existing and not existing.done():
         return JSONResponse(
-            cohort_response(pool, analyze.enrich_cohort_status(pool, cohort)),
+            cohort_response(found, ap.cohort_view(found, cohort)),
             status_code=202,
         )
 
-    analyze.write_cohort(pool, {**cohort, "status": "running"})
-    task = asyncio.create_task(_run_cohort_job(pool, cohort["id"], force=force))
+    ap.save_cohort(found, {**cohort, "status": "running"})
+    task = asyncio.create_task(_run_cohort_job(found, cohort["id"], force=force))
     _cohort_tasks[key] = task
-    live = analyze.read_cohort(pool, cohort["id"]) or cohort
+    live = ap.cohort(found, cohort["id"]) or cohort
     return JSONResponse(
-        cohort_response(pool, analyze.enrich_cohort_status(pool, live)),
+        cohort_response(found, ap.cohort_view(found, live)),
         status_code=202,
     )
 
@@ -1512,10 +1533,10 @@ async def pause_cohort_analysis(
 ):
     """Pause an in-flight cohort analysis; completed session write-ups are kept."""
     require_read_access(request, project)
-    pool = resolve_pool(project)
-    cohort = _resolve_cohort_or_404(pool, cohort_id)
+    found = resolve_project(project)
+    cohort = _resolve_cohort_or_404(found, cohort_id)
 
-    key = _cohort_key(pool, cohort["id"])
+    key = _cohort_key(found, cohort["id"])
     task = _cohort_tasks.get(key)
     if task and not task.done():
         task.cancel()
@@ -1526,11 +1547,11 @@ async def pause_cohort_analysis(
     else:
         batch_name = (cohort.get("batch") or {}).get("name")
         if batch_name:
-            await analyze.cancel_gemini_batch(batch_name)
-        analyze.mark_cohort_paused(pool, cohort)
+            await ap.cancel_batch(batch_name)
+        ap.mark_paused(found, cohort)
 
-    live = analyze.read_cohort(pool, cohort_id) or cohort
-    return cohort_response(pool, analyze.enrich_cohort_status(pool, live))
+    live = ap.cohort(found, cohort_id) or cohort
+    return cohort_response(found, ap.cohort_view(found, live))
 
 
 @app.post("/api/cohorts/{cohort_id}/sessions/{session_id}/retry")
@@ -1543,8 +1564,8 @@ async def retry_cohort_session(
     """Re-run one cohort row after it failed, without re-sampling the cohort."""
     require_read_access(request, project)
     _require_analysis_runtime()
-    pool = resolve_pool(project)
-    cohort = _resolve_cohort_or_404(pool, cohort_id)
+    found = resolve_project(project)
+    cohort = _resolve_cohort_or_404(found, cohort_id)
 
     entry = next(
         (e for e in cohort.get("sessions") or [] if e.get("session_id") == session_id),
@@ -1553,38 +1574,36 @@ async def retry_cohort_session(
     if entry is None:
         raise ApiError(404, "session is not in this cohort")
 
-    session_dir = resolve_session(session_id, project)
+    resolve_session(session_id, project)
     # Drop the recorded failure first, so a poll landing mid-retry does not
     # re-read the old error back over the running status.
     entry["status"] = "queued"
     entry.pop("error", None)
-    analyze.clear_job(session_dir)
-    analyze.write_cohort(pool, {**cohort, "status": "running"})
+    ap.clear_job(found, session_id)
+    ap.save_cohort(found, {**cohort, "status": "running"})
 
-    key = _cohort_key(pool, cohort["id"])
+    key = _cohort_key(found, cohort["id"])
     existing = _cohort_tasks.get(key)
     if existing and not existing.done():
         # A cohort run owns the file; let it pick this row up on its own pass.
-        await _start_session_analysis(session_dir)
+        await _start_session_analysis(found, session_id)
     else:
-        task = asyncio.create_task(
-            _retry_cohort_session_job(pool, cohort["id"], session_id, session_dir)
-        )
+        task = asyncio.create_task(_retry_cohort_session_job(found, cohort["id"], session_id))
         _cohort_tasks[key] = task
 
-    live = analyze.read_cohort(pool, cohort["id"]) or cohort
+    live = ap.cohort(found, cohort["id"]) or cohort
     return JSONResponse(
-        cohort_response(pool, analyze.enrich_cohort_status(pool, live)),
+        cohort_response(found, ap.cohort_view(found, live)),
         status_code=202,
     )
 
 
 async def _retry_cohort_session_job(
-    pool: Path, cohort_id: str, session_id: str, session_dir: Path
+    found: projects.Project, cohort_id: str, session_id: str
 ) -> None:
-    key = _cohort_key(pool, cohort_id)
+    key = _cohort_key(found, cohort_id)
     try:
-        cohort = analyze.read_cohort(pool, cohort_id) or {}
+        cohort = ap.cohort(found, cohort_id) or {}
         row = next(
             (e for e in cohort.get("sessions") or [] if e.get("session_id") == session_id),
             None,
@@ -1593,21 +1612,18 @@ async def _retry_cohort_session_job(
             return
         row["status"] = "running"
         row.pop("error", None)
-        analyze.write_cohort(pool, cohort)
+        ap.save_cohort(found, cohort)
         try:
             # Not forced: a failed row has nothing cached to bust, and if it
             # succeeded meanwhile the retry should settle on that result.
-            await _await_session_analysis(session_dir)
+            await _await_session_analysis(found, session_id)
             row["status"] = "done"
-            row["analysis"] = analyze.ANALYSIS_FILE
+            row["analysis"] = ap.ANALYSIS_FILE
             row.pop("error", None)
         except Exception as exc:
             row["status"] = "error"
             row["error"] = getattr(exc, "message", None) or str(exc) or "analysis failed"
-        analyze.write_cohort(
-            pool,
-            analyze.persistable_cohort(analyze.enrich_cohort_status(pool, cohort), cohort),
-        )
+        ap.save_cohort(found, ap.storable_cohort(ap.cohort_view(found, cohort), cohort))
     finally:
         _cohort_tasks.pop(key, None)
 
@@ -1619,15 +1635,17 @@ _cut_tasks: dict = {}
 _cut_errors: dict = {}
 
 
-def _cut_task_key(pool: Path, cohort_id: str, key: str) -> str:
-    return f"{pool.resolve()}::{cohort_id}::{key}"
+def _cut_task_key(project: projects.Project, cohort_id: str, key: str) -> tuple:
+    return (project.id, cohort_id, key)
 
 
-async def _run_cut_job(pool: Path, cohort_id: str, rows: list, slice_spec, key: str) -> None:
-    task_key = _cut_task_key(pool, cohort_id, key)
+async def _run_cut_job(
+    project: projects.Project, cohort_id: str, rows: list, slice_spec, key: str
+) -> None:
+    task_key = _cut_task_key(project, cohort_id, key)
     try:
-        cut = await analyze.build_cut_analysis(rows, slice_spec)
-        analyze.write_cut(pool, cohort_id, key, cut)
+        cut = await ap.build_cut(rows, slice_spec)
+        ap.save_cut(project, cohort_id, key, cut)
         _cut_errors.pop(task_key, None)
     except Exception as exc:
         _cut_errors[task_key] = getattr(exc, "message", None) or str(exc) or "cut analysis failed"
@@ -1639,10 +1657,10 @@ async def _run_cut_job(pool: Path, cohort_id: str, rows: list, slice_spec, key: 
 def get_cohort_facets(request: Request, cohort_id: str, project: str | None = Query(None)):
     """Slice values present in this cohort, so the picker only offers real ones."""
     require_read_access(request, project)
-    pool = resolve_pool(project)
-    cohort = _resolve_cohort_or_404(pool, cohort_id)
-    live = analyze.enrich_cohort_status(pool, cohort)
-    return {"cohort_id": cohort["id"], **cohort_facets(pool, live)}
+    found = resolve_project(project)
+    cohort = _resolve_cohort_or_404(found, cohort_id)
+    live = ap.cohort_view(found, cohort)
+    return {"cohort_id": cohort["id"], **cohort_facets(found, live)}
 
 
 @app.get("/api/cohorts/{cohort_id}/cut")
@@ -1671,8 +1689,8 @@ async def get_cut(
     spend a second call on a cut.
     """
     require_read_access(request, project)
-    pool = resolve_pool(project)
-    cohort = _resolve_cohort_or_404(pool, cohort_id)
+    found = resolve_project(project)
+    cohort = _resolve_cohort_or_404(found, cohort_id)
     cohort_id = cohort["id"]
 
     slice_spec = (
@@ -1688,12 +1706,12 @@ async def get_cut(
         )
         or None
     )
-    key = analyze.cut_key(slice_spec)
+    key = ap.cut_key(slice_spec)
     # A refresh is a run by definition: there is no reason to bust the cache
     # and then decline to refill it.
     run = run or refresh
 
-    task_key = _cut_task_key(pool, cohort_id, key)
+    task_key = _cut_task_key(found, cohort_id, key)
     existing = _cut_tasks.get(task_key)
     if existing and not existing.done():
         # A run already in flight is the fresh answer a refresh was asking for.
@@ -1701,7 +1719,7 @@ async def get_cut(
             {"status": "running", "cut": key, "cohort_id": cohort_id}, status_code=202
         )
 
-    cached = analyze.read_cut(pool, cohort_id, key)
+    cached = ap.cut(found, cohort_id, key)
     if cached and not refresh:
         return {**cached, "cohort_id": cohort_id, "cached": True}
 
@@ -1720,17 +1738,17 @@ async def get_cut(
 
     _require_analysis_runtime()
     _cut_errors.pop(task_key, None)
-    live = analyze.enrich_cohort_status(pool, cohort)
-    rows = _cut_rows(pool, live)
+    live = ap.cohort_view(found, cohort)
+    rows = _cut_rows(found, live)
     if not rows:
         raise ApiError(400, "no analyzed sessions in this cohort yet")
 
     # Only now, with the call certain to be queued: a refresh that fails its
     # preconditions must leave the old answer standing rather than delete it.
     if refresh:
-        analyze.clear_cut(pool, cohort_id, key)
+        ap.clear_cut(found, cohort_id, key)
 
-    task = asyncio.create_task(_run_cut_job(pool, cohort_id, rows, slice_spec, key))
+    task = asyncio.create_task(_run_cut_job(found, cohort_id, rows, slice_spec, key))
     _cut_tasks[task_key] = task
     return JSONResponse({"status": "running", "cut": key, "cohort_id": cohort_id}, status_code=202)
 
@@ -1763,18 +1781,18 @@ async def post_cohort_chat(
     reconstruction runtime a per-session analysis does.
     """
     require_read_access(request, project)
-    pool = resolve_pool(project)
-    cohort = _resolve_cohort_or_404(pool, cohort_id)
+    found = resolve_project(project)
+    cohort = _resolve_cohort_or_404(found, cohort_id)
     cohort_id = cohort["id"]
 
-    if not analyze.ANALYSIS_ENABLED:
+    if not ap.enabled():
         raise ApiError(503, "analysis is not configured on this server")
 
     try:
         payload = await request.json()
     except Exception as exc:
         raise ApiError(400, "expected a JSON body") from exc
-    messages = analyze.clean_chat_messages(
+    messages = ap.clean_chat_messages(
         (payload or {}).get("messages") if isinstance(payload, dict) else None
     )
     if not messages:
@@ -1796,12 +1814,12 @@ async def post_cohort_chat(
         or None
     )
 
-    live = analyze.enrich_cohort_status(pool, cohort)
-    rows = _cut_rows(pool, live)
+    live = ap.cohort_view(found, cohort)
+    rows = _cut_rows(found, live)
     if not rows:
         raise ApiError(400, "no analyzed sessions in this cohort yet")
 
-    selected, label, given, citations, spec = await analyze.chat_context(rows, slice_spec)
+    selected, label, given, citations, spec = await ap.chat_context(rows, slice_spec)
     if not selected:
         raise ApiError(400, f"no analyzed sessions match {label} in this cohort")
 
@@ -1816,15 +1834,13 @@ async def post_cohort_chat(
                 "n": len(selected),
                 "session_ids": [r.get("session_id") for r in selected],
                 "citations": citations,
-                "model": analyze.GEMINI_MODEL,
+                "model": ap.MODEL,
             },
         )
         try:
-            _, model_gate = analyze._gates()
+            model_gate = ap.model_gate()
             async with model_gate:
-                async for chunk in analyze.stream_gemini_chat(
-                    selected, label, given, messages, spec
-                ):
+                async for chunk in ap.stream_chat(selected, label, given, messages, spec):
                     yield _sse("delta", {"text": chunk})
         except asyncio.CancelledError:
             # The reader hung up. Nothing to report to — let the task unwind.
@@ -1848,9 +1864,9 @@ async def post_cohort_chat(
     )
 
 
-def stamp_cohort_attribution(pool: Path, cohort: dict) -> dict:
+def stamp_cohort_attribution(found: projects.Project, cohort: dict) -> dict:
     """Attach attribution, device, outcome and page so the UI can slice client-side."""
-    facts = _session_facts(pool)
+    facts = _session_facts(found)
     sessions = []
     for entry in cohort.get("sessions") or []:
         row = dict(entry)
@@ -1872,21 +1888,13 @@ def stamp_cohort_attribution(pool: Path, cohort: dict) -> dict:
     return {**cohort, "sessions": sessions}
 
 
-def cohort_response(pool: Path, cohort: dict) -> dict:
-    return stamp_cohort_attribution(pool, analyze.attach_cohort_insights(pool, cohort))
+def cohort_response(found: projects.Project, cohort: dict) -> dict:
+    return stamp_cohort_attribution(found, ap.with_insights(found, cohort))
 
 
-def project_for_pool(pool: Path) -> projects.Project:
-    """Reverse of Project.pool, so the cohort helpers can keep passing a path."""
-    for candidate in projects.all_projects():
-        if candidate.pool == pool:
-            return candidate
-    raise ApiError(404, "unknown project")
-
-
-def _session_facts(pool: Path) -> dict:
+def _session_facts(found: projects.Project) -> dict:
     """session_id → {attribution, device, outcome, page} straight from the index."""
-    with db.connection(project_for_pool(pool).id) as conn:
+    with db.connection(found.id) as conn:
         rows = conn.execute(
             "SELECT s.session_id, s.attribution, s.device, s.url,"
             " o.checkout_started_at, o.purchased_at, o.total, o.currency"
@@ -1899,21 +1907,18 @@ def _session_facts(pool: Path) -> dict:
         order = sessionstore._order((started, purchased, None, total, currency))
         out[sid] = {
             "attribution": attribution,
-            "device": analyze.device_class(device),
-            "outcome": analyze.outcome_class(order),
-            "page": analyze.page_path(url),
+            **ap.classify(device, order, url),
         }
     return out
 
 
-def _cut_rows(pool: Path, cohort: dict) -> list:
+def _cut_rows(found: projects.Project, cohort: dict) -> list:
     """Analyzed sessions in this cohort, with the write-up a cut reasons over."""
-    facts = _session_facts(pool)
+    facts = _session_facts(found)
     rows = []
     for entry in cohort.get("sessions") or []:
         sid = entry["session_id"]
-        session_dir = pool / sid
-        cached = analyze.read_analysis(session_dir)
+        cached = ap.session_analysis(found, sid)
         text = (cached or {}).get("text")
         if not isinstance(text, str) or not text.strip():
             continue
@@ -1933,14 +1938,14 @@ def _cut_rows(pool: Path, cohort: dict) -> list:
     return rows
 
 
-def cohort_facets(pool: Path, cohort: dict) -> dict:
+def cohort_facets(found: projects.Project, cohort: dict) -> dict:
     """The slice values actually present in this cohort, for the group picker.
 
     Counts come from analyzed sessions only, since those are the ones a cut
     can reason over — offering a filter that would select zero write-ups is
     worse than not offering it.
     """
-    return analyze.facets_from_rows(_cut_rows(pool, cohort))
+    return ap.facets_from_rows(_cut_rows(found, cohort))
 
 
 def _parse_fbclid_flag(raw: str | None) -> bool | None:
@@ -1989,10 +1994,10 @@ def _slice_from_params(
     fbclid,
 ) -> dict:
     spec: dict = {}
-    outcomes = _multi_param(outcome, analyze.OUTCOME_VALUES, "outcome")
+    outcomes = _multi_param(outcome, ap.OUTCOME_VALUES, "outcome")
     if outcomes:
         spec["outcome"] = outcomes
-    devices = _multi_param(device, analyze.DEVICE_VALUES, "device")
+    devices = _multi_param(device, ap.DEVICE_VALUES, "device")
     if devices:
         spec["device"] = devices
     if isinstance(page, str) and page.strip():
@@ -2029,7 +2034,7 @@ def sweep_expired_sessions() -> int:
             # a directory, so its cohort memberships point at write-ups that
             # are gone.
             try:
-                analyze.forget_session(project.pool, session_id)
+                ap.forget_session(project, session_id)
             except Exception as exc:
                 print(f"cohort cleanup after expiring {session_id}: {exc}")
             removed += 1

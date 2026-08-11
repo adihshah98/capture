@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from capture import db
 
-UNIT_MODULES = {"test_paths"}
+UNIT_MODULES = {"test_paths", "test_analysis_port"}
 
 
 def pytest_collection_modifyitems(config, items):
