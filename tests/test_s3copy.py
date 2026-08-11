@@ -9,7 +9,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import psycopg
 
 import pgfixture
 from test_storage import FakeS3, chunk_name
@@ -21,10 +20,7 @@ class TestCopier(unittest.TestCase):
     def setUpClass(cls):
         import shutil
 
-        from capture import db
-        from capture import projects
-        from capture import s3copy
-        from capture import storage
+        from capture import db, projects, s3copy, storage
 
         cls.s3copy, cls.storage, cls.db, cls.projects = s3copy, storage, db, projects
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-copy-"))

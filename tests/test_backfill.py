@@ -12,9 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import psycopg
-
 import pgfixture
+import psycopg
 
 
 def chunk(ts: int, window: str = "aaaa1111", suffix: str = "abc123") -> str:

@@ -10,12 +10,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pgfixture
 import psycopg
 
-from capture import analyze
-from capture import compat
-from capture import db
-import pgfixture
+from capture import analyze, compat, db
 
 
 @unittest.skipUnless(pgfixture.available(), pgfixture.UNAVAILABLE)

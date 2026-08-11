@@ -17,8 +17,9 @@ the backlog.
 import os
 import re
 import threading
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, NamedTuple, Optional
+from typing import NamedTuple
 
 SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
 
@@ -90,7 +91,7 @@ def put_chunk(storage_prefix: str, session_id: str, name: str, body: bytes) -> N
     atomic_write_bytes(local_dir(storage_prefix, session_id) / name, body)
 
 
-def open_chunk(storage_prefix: str, session_id: str, name: str) -> Optional[bytes]:
+def open_chunk(storage_prefix: str, session_id: str, name: str) -> bytes | None:
     """S3 first, then the local pool. The fallback is what lets a session
     recorded before the migration keep replaying."""
     if configured():
@@ -109,7 +110,7 @@ def open_chunk(storage_prefix: str, session_id: str, name: str) -> Optional[byte
         return None
 
 
-def chunk_url(storage_prefix: str, session_id: str, name: str) -> Optional[str]:
+def chunk_url(storage_prefix: str, session_id: str, name: str) -> str | None:
     """A presigned URL so the browser fetches from S3 rather than through the
     origin. None means the caller should serve the bytes itself."""
     if not configured():
@@ -189,6 +190,6 @@ def chunk_timestamp(name: str) -> int:
         return 0
 
 
-def chunk_window(name: str) -> Optional[str]:
+def chunk_window(name: str) -> str | None:
     parts = name.rsplit(".", 1)[0].split("-")
     return parts[1] if len(parts) == 3 else None

@@ -1,7 +1,6 @@
 """Gating in analyze_session: extraction serialized, model calls overlapping."""
 
 import asyncio
-import json
 import sys
 import tempfile
 import unittest
@@ -11,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
+
 from capture import analyze
 
 

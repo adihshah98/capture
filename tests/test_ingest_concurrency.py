@@ -34,10 +34,7 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
         # Patch the already-imported modules rather than re-importing them.
         # Popping sys.modules leaves other test files holding a stale module
         # object while the server holds a fresh one, and the two disagree.
-        from capture import db
-        from capture import projects
-        from capture import server
-        from capture import storage
+        from capture import db, projects, server, storage
 
         cls.server, cls.storage, cls.db, cls.projects = server, storage, db, projects
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-conc-"))

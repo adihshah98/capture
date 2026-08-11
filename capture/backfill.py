@@ -9,10 +9,8 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Optional
 
-from . import db
-from . import server
+from . import db, server
 
 DEFAULT_PROJECT_NAME = "Default"
 
@@ -42,8 +40,8 @@ def _json(value):
     return json.dumps(value) if value else None
 
 
-def ensure_project(conn, *, name: str, token: Optional[str] = None,
-                   meta: Optional[dict] = None, is_default: bool = False) -> str:
+def ensure_project(conn, *, name: str, token: str | None = None,
+                   meta: dict | None = None, is_default: bool = False) -> str:
     """Return the project id for a pool, creating it and its token on first run."""
     meta = meta or {}
     if token:

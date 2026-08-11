@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
 
 def _sync_dir(directory: Path) -> None:
@@ -16,7 +16,7 @@ def _sync_dir(directory: Path) -> None:
         os.close(fd)
 
 
-def atomic_write_text(path: Union[str, Path], text: str) -> None:
+def atomic_write_text(path: str | Path, text: str) -> None:
     """Write `text` to `path` so a reader or a crash never sees a partial file."""
     path = Path(path)
     directory = path.parent
@@ -35,11 +35,11 @@ def atomic_write_text(path: Union[str, Path], text: str) -> None:
     _sync_dir(directory)
 
 
-def atomic_write_json(path: Union[str, Path], value: Any, **dumps_kwargs) -> None:
+def atomic_write_json(path: str | Path, value: Any, **dumps_kwargs) -> None:
     atomic_write_text(path, json.dumps(value, **dumps_kwargs))
 
 
-def atomic_write_bytes(path: Union[str, Path], data: bytes) -> None:
+def atomic_write_bytes(path: str | Path, data: bytes) -> None:
     path = Path(path)
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)

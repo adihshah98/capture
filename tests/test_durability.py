@@ -4,8 +4,6 @@ into the shared default pool."""
 
 import gzip
 import json
-import os
-import subprocess
 import sys
 import tempfile
 import threading
@@ -17,8 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
-from capture.fsutil import atomic_write_json, atomic_write_text
 from test_server import ServerCase, request
+
+from capture.fsutil import atomic_write_json, atomic_write_text
 
 
 def temp_files(directory: Path) -> list:

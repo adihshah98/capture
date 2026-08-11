@@ -15,8 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from capture import storage
 from test_storage import FakeS3, chunk_name
+
+from capture import storage
 
 
 class Project:

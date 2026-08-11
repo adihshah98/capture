@@ -19,7 +19,6 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
 
 import psycopg
 
@@ -33,7 +32,7 @@ UNAVAILABLE = (
 )
 
 
-def _binary(name: str) -> Optional[str]:
+def _binary(name: str) -> str | None:
     """Newest Postgres on the box; keg-only formulae are not on PATH."""
     versioned = sorted(
         glob.glob(f"/usr/local/opt/postgresql@*/bin/{name}")
@@ -255,8 +254,7 @@ class CohortStoreMixin:
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        from capture import db
-        from capture import projects
+        from capture import db, projects
 
         cls._pg_admin, cls._pg_app = fresh_database()
         cls._pg_project = seed_default_project(cls._pg_admin)

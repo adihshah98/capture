@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
+
 from capture import analyze
 from capture.analyze import store as analyze_store
 
@@ -143,7 +144,7 @@ class TestConcurrency(StoreCase):
         def wrapped(i):
             try:
                 fn(i)
-            except Exception as exc:  # noqa: BLE001 - the assertion is "none"
+            except Exception as exc:
                 errors.append(repr(exc))
 
         threads = [threading.Thread(target=wrapped, args=(i,)) for i in range(n)]
@@ -193,7 +194,7 @@ class TestConcurrency(StoreCase):
             while not stop.is_set():
                 try:
                     analyze.write_cohort(self.pool, cohort(n=50, status="running"))
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     errors.append(repr(exc))
 
         def reader():
@@ -201,7 +202,7 @@ class TestConcurrency(StoreCase):
                 try:
                     got = analyze.read_cohort(self.pool, "cohort-1")
                     seen.append(None if got is None else len(got["sessions"]))
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     errors.append(repr(exc))
 
         threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
@@ -449,7 +450,7 @@ class TestConcurrentMarks(StoreCase):
                 analyze.mark_cohort_session(
                     self.pool, copy, copy["sessions"][i], "done", analysis="analysis.json"
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 errors.append(repr(exc))
 
         threads = [threading.Thread(target=mark, args=(i,)) for i in range(30)]

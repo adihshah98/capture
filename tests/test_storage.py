@@ -4,7 +4,6 @@ The S3 backend runs against a fake client. The point is to exercise key
 construction, the disk fallback and the merged listing — not boto3.
 """
 
-import json
 import sys
 import tempfile
 import unittest

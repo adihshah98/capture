@@ -6,7 +6,6 @@ customer's recordings.
 """
 
 import json
-from typing import Optional
 
 from . import db
 
@@ -28,7 +27,7 @@ FILTERS = {
 }
 
 
-def _order(row: tuple) -> Optional[dict]:
+def _order(row: tuple) -> dict | None:
     started, purchased, order_id, total, currency = row
     order = {}
     if started is not None:
@@ -176,7 +175,7 @@ def record_chunk(project_id, session_id, *, window_id, first_ts, last_ts, active
         )
 
 
-def record_order(project_id, session_id, event: str, payload: dict, now: int) -> Optional[dict]:
+def record_order(project_id, session_id, event: str, payload: dict, now: int) -> dict | None:
     """Returns the order as stored, or None when the session is unknown."""
     with db.connection(project_id) as conn:
         known = conn.execute(
@@ -220,7 +219,7 @@ def record_order(project_id, session_id, event: str, payload: dict, now: int) ->
     return _order(row) if row else None
 
 
-def get(project_id, session_id: str) -> Optional[dict]:
+def get(project_id, session_id: str) -> dict | None:
     with db.connection(project_id) as conn:
         row = conn.execute(
             f"SELECT {SESSION_COLUMNS} {FROM_SESSIONS} WHERE s.session_id = %s", (session_id,)
@@ -228,8 +227,8 @@ def get(project_id, session_id: str) -> Optional[dict]:
     return row_to_info(row) if row else None
 
 
-def listing(project_id, *, limit: int, cursor: Optional[str] = None,
-            filter: Optional[str] = None, q: Optional[str] = None) -> dict:
+def listing(project_id, *, limit: int, cursor: str | None = None,
+            filter: str | None = None, q: str | None = None) -> dict:
     where, params = ["TRUE"], []
     if filter in FILTERS:
         where.append(FILTERS[filter])

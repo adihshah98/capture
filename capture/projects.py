@@ -12,7 +12,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from . import db
 
@@ -24,7 +23,7 @@ PROJECTS_DIR = DATA_ROOT / "projects"
 CACHE_TTL_S = float(os.environ.get("CAPTURE_PROJECT_CACHE_TTL_S", "5"))
 
 _lock = threading.Lock()
-_cache: Optional[list] = None
+_cache: list | None = None
 _cache_at = 0.0
 
 
@@ -37,11 +36,11 @@ class ProjectsUnavailable(Exception):
 class Project:
     id: str
     name: str
-    org_id: Optional[str]
+    org_id: str | None
     domains: tuple
     storage_prefix: str
     is_default: bool
-    config: Optional[dict] = None
+    config: dict | None = None
     tokens: tuple = field(default_factory=tuple)
 
     @property
@@ -105,7 +104,7 @@ def invalidate() -> None:
         _cache_at = 0.0
 
 
-def by_token(token: Optional[str]) -> Optional[Project]:
+def by_token(token: str | None) -> Project | None:
     """The project a recording belongs to. A tokenless batch only resolves when
     a default project exists, which is what single-tenant installs use."""
     if not token:
@@ -119,21 +118,21 @@ def by_token(token: Optional[str]) -> Optional[Project]:
     return None
 
 
-def by_handle(handle: Optional[str]) -> Optional[Project]:
+def by_handle(handle: str | None) -> Project | None:
     for project in all_projects():
         if project.handle == (handle or ""):
             return project
     return None
 
 
-def by_id(project_id: str) -> Optional[Project]:
+def by_id(project_id: str) -> Project | None:
     for project in all_projects():
         if project.id == str(project_id):
             return project
     return None
 
 
-def default() -> Optional[Project]:
+def default() -> Project | None:
     for project in all_projects():
         if project.is_default:
             return project

@@ -2,14 +2,13 @@ import os
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
 
 import psycopg
 from psycopg_pool import ConnectionPool
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
-_pool: Optional[ConnectionPool] = None
+_pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()
 
 
@@ -86,7 +85,7 @@ def applied_versions(conn) -> set:
     return {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
 
 
-def migrate(url: Optional[str] = None) -> list:
+def migrate(url: str | None = None) -> list:
     """Apply pending migrations in filename order. Each runs in its own
     transaction so a failure leaves the ones before it committed."""
     target = url or admin_url()

@@ -14,9 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import psycopg
-
 import pgfixture
+import psycopg
 from test_storage import FakeS3, chunk_name
 
 
@@ -26,10 +25,7 @@ class TestSweepClearsBothBackends(unittest.TestCase):
     def setUpClass(cls):
         import shutil
 
-        from capture import db
-        from capture import projects
-        from capture import server
-        from capture import storage
+        from capture import db, projects, server, storage
 
         cls.server, cls.storage, cls.db, cls.projects = server, storage, db, projects
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-retention-"))

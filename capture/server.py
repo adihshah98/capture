@@ -16,12 +16,10 @@ import urllib.request
 import zlib
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
-    FileResponse,
     JSONResponse,
     RedirectResponse,
     Response,
@@ -38,14 +36,10 @@ try:
 except ImportError:
     pass
 
-from . import analyze
-from . import compat
-from . import db
-from . import projects
-from . import sessionstore
-from . import storage
+from . import analyze, compat, db, projects, sessionstore, storage
+from .fsutil import atomic_write_bytes, atomic_write_text
 from .projects import ProjectsUnavailable
-from .fsutil import atomic_write_bytes, atomic_write_json, atomic_write_text
+
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -211,7 +205,7 @@ def make_session(payload: dict) -> str:
     raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return f"{raw}.{_sign(raw)}"
 
-def read_session(cookie: Optional[str]) -> Optional[dict]:
+def read_session(cookie: str | None) -> dict | None:
     if not cookie or "." not in cookie:
         return None
     raw, sig = cookie.rsplit(".", 1)
@@ -237,7 +231,7 @@ def load_projects() -> dict:
     except Exception as exc:
         raise ProjectsUnavailable(f"cannot read projects: {exc}") from exc
 
-def require_allowed_domain(request: Request, project: Optional[projects.Project]) -> None:
+def require_allowed_domain(request: Request, project: projects.Project | None) -> None:
     domains = list(project.domains) if project else []
     if not domains:
         return
@@ -250,7 +244,7 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
 
-def chunk_window(path) -> Optional[str]:
+def chunk_window(path) -> str | None:
     parts = path.name.rsplit(".", 1)[0].split("-")
     return parts[1] if len(parts) == 3 else None
 MAX_BODY_BYTES = 50 * 1024 * 1024
@@ -317,16 +311,16 @@ async def projects_unavailable_response(_request, exc: ProjectsUnavailable) -> J
     print(f"projects: refusing to serve — {exc}")
     return JSONResponse({"error": "project configuration unavailable"}, status_code=503)
 
-def resolve_project(handle: Optional[str]) -> projects.Project:
+def resolve_project(handle: str | None) -> projects.Project:
     found = projects.by_handle(handle)
     if found is None:
         raise ApiError(404, "unknown project")
     return found
 
-def resolve_pool(project: Optional[str]) -> Path:
+def resolve_pool(project: str | None) -> Path:
     return resolve_project(project).pool
 
-def resolve_session(session_id: str, project: Optional[str]) -> Path:
+def resolve_session(session_id: str, project: str | None) -> Path:
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
     path = resolve_pool(project) / session_id
@@ -338,8 +332,8 @@ def resolve_session(session_id: str, project: Optional[str]) -> Path:
 async def ingest(
     request: Request,
     session_id: str = Query(""),
-    compression: Optional[str] = Query(None),
-    token: Optional[str] = Query(None),
+    compression: str | None = Query(None),
+    token: str | None = Query(None),
 ):
     if READ_ONLY:
         raise ApiError(403, "this server is read-only and does not accept recordings")
@@ -437,7 +431,7 @@ INTERACTIONS_FILE = "interactions.json"
 
 DEVICE_FILE = "device.json"
 
-def read_device(events: list) -> Optional[dict]:
+def read_device(events: list) -> dict | None:
     for event in events:
         if not isinstance(event, dict) or event.get("type") != 4:
             continue
@@ -469,7 +463,7 @@ def count_clicks(events: list) -> tuple:
 async def order_event(
     request: Request,
     session_id: str = Query(""),
-    token: Optional[str] = Query(None),
+    token: str | None = Query(None),
 ):
 
     if READ_ONLY:
@@ -546,7 +540,7 @@ def healthz():
     )
 
 @app.get("/config")
-def remote_config(token: Optional[str] = Query(None)):
+def remote_config(token: str | None = Query(None)):
 
     project = projects.by_token(token) if token else None
     if project is not None and project.config:
@@ -581,7 +575,7 @@ ACTIVE_SOURCES = {1, 2, 3, 4, 5, 6, 7, 12}
 SNAPSHOT_META_WINDOW_MS = 500
 WINDOW_STATE_FILE = "window-state.json"
 
-def last_active_scan(events: list, state: dict) -> Optional[int]:
+def last_active_scan(events: list, state: dict) -> int | None:
     """Mirror the player's buildSegments activity rules; `state` carries the
     per-window href/nav position across chunks."""
     nav = state.get("nav", -(10**15))
@@ -610,7 +604,7 @@ def last_active_scan(events: list, state: dict) -> Optional[int]:
     state["nav"] = nav
     return int(last) if last is not None else None
 
-def event_span(events: list) -> Optional[tuple]:
+def event_span(events: list) -> tuple | None:
     ts = [
         e["timestamp"]
         for e in events
@@ -618,7 +612,7 @@ def event_span(events: list) -> Optional[tuple]:
     ]
     return (int(min(ts)), int(max(ts))) if ts else None
 
-def window_duration(states: dict) -> Optional[int]:
+def window_duration(states: dict) -> int | None:
     """Clamped span of the primary (biggest) window — the one the player
     opens by default."""
     spans = [w for w in states.values() if isinstance(w.get("first"), (int, float))]
@@ -637,13 +631,13 @@ def chunk_files(session_dir: Path) -> list:
         key=chunk_timestamp,
     )
 
-def read_pool(project: Optional[str]) -> Optional[Path]:
+def read_pool(project: str | None) -> Path | None:
     found = projects.by_handle(project)
     return found.pool if found else None
 
 ATTRIBUTION_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid")
 
-def parse_attribution(url: Optional[str]) -> Optional[dict]:
+def parse_attribution(url: str | None) -> dict | None:
     """Pull utm_* / fbclid from an entry URL for indexing and segment rollups."""
     if not isinstance(url, str) or not url.strip():
         return None
@@ -697,7 +691,7 @@ def session_states(entry: Path) -> tuple:
         state["bytes"] = state.get("bytes", 0) + chunk.stat().st_size
     return states, first, last, active
 
-def session_info(entry: Path) -> Optional[dict]:
+def session_info(entry: Path) -> dict | None:
     chunks = chunk_files(entry)
     if not chunks:
         return None
@@ -737,7 +731,7 @@ def session_info(entry: Path) -> Optional[dict]:
         info["attribution"] = attribution
     return info
 
-def workos_call(path: str, payload: Optional[dict] = None, bearer: bool = False) -> dict:
+def workos_call(path: str, payload: dict | None = None, bearer: bool = False) -> dict:
     req = urllib.request.Request(
         WORKOS_API + path,
         data=json.dumps(payload).encode() if payload is not None else None,
@@ -807,7 +801,7 @@ def login():
     return response
 
 @app.get("/auth/callback")
-def auth_callback(request: Request, code: Optional[str] = Query(None), state: Optional[str] = Query(None)):
+def auth_callback(request: Request, code: str | None = Query(None), state: str | None = Query(None)):
     if not WORKOS_ENABLED:
         raise ApiError(503, "login not configured")
     if not code or not state or state != request.cookies.get(STATE_COOKIE):
@@ -834,14 +828,14 @@ def logout():
     response.delete_cookie(SESSION_COOKIE)
     return response
 
-def allowed_projects(request: Request) -> Optional[set]:
+def allowed_projects(request: Request) -> set | None:
     auth = getattr(request.state, "auth", None)
     if auth is None or (auth.get("email") or "").lower() in OPERATORS:
         return None
     orgs = user_orgs(auth.get("user_id") or "")
     return {p.handle for p in projects.for_orgs(orgs)}
 
-def require_read_access(request: Request, project: Optional[str]) -> None:
+def require_read_access(request: Request, project: str | None) -> None:
     allowed = allowed_projects(request)
     if allowed is not None and (not project or project not in allowed):
         raise ApiError(403, "not your project")
@@ -866,11 +860,11 @@ SESSION_FILTERS = sessionstore.FILTERS
 @app.get("/api/sessions")
 def list_sessions(
     request: Request,
-    project: Optional[str] = Query(None),
+    project: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
-    cursor: Optional[str] = Query(None),
-    filter: Optional[str] = Query(None),
-    q: Optional[str] = Query(None),
+    cursor: str | None = Query(None),
+    filter: str | None = Query(None),
+    q: str | None = Query(None),
 ):
     require_read_access(request, project)
     try:
@@ -881,7 +875,7 @@ def list_sessions(
         raise ApiError(400, "bad cursor")
 
 @app.get("/api/sessions/{session_id}")
-def get_session(request: Request, session_id: str, project: Optional[str] = Query(None)):
+def get_session(request: Request, session_id: str, project: str | None = Query(None)):
     require_read_access(request, project)
     found = resolve_project(project)
     info = sessionstore.get(found.id, session_id) or session_info(
@@ -892,7 +886,7 @@ def get_session(request: Request, session_id: str, project: Optional[str] = Quer
     return info
 
 @app.delete("/api/sessions/{session_id}")
-def delete_session(request: Request, session_id: str, project: Optional[str] = Query(None)):
+def delete_session(request: Request, session_id: str, project: str | None = Query(None)):
 
     require_read_access(request, project)
     found = resolve_project(project)
@@ -913,7 +907,7 @@ def delete_session(request: Request, session_id: str, project: Optional[str] = Q
     return {"status": "deleted", "session_id": session_id, "bytes_freed": freed}
 
 @app.get("/api/sessions/{session_id}/chunks")
-def session_chunks(request: Request, session_id: str, project: Optional[str] = Query(None)):
+def session_chunks(request: Request, session_id: str, project: str | None = Query(None)):
     require_read_access(request, project)
     found = resolve_project(project)
     chunks = storage.list_chunks(found.storage_prefix, session_id)
@@ -939,7 +933,7 @@ def session_chunks(request: Request, session_id: str, project: Optional[str] = Q
     return {"session_id": session_id, "url": url, "windows": windows, "chunks": manifest}
 
 @app.get("/api/sessions/{session_id}/chunks/{chunk_name}")
-def session_chunk(request: Request, session_id: str, chunk_name: str, project: Optional[str] = Query(None)):
+def session_chunk(request: Request, session_id: str, chunk_name: str, project: str | None = Query(None)):
     require_read_access(request, project)
     if not SAFE_ID.match(session_id) or not SAFE_CHUNK.match(chunk_name):
         raise ApiError(400, "invalid id")
@@ -1136,7 +1130,7 @@ async def _resume_cohort_batch(pool: Path, cohort_id: str) -> None:
         _cohort_tasks.pop(key, None)
 
 @app.get("/api/sessions/{session_id}/analysis")
-def get_analysis(request: Request, session_id: str, project: Optional[str] = Query(None)):
+def get_analysis(request: Request, session_id: str, project: str | None = Query(None)):
     require_read_access(request, project)
     session_dir = resolve_session(session_id, project)
     cached = analyze.read_analysis(session_dir)
@@ -1164,7 +1158,7 @@ def get_analysis(request: Request, session_id: str, project: Optional[str] = Que
 async def create_analysis(
     request: Request,
     session_id: str,
-    project: Optional[str] = Query(None),
+    project: str | None = Query(None),
     force: bool = Query(False),
 ):
     require_read_access(request, project)
@@ -1175,7 +1169,7 @@ async def create_analysis(
         return JSONResponse({"status": "running"}, status_code=202)
     return result
 
-def _resolve_cohort_or_404(pool: Path, cohort_id: Optional[str]) -> dict:
+def _resolve_cohort_or_404(pool: Path, cohort_id: str | None) -> dict:
     """A cohort by id, or the newest one when the caller did not name one."""
     if cohort_id:
         cohort = analyze.read_cohort(pool, cohort_id)
@@ -1190,7 +1184,7 @@ def _resolve_cohort_or_404(pool: Path, cohort_id: Optional[str]) -> dict:
 
 
 @app.get("/api/cohorts")
-def list_cohorts(request: Request, project: Optional[str] = Query(None)):
+def list_cohorts(request: Request, project: str | None = Query(None)):
     """Every cohort in this pool, newest first — membership counts only."""
     require_read_access(request, project)
     pool = resolve_pool(project)
@@ -1211,7 +1205,7 @@ def list_cohorts(request: Request, project: Optional[str] = Query(None)):
 
 
 @app.get("/api/cohorts/{cohort_id}")
-def get_cohort(request: Request, cohort_id: str, project: Optional[str] = Query(None)):
+def get_cohort(request: Request, cohort_id: str, project: str | None = Query(None)):
     require_read_access(request, project)
     pool = resolve_pool(project)
     cohort = _resolve_cohort_or_404(pool, cohort_id)
@@ -1225,7 +1219,7 @@ def get_cohort(request: Request, cohort_id: str, project: Optional[str] = Query(
 
 
 @app.patch("/api/cohorts/{cohort_id}")
-async def rename_cohort(request: Request, cohort_id: str, project: Optional[str] = Query(None)):
+async def rename_cohort(request: Request, cohort_id: str, project: str | None = Query(None)):
     """Rename a cohort. Membership is frozen — only the label is editable."""
     require_read_access(request, project)
     pool = resolve_pool(project)
@@ -1245,7 +1239,7 @@ async def rename_cohort(request: Request, cohort_id: str, project: Optional[str]
 
 
 @app.delete("/api/cohorts/{cohort_id}")
-async def delete_cohort(request: Request, cohort_id: str, project: Optional[str] = Query(None)):
+async def delete_cohort(request: Request, cohort_id: str, project: str | None = Query(None)):
     """Delete a cohort and its cached cuts. Per-session write-ups are kept."""
     require_read_access(request, project)
     pool = resolve_pool(project)
@@ -1280,7 +1274,7 @@ async def delete_cohort(request: Request, cohort_id: str, project: Optional[str]
 @app.get("/api/facets")
 def get_pool_facets(
     request: Request,
-    project: Optional[str] = Query(None),
+    project: str | None = Query(None),
     min_duration_ms: int = Query(analyze.COHORT_MIN_DURATION_MS, ge=0),
 ):
     """Facet values available in the pool — same fields as the Insights cut picker."""
@@ -1293,34 +1287,34 @@ def get_pool_facets(
 @app.post("/api/cohorts")
 async def create_cohort(
     request: Request,
-    project: Optional[str] = Query(None),
-    purchased: Optional[int] = Query(None, ge=0, le=analyze.COHORT_MAX_SESSIONS),
-    all_n: Optional[int] = Query(None, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="all"),
+    project: str | None = Query(None),
+    purchased: int | None = Query(None, ge=0, le=analyze.COHORT_MAX_SESSIONS),
+    all_n: int | None = Query(None, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="all"),
     any_n: int = Query(0, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="any"),
     a_n: int = Query(0, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="a"),
     b_n: int = Query(0, ge=0, le=analyze.COHORT_MAX_SESSIONS, alias="b"),
     min_duration_ms: int = Query(analyze.COHORT_MIN_DURATION_MS, ge=0),
     url_contains: str = Query(analyze.COHORT_URL_CONTAINS),
-    start_ms: Optional[int] = Query(None, ge=0),
-    end_ms: Optional[int] = Query(None, ge=0),
+    start_ms: int | None = Query(None, ge=0),
+    end_ms: int | None = Query(None, ge=0),
     order: str = Query(analyze.COHORT_ORDER_LATEST),
-    label: Optional[str] = Query(None, max_length=120),
-    outcome: Optional[list] = Query(None),
-    device: Optional[list] = Query(None),
-    page: Optional[str] = Query(None),
-    utm_source: Optional[str] = Query(None),
-    utm_medium: Optional[str] = Query(None),
-    utm_campaign: Optional[str] = Query(None),
-    utm_content: Optional[str] = Query(None),
-    fbclid: Optional[str] = Query(None),
-    b_outcome: Optional[list] = Query(None),
-    b_device: Optional[list] = Query(None),
-    b_page: Optional[str] = Query(None),
-    b_utm_source: Optional[str] = Query(None),
-    b_utm_medium: Optional[str] = Query(None),
-    b_utm_campaign: Optional[str] = Query(None),
-    b_utm_content: Optional[str] = Query(None),
-    b_fbclid: Optional[str] = Query(None),
+    label: str | None = Query(None, max_length=120),
+    outcome: list | None = Query(None),
+    device: list | None = Query(None),
+    page: str | None = Query(None),
+    utm_source: str | None = Query(None),
+    utm_medium: str | None = Query(None),
+    utm_campaign: str | None = Query(None),
+    utm_content: str | None = Query(None),
+    fbclid: str | None = Query(None),
+    b_outcome: list | None = Query(None),
+    b_device: list | None = Query(None),
+    b_page: str | None = Query(None),
+    b_utm_source: str | None = Query(None),
+    b_utm_medium: str | None = Query(None),
+    b_utm_campaign: str | None = Query(None),
+    b_utm_content: str | None = Query(None),
+    b_fbclid: str | None = Query(None),
 ):
     """Sample a new cohort only — does not start analysis. Prior cohorts are kept.
 
@@ -1434,7 +1428,7 @@ async def create_cohort(
 async def start_cohort_analysis(
     request: Request,
     cohort_id: str,
-    project: Optional[str] = Query(None),
+    project: str | None = Query(None),
     force: bool = Query(False),
 ):
     """Start (or resume) analysis for an existing idle/paused cohort."""
@@ -1465,7 +1459,7 @@ async def start_cohort_analysis(
 async def pause_cohort_analysis(
     request: Request,
     cohort_id: str,
-    project: Optional[str] = Query(None),
+    project: str | None = Query(None),
 ):
     """Pause an in-flight cohort analysis; completed session write-ups are kept."""
     require_read_access(request, project)
@@ -1495,7 +1489,7 @@ async def retry_cohort_session(
     request: Request,
     cohort_id: str,
     session_id: str,
-    project: Optional[str] = Query(None),
+    project: str | None = Query(None),
 ):
     """Re-run one cohort row after it failed, without re-sampling the cohort."""
     require_read_access(request, project)
@@ -1598,7 +1592,7 @@ async def _run_cut_job(pool: Path, cohort_id: str, rows: list, slice_spec, key: 
 
 @app.get("/api/cohorts/{cohort_id}/facets")
 def get_cohort_facets(
-    request: Request, cohort_id: str, project: Optional[str] = Query(None)
+    request: Request, cohort_id: str, project: str | None = Query(None)
 ):
     """Slice values present in this cohort, so the picker only offers real ones."""
     require_read_access(request, project)
@@ -1612,17 +1606,17 @@ def get_cohort_facets(
 async def get_cut(
     request: Request,
     cohort_id: str,
-    project: Optional[str] = Query(None),
+    project: str | None = Query(None),
     # The group is an intersection of these; outcome and device take repeats
     # or a comma list, so "purchased+checkout on mobile" is expressible.
-    outcome: Optional[list] = Query(None),
-    device: Optional[list] = Query(None),
-    page: Optional[str] = Query(None),
-    utm_source: Optional[str] = Query(None),
-    utm_medium: Optional[str] = Query(None),
-    utm_campaign: Optional[str] = Query(None),
-    utm_content: Optional[str] = Query(None),
-    fbclid: Optional[str] = Query(None),
+    outcome: list | None = Query(None),
+    device: list | None = Query(None),
+    page: str | None = Query(None),
+    utm_source: str | None = Query(None),
+    utm_medium: str | None = Query(None),
+    utm_campaign: str | None = Query(None),
+    utm_content: str | None = Query(None),
+    fbclid: str | None = Query(None),
     run: bool = Query(False),
     refresh: bool = Query(False),
 ):
@@ -1710,16 +1704,16 @@ def _sse(event: str, data: dict) -> str:
 async def post_cohort_chat(
     request: Request,
     cohort_id: str,
-    project: Optional[str] = Query(None),
+    project: str | None = Query(None),
     # Same group selection as /cut — the chat answers about the cut on screen.
-    outcome: Optional[list] = Query(None),
-    device: Optional[list] = Query(None),
-    page: Optional[str] = Query(None),
-    utm_source: Optional[str] = Query(None),
-    utm_medium: Optional[str] = Query(None),
-    utm_campaign: Optional[str] = Query(None),
-    utm_content: Optional[str] = Query(None),
-    fbclid: Optional[str] = Query(None),
+    outcome: list | None = Query(None),
+    device: list | None = Query(None),
+    page: str | None = Query(None),
+    utm_source: str | None = Query(None),
+    utm_medium: str | None = Query(None),
+    utm_campaign: str | None = Query(None),
+    utm_content: str | None = Query(None),
+    fbclid: str | None = Query(None),
 ):
     """Ask a question about one group's write-ups. Streams the answer as SSE.
 
@@ -1909,7 +1903,7 @@ def cohort_facets(pool: Path, cohort: dict) -> dict:
     return analyze.facets_from_rows(_cut_rows(pool, cohort))
 
 
-def _parse_fbclid_flag(raw: Optional[str]) -> Optional[bool]:
+def _parse_fbclid_flag(raw: str | None) -> bool | None:
     if raw is None or raw == "":
         return None
     value = str(raw).strip().lower()

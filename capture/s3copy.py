@@ -21,8 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import projects
-from . import storage
+from . import projects, storage
 
 DEFAULT_CONCURRENCY = int(os.environ.get("CAPTURE_S3_COPY_CONCURRENCY", "8"))
 

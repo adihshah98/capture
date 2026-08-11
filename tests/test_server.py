@@ -25,6 +25,7 @@ sys.path.insert(0, str(REPO))
 from capture import analyze
 from capture.analyze import store as analyze_store
 
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

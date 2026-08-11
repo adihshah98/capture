@@ -4,14 +4,13 @@ import hashlib
 import hmac
 import http.server
 import json
+import sys
 import threading
 import time
 import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
-
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
