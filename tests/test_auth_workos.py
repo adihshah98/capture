@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
-from test_server import ServerCase, request
+from servercase import ServerCase, request
 
 SECRET = "test-session-secret"
 

@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
-from test_server import ServerCase, request
+from servercase import ServerCase, request
 
 from capture.fsutil import atomic_write_json, atomic_write_text
 

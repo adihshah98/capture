@@ -1,0 +1,53 @@
+"""Per-session analysis: what /api/sessions/{id}/analysis reports and refuses."""
+
+import json
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from servercase import ServerCase, request
+
+from capture import analyze
+
+
+class TestAnalysisStatus(ServerCase):
+    # Isolate from a developer machine that has GEMINI_API_KEY in the environment.
+    env = {"GEMINI_API_KEY": ""}
+
+    def test_get_returns_cached_analysis(self):
+        sid = "a" * 32
+        self.assertEqual(self.ingest(sid), 200)
+        session = self.data_dir / "sessions" / sid
+        analyze.write_analysis(
+            session, {"text": "hello", "model": "test", "frame_count": 1, "warnings": []}
+        )
+        status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["text"], "hello")
+        self.assertEqual(data["status"], "done")
+
+    def test_get_returns_running_job(self):
+        sid = "b" * 32
+        self.assertEqual(self.ingest(sid), 200)
+        session = self.data_dir / "sessions" / sid
+        analyze.write_job(session, "running")
+        status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "running")
+
+    def test_post_without_key_is_unavailable(self):
+        sid = "c" * 32
+        self.assertEqual(self.ingest(sid), 200)
+        status, body = request(
+            f"{self.base}/api/sessions/{sid}/analysis?force=1", method="POST", data=b""
+        )
+        self.assertEqual(status, 503)
+        self.assertIn("not configured", json.loads(body)["error"])
+
+
+if __name__ == "__main__":
+    unittest.main()
