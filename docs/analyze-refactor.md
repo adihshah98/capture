@@ -16,8 +16,11 @@ Branch `cleanups`, five commits past `fbbc156`:
 | `f74531a` | `page_path` returns `None` for unreadable entry URLs instead of `/` |
 | `14ce676` | **Tier 2.1**: cohort state into SQLite (below) |
 | `084ade9` | Deleting a session drops it from the cohorts that held it |
+| `60759c8` | **Tier 2.2**: the cohort state machine (below) |
+| `e8b1cc4` | Per-session marks write one row, not the whole document |
+| `a1b4063` | A row claiming done with no write-up is `stale`, not done |
 
-327 tests pass (`npm test` runs build + JS + Python; `.venv/bin/python -m
+364 tests pass (`npm test` runs build + JS + Python; `.venv/bin/python -m
 unittest discover -s tests` for Python alone).
 
 **Not ours:** atomic writes (`os.replace` on every `write_text`) are being done
@@ -139,31 +142,59 @@ and `write_cohort`'s DELETE-then-INSERT membership replacement — cheap locally
 expensive over a network, so the per-row `update_session_status` path should
 become the only hot-loop write.
 
-### 2. An explicit state machine
+### 2. An explicit state machine — **done** (`60759c8`, `e8b1cc4`, `a1b4063`)
 
-`enrich_cohort_status` (364–457) is 90 lines *inferring* status by scanning the
-filesystem, because status is written from ~10 places with no shared discipline.
-The comments admit it — "Stay sampled-until-started unless work is somehow
-already in flight", "Keep paused until the user hits Start again (even if jobs
-look stale)". Those are patches for states the code can reach but cannot name.
+`CohortState` declares the six statuses that are actually persisted;
+`COHORT_TRANSITIONS` declares the legitimate moves; `project_cohort_status`
+replaced the 20-line if/elif chain with four rules (now five) in priority
+order. It is a projection, not an inference: everything it needs is in the
+tally, and it does not touch the filesystem.
 
-Want: a `CohortState` enum and a declared transition table, with one function
-owning transitions. `idle → queued → extracting → submitted → applying →
-done | error | paused`. Then `enrich_cohort_status` is a projection, not an
-inference engine, and "somehow already in flight" becomes an assertion you can
-see rather than a silent status flip.
+**The wider vocabulary was not adopted.** `extracting` / `submitted` /
+`applying` are phases of `run_cohort_job`'s control flow that nothing writes
+down; declaring them would have invented states no code can produce or observe.
+If a stuck cohort ever needs to be legible ("submitted 40min ago"), that starts
+by persisting the phase, not by naming it here.
 
-`persistable_cohort` (from `5a8002e`) is the seam: it already separates the
-durable record from the response view. A state machine makes that a type
-distinction instead of a field list.
+**Refactored against a characterization baseline, not by reading.** The whole
+input space was enumerated and frozen into
+`tests/fixtures/cohort_status_baseline.json` *before* any change. This paid for
+itself immediately: a test asserting an errored cohort with queued work reports
+`running` failed — it reports `error`, because only `RUNNING` and `QUEUED` are
+revivable and a leftover queued row must not silently resurrect an errored
+cohort. Two other behaviors that look like bugs are deliberate and now
+documented: `DONE` and `ERROR` are recomputed rather than frozen, because the
+stored status goes stale and the session rows are the truth.
 
-Related, still open: `run_cohort_job` mutates a shared in-memory `cohort` dict
-across N concurrent `extract_one` coroutines while other code re-reads it, so
-there are two sources of truth that diverge under any concurrent write. The
-store makes this *fixable* — `update_session_status` writes one row, so those
-coroutines no longer need to share a dict at all — but the callers still pass
-the dict around and were left alone in `14ce676` to keep that commit to a
-storage swap. Converting them is the natural first half of this section.
+**Enforcement is the tests, not an exception.** `cohort_transition` logs an
+undeclared move rather than raising — it runs inside a live run with a paid
+batch in flight, and an unforeseen move must not strand it. Every test in
+`test_cohort_batch.py` asserts the pipeline made only declared moves, and a
+server-level test drives create/start/pause/start over HTTP and scans the
+server log. That last one needs `PYTHONUNBUFFERED` in the test env: `print()`
+is block-buffered to a file, so the assertion passed vacuously until fixed.
+
+**The shared dict is gone** (`e8b1cc4`). `mark_cohort_session` writes the one
+row that changed instead of handing the whole document to `write_cohort`.
+Before: two concurrent marks lost one, and under 30 threads 29 were lost.
+Converted the four concurrent paths (`extract_one`, `apply_cohort_batch`'s
+result loop, `_cohort_sync_model`, and `_collect_cohort_batch`'s
+reset-to-running — that last one had been pushing a stale copy back over
+completions `apply_cohort_batch` had already written). Full-document writes in
+the pipeline: 16 → 8. `mark_cohort_paused` and the pre-scan keep theirs; both
+are sequential loops that set cohort status and every row together.
+
+**Known bug 4b is fixed** (`a1b4063`). `SESSION_STALE` names a row that claims
+done with no `analysis.json` behind it. It counts as outstanding work, so the
+cohort stops reporting a result it cannot show, and since the row is no longer
+`done`, `attach_cohort_insights` skips it and it cannot become cut evidence.
+The baseline was doubled to 320 cases covering both the with- and
+without-write-up halves, since the original only exercised the latter — which
+is why the bug survived the first pass.
+
+`persistable_cohort` (from `5a8002e`) remains the seam between the durable
+record and the response view. Making that a type distinction rather than a
+field list is still open, and is the natural companion to §3.
 
 ### 3. Package, with prompts as files
 
@@ -211,14 +242,9 @@ From the audit, not yet fixed. Numbers are `analyze.py` lines.
    outcome/device/page) or report the shortfall.
 4. **`pool_facets` (1952)** `fetchall()` over the whole pool with no LIMIT, in the
    event-loop thread.
-4b. **`enrich_cohort_status` trusts the stored status when disk says nothing.**
-   The `elif row.get("status") == "done": done += 1` fall-through means a row
-   counts as analyzed with no `analysis.json` behind it. `084ade9` removed the
-   way that mattered most (deleted sessions), but the fall-through is still
-   there and will also fire if a write-up is removed without the session —
-   `clear_analysis` does exactly that on a re-analyze. Worth an explicit
-   "claims done but has no write-up" state in the §2 machine rather than a
-   silent count.
+4b. ~~**`enrich_cohort_status` trusts the stored status when disk says
+   nothing.**~~ Fixed in `a1b4063` — see §2. The row now reports
+   `SESSION_STALE` and counts as outstanding work.
 5. **Silent `except Exception`** in `read_analysis`, `read_job`,
    `load_session_digest`, `_parse_index_json`, `page_path`,
    `_session_attribution`. Disk error, permissions error and absent file are
