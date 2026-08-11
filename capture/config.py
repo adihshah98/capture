@@ -4,6 +4,11 @@ Its own module so the routers, the retention sweep and the ingest limits can be
 read without importing the web app — server.py used to hold all of these, which
 meant anything needing one of them had to import 27 routes to get it.
 
+This module imports nothing from the package. It is the bottom of the graph, and
+it used to import workos to read one API key, which meant almost everything
+transitively imported an HTTP client. The WorkOS settings live here now and the
+client reads them.
+
 Paths are not here: they live in paths.py, and callers read `paths.DATA_ROOT`
 rather than a copy, so a test redirecting the data root sets it in one place.
 
@@ -16,8 +21,6 @@ it a single-file change.
 import hashlib
 import os
 
-from . import workos
-
 REPLAY_PASSWORD = os.environ.get("REPLAY_PASSWORD", "")
 REPLAY_AUTH_DISABLED = os.environ.get("REPLAY_AUTH_DISABLED") == "1"
 
@@ -26,11 +29,16 @@ OPERATORS = {
     e.strip().lower() for e in os.environ.get("CAPTURE_OPERATORS", "").split(",") if e.strip()
 }
 
+WORKOS_API_KEY = os.environ.get("WORKOS_API_KEY", "")
+WORKOS_CLIENT_ID = os.environ.get("WORKOS_CLIENT_ID", "")
+WORKOS_API = os.environ.get("WORKOS_API") or "https://api.workos.com"
+WORKOS_ORG_CACHE_TTL_S = float(os.environ.get("ORG_CACHE_TTL_S", "60"))
+
 # Derived from the WorkOS key when unset so a single-box install needs no extra
 # secret, at the cost of invalidating sessions if that key is rotated.
 SESSION_SECRET = (
     os.environ.get("SESSION_SECRET")
-    or hashlib.sha256(f"session:{workos.API_KEY}".encode()).hexdigest()
+    or hashlib.sha256(f"session:{WORKOS_API_KEY}".encode()).hexdigest()
 )
 SESSION_TTL_S = 7 * 24 * 3600
 SESSION_COOKIE = "capture_session"

@@ -8,17 +8,17 @@ the app, since they are about this server's own session rather than WorkOS.
 """
 
 import json
-import os
 import time
 import urllib.parse
 import urllib.request
 
+from . import config
 from .errors import ApiError
 
-API_KEY = os.environ.get("WORKOS_API_KEY", "")
-CLIENT_ID = os.environ.get("WORKOS_CLIENT_ID", "")
-API = os.environ.get("WORKOS_API") or "https://api.workos.com"
-ORG_CACHE_TTL_S = float(os.environ.get("ORG_CACHE_TTL_S", "60"))
+API_KEY = config.WORKOS_API_KEY
+CLIENT_ID = config.WORKOS_CLIENT_ID
+API = config.WORKOS_API
+ORG_CACHE_TTL_S = config.WORKOS_ORG_CACHE_TTL_S
 
 
 def enabled() -> bool:

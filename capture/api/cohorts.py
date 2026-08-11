@@ -16,13 +16,13 @@ there is no APIRouter prefix here — adding one would move it.
 import asyncio
 import json
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import analysis_port as ap
 from .. import compat, db, jobs, projects, sessionstore
 from ..errors import ApiError
-from .deps import require_read_access, resolve_project, resolve_session
+from .deps import readable_project, session_dir
 
 router = APIRouter()
 
@@ -42,10 +42,8 @@ def _resolve_cohort_or_404(project: projects.Project, cohort_id: str | None) -> 
 
 
 @router.get("/api/cohorts")
-def list_cohorts(request: Request, project: str | None = Query(None)):
+def list_cohorts(found: projects.Project = Depends(readable_project)):
     """Every cohort in this pool, newest first — membership counts only."""
-    require_read_access(request, project)
-    found = resolve_project(project)
     out = []
     for cohort in ap.cohorts(found):
         live = ap.cohort_view(found, cohort)
@@ -63,9 +61,7 @@ def list_cohorts(request: Request, project: str | None = Query(None)):
 
 
 @router.get("/api/cohorts/{cohort_id}")
-def get_cohort(request: Request, cohort_id: str, project: str | None = Query(None)):
-    require_read_access(request, project)
-    found = resolve_project(project)
+def get_cohort(cohort_id: str, found: projects.Project = Depends(readable_project)):
     cohort = _resolve_cohort_or_404(found, cohort_id)
     live = ap.cohort_view(found, cohort)
     # Persist refreshed status so a crashed runner still shows accurate counts.
@@ -77,10 +73,12 @@ def get_cohort(request: Request, cohort_id: str, project: str | None = Query(Non
 
 
 @router.patch("/api/cohorts/{cohort_id}")
-async def rename_cohort(request: Request, cohort_id: str, project: str | None = Query(None)):
+async def rename_cohort(
+    request: Request,
+    cohort_id: str,
+    found: projects.Project = Depends(readable_project),
+):
     """Rename a cohort. Membership is frozen — only the label is editable."""
-    require_read_access(request, project)
-    found = resolve_project(project)
     try:
         payload = await request.json()
     except Exception as exc:
@@ -97,10 +95,8 @@ async def rename_cohort(request: Request, cohort_id: str, project: str | None = 
 
 
 @router.delete("/api/cohorts/{cohort_id}")
-async def delete_cohort(request: Request, cohort_id: str, project: str | None = Query(None)):
+async def delete_cohort(cohort_id: str, found: projects.Project = Depends(readable_project)):
     """Delete a cohort and its cached cuts. Per-session write-ups are kept."""
-    require_read_access(request, project)
-    found = resolve_project(project)
     cohort = ap.cohort(found, cohort_id)
     if not cohort:
         raise ApiError(404, "no such cohort")
@@ -131,21 +127,17 @@ async def delete_cohort(request: Request, cohort_id: str, project: str | None = 
 
 @router.get("/api/facets")
 def get_pool_facets(
-    request: Request,
-    project: str | None = Query(None),
+    found: projects.Project = Depends(readable_project),
     min_duration_ms: int = Query(ap.MIN_DURATION_MS, ge=0),
 ):
     """Facet values available in the pool — same fields as the Insights cut picker."""
-    require_read_access(request, project)
-    found = resolve_project(project)
     with compat.cohort_connection(found.id) as conn:
         return ap.pool_facets(conn, found, min_duration_ms=min_duration_ms)
 
 
 @router.post("/api/cohorts")
 async def create_cohort(
-    request: Request,
-    project: str | None = Query(None),
+    found: projects.Project = Depends(readable_project),
     purchased: int | None = Query(None, ge=0, le=ap.MAX_SESSIONS),
     all_n: int | None = Query(None, ge=0, le=ap.MAX_SESSIONS, alias="all"),
     any_n: int = Query(0, ge=0, le=ap.MAX_SESSIONS, alias="any"),
@@ -185,8 +177,6 @@ async def create_cohort(
     split. Omitting sizes falls back to the default 50+50 purchased sample.
     Total sessions are capped at COHORT_MAX_SESSIONS (500).
     """
-    require_read_access(request, project)
-    found = resolve_project(project)
 
     sort = (order or "").strip().lower()
     if sort not in ap.ORDERS:
@@ -251,7 +241,7 @@ async def create_cohort(
     if total > ap.MAX_SESSIONS:
         raise ApiError(400, f"cohort size capped at {ap.MAX_SESSIONS} sessions")
 
-    with compat.cohort_connection(resolve_project(project).id) as conn:
+    with compat.cohort_connection(found.id) as conn:
         cohort = ap.build_cohort(
             conn,
             found,
@@ -282,15 +272,12 @@ async def create_cohort(
 
 @router.post("/api/cohorts/{cohort_id}/analyze")
 async def start_cohort_analysis(
-    request: Request,
     cohort_id: str,
-    project: str | None = Query(None),
+    found: projects.Project = Depends(readable_project),
     force: bool = Query(False),
 ):
     """Start (or resume) analysis for an existing idle/paused cohort."""
-    require_read_access(request, project)
     jobs.require_runtime()
-    found = resolve_project(project)
     cohort = _resolve_cohort_or_404(found, cohort_id)
 
     key = jobs.cohort_key(found, cohort["id"])
@@ -313,13 +300,10 @@ async def start_cohort_analysis(
 
 @router.post("/api/cohorts/{cohort_id}/pause")
 async def pause_cohort_analysis(
-    request: Request,
     cohort_id: str,
-    project: str | None = Query(None),
+    found: projects.Project = Depends(readable_project),
 ):
     """Pause an in-flight cohort analysis; completed session write-ups are kept."""
-    require_read_access(request, project)
-    found = resolve_project(project)
     cohort = _resolve_cohort_or_404(found, cohort_id)
 
     key = jobs.cohort_key(found, cohort["id"])
@@ -342,15 +326,12 @@ async def pause_cohort_analysis(
 
 @router.post("/api/cohorts/{cohort_id}/sessions/{session_id}/retry")
 async def retry_cohort_session(
-    request: Request,
     cohort_id: str,
     session_id: str,
-    project: str | None = Query(None),
+    found: projects.Project = Depends(readable_project),
 ):
     """Re-run one cohort row after it failed, without re-sampling the cohort."""
-    require_read_access(request, project)
     jobs.require_runtime()
-    found = resolve_project(project)
     cohort = _resolve_cohort_or_404(found, cohort_id)
 
     entry = next(
@@ -360,7 +341,7 @@ async def retry_cohort_session(
     if entry is None:
         raise ApiError(404, "session is not in this cohort")
 
-    resolve_session(session_id, project)
+    session_dir(found, session_id)
     # Drop the recorded failure first, so a poll landing mid-retry does not
     # re-read the old error back over the running status.
     entry["status"] = "queued"
@@ -440,10 +421,8 @@ async def _run_cut_job(
 
 
 @router.get("/api/cohorts/{cohort_id}/facets")
-def get_cohort_facets(request: Request, cohort_id: str, project: str | None = Query(None)):
+def get_cohort_facets(cohort_id: str, found: projects.Project = Depends(readable_project)):
     """Slice values present in this cohort, so the picker only offers real ones."""
-    require_read_access(request, project)
-    found = resolve_project(project)
     cohort = _resolve_cohort_or_404(found, cohort_id)
     live = ap.cohort_view(found, cohort)
     return {"cohort_id": cohort["id"], **cohort_facets(found, live)}
@@ -451,9 +430,8 @@ def get_cohort_facets(request: Request, cohort_id: str, project: str | None = Qu
 
 @router.get("/api/cohorts/{cohort_id}/cut")
 async def get_cut(
-    request: Request,
     cohort_id: str,
-    project: str | None = Query(None),
+    found: projects.Project = Depends(readable_project),
     # The group is an intersection of these; outcome and device take repeats
     # or a comma list, so "purchased+checkout on mobile" is expressible.
     outcome: list | None = Query(None),
@@ -474,8 +452,6 @@ async def get_cut(
     escape hatch for a reworded prompt or a new model, and the only way to
     spend a second call on a cut.
     """
-    require_read_access(request, project)
-    found = resolve_project(project)
     cohort = _resolve_cohort_or_404(found, cohort_id)
     cohort_id = cohort["id"]
 
@@ -549,7 +525,7 @@ def _sse(event: str, data: dict) -> str:
 async def post_cohort_chat(
     request: Request,
     cohort_id: str,
-    project: str | None = Query(None),
+    found: projects.Project = Depends(readable_project),
     # Same group selection as /cut — the chat answers about the cut on screen.
     outcome: list | None = Query(None),
     device: list | None = Query(None),
@@ -566,8 +542,6 @@ async def post_cohort_chat(
     is a fresh call. Text-only, so this needs the model but not the headless
     reconstruction runtime a per-session analysis does.
     """
-    require_read_access(request, project)
-    found = resolve_project(project)
     cohort = _resolve_cohort_or_404(found, cohort_id)
     cohort_id = cohort["id"]
 

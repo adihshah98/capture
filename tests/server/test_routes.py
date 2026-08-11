@@ -68,3 +68,52 @@ class TestRouteInventory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReadAccessIsDeclaredNotRemembered(unittest.TestCase):
+    """Every project-scoped handler takes readable_project as a parameter.
+
+    That is the point of the dependency: the check used to be two lines at the top
+    of each body, which a new handler could simply omit and still work — it would
+    just serve another tenant's data. Now a handler without the parameter has no
+    project to serve at all.
+    """
+
+    def test_every_handler_taking_a_project_query_declares_the_dependency(self):
+        import inspect
+
+        from capture.api import cohorts, sessions
+        from capture.api.deps import readable_project
+
+        offenders = []
+        for module in (sessions, cohorts):
+            for route in module.router.routes:
+                fn = route.endpoint
+                params = inspect.signature(fn).parameters
+                takes_dep = any(
+                    getattr(p.default, "dependency", None) is readable_project
+                    for p in params.values()
+                )
+                # /api/projects is the one that deliberately spans every project.
+                if route.path == "/api/projects":
+                    continue
+                if not takes_dep:
+                    offenders.append(f"{module.__name__}.{fn.__name__}")
+        self.assertEqual(offenders, [], f"no readable_project dependency: {offenders}")
+
+    def test_the_dependency_is_overridable(self):
+        """The seam this buys: before, the only way past the check was a real
+        signed cookie and a live projects table."""
+        from fastapi.testclient import TestClient
+
+        from capture.api.deps import readable_project
+        from capture.server import app
+
+        sentinel = object()
+        app.dependency_overrides[readable_project] = lambda: sentinel
+        try:
+            self.assertIn(readable_project, app.dependency_overrides)
+            self.assertIs(app.dependency_overrides[readable_project](), sentinel)
+            TestClient(app)  # the app still builds with the override installed
+        finally:
+            app.dependency_overrides.clear()

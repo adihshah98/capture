@@ -1,7 +1,8 @@
 """Reading recordings: the session list, one session, its chunks, its analysis.
 
-All authenticated. Every handler calls require_read_access before it resolves
-anything, so a caller who may not see a project cannot learn whether one exists.
+All authenticated through the readable_project dependency, which resolves the
+project and refuses it in one step. Declared in the signature rather than called
+at the top of the body, so a handler cannot forget it and still have a project.
 
 The index is the record of truth; legacy_sessions is the fallback for recordings
 made before it existed. That fallback is bridge code — see capture/legacy_sessions.py.
@@ -9,7 +10,7 @@ made before it existed. That fallback is bridge code — see capture/legacy_sess
 
 import json
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from .. import analysis_port as ap
@@ -17,7 +18,7 @@ from .. import jobs, legacy_sessions, projects, quota, sessionstore, storage
 from ..attribution import parse_attribution
 from ..errors import ApiError
 from ..paths import SAFE_CHUNK, SAFE_ID, chunk_timestamp, chunk_window
-from .deps import allowed_projects, require_read_access, resolve_project, resolve_session
+from .deps import allowed_projects, readable_project, session_dir
 
 router = APIRouter()
 
@@ -40,28 +41,22 @@ def list_projects(request: Request):
 
 @router.get("/api/sessions")
 def list_sessions(
-    request: Request,
-    project: str | None = Query(None),
+    found: projects.Project = Depends(readable_project),
     limit: int = Query(100, ge=1, le=500),
     cursor: str | None = Query(None),
     filter: str | None = Query(None),
     q: str | None = Query(None),
 ):
-    require_read_access(request, project)
     try:
-        return sessionstore.listing(
-            resolve_project(project).id, limit=limit, cursor=cursor, filter=filter, q=q
-        )
+        return sessionstore.listing(found.id, limit=limit, cursor=cursor, filter=filter, q=q)
     except ValueError as exc:
         raise ApiError(400, "bad cursor") from exc
 
 
 @router.get("/api/sessions/{session_id}")
-def get_session(request: Request, session_id: str, project: str | None = Query(None)):
-    require_read_access(request, project)
-    found = resolve_project(project)
+def get_session(session_id: str, found: projects.Project = Depends(readable_project)):
     info = sessionstore.get(found.id, session_id) or legacy_sessions.session_info(
-        resolve_session(session_id, project)
+        session_dir(found, session_id)
     )
     if info is None:
         raise ApiError(404, "not found")
@@ -69,11 +64,9 @@ def get_session(request: Request, session_id: str, project: str | None = Query(N
 
 
 @router.delete("/api/sessions/{session_id}")
-def delete_session(request: Request, session_id: str, project: str | None = Query(None)):
-    require_read_access(request, project)
-    found = resolve_project(project)
+def delete_session(session_id: str, found: projects.Project = Depends(readable_project)):
     # Called for its 404: deleting an unknown session must not report success.
-    resolve_session(session_id, project)
+    session_dir(found, session_id)
     freed = storage.delete_session(found.storage_prefix, session_id)
     sessionstore.forget(found.id, session_id)
     # Cohort membership references a recording that no longer exists. Left
@@ -91,9 +84,7 @@ def delete_session(request: Request, session_id: str, project: str | None = Quer
 
 
 @router.get("/api/sessions/{session_id}/chunks")
-def session_chunks(request: Request, session_id: str, project: str | None = Query(None)):
-    require_read_access(request, project)
-    found = resolve_project(project)
+def session_chunks(session_id: str, found: projects.Project = Depends(readable_project)):
     chunks = storage.list_chunks(found.storage_prefix, session_id)
     if not chunks:
         raise ApiError(404, "not found")
@@ -119,12 +110,13 @@ def session_chunks(request: Request, session_id: str, project: str | None = Quer
 
 @router.get("/api/sessions/{session_id}/chunks/{chunk_name}")
 def session_chunk(
-    request: Request, session_id: str, chunk_name: str, project: str | None = Query(None)
+    session_id: str,
+    chunk_name: str,
+    found: projects.Project = Depends(readable_project),
 ):
-    require_read_access(request, project)
     if not SAFE_ID.match(session_id) or not SAFE_CHUNK.match(chunk_name):
         raise ApiError(400, "invalid id")
-    prefix = resolve_project(project).storage_prefix
+    prefix = found.storage_prefix
 
     # Hand the browser a presigned URL so the bytes never transit the origin.
     # None means the chunk has not reached S3 yet, so serve it from the pool.
@@ -145,15 +137,13 @@ def session_chunk(
 
 
 @router.get("/api/sessions/{session_id}/analysis")
-def get_analysis(request: Request, session_id: str, project: str | None = Query(None)):
-    require_read_access(request, project)
-    found = resolve_project(project)
-    session_dir = resolve_session(session_id, project)
+def get_analysis(session_id: str, found: projects.Project = Depends(readable_project)):
+    directory = session_dir(found, session_id)
     cached = ap.session_analysis(found, session_id)
     if cached:
         if "status" not in cached:
             cached = {**cached, "status": "done"}
-        info = legacy_sessions.session_info(session_dir)
+        info = legacy_sessions.session_info(directory)
         if info:
             if info.get("order"):
                 cached = {**cached, "order": info["order"]}
@@ -172,15 +162,12 @@ def get_analysis(request: Request, session_id: str, project: str | None = Query(
 
 @router.post("/api/sessions/{session_id}/analysis")
 async def create_analysis(
-    request: Request,
     session_id: str,
-    project: str | None = Query(None),
     force: bool = Query(False),
+    found: projects.Project = Depends(readable_project),
 ):
-    require_read_access(request, project)
     jobs.require_runtime()
-    found = resolve_project(project)
-    resolve_session(session_id, project)
+    session_dir(found, session_id)
     result = await jobs.start_session(found, session_id, force=force)
     if result.get("accepted"):
         return JSONResponse({"status": "running"}, status_code=202)
