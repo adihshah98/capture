@@ -106,7 +106,7 @@ class TestCohortSampling(unittest.TestCase):
             [("newbuy" + "x" * 26, "purchased"), ("newall" + "x" * 26, "all")],
         )
 
-    def test_sample_requires_ashwamag_path_and_min_duration(self):
+    def test_sample_honours_the_url_filter_and_min_duration(self):
         analyze, conn = self._conn(
             [
                 (
@@ -167,11 +167,41 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = analyze.sample_cohort_rows(conn, "", purchased_n=5, all_n=5)
+        # url_contains is passed explicitly: it is a per-cohort choice, not a
+        # global default. It used to default to one customer's landing page,
+        # which silently scoped every cohort sampled without an override.
+        sampled = analyze.sample_cohort_rows(
+            conn, "", purchased_n=5, all_n=5, url_contains="/pages/ashwamag-01"
+        )
         self.assertEqual(
             {(s["session_id"], s["filter"]) for s in sampled},
             {("okbuy" + "x" * 27, "purchased"), ("okall" + "x" * 27, "all")},
         )
+
+    def test_an_empty_url_filter_samples_every_page(self):
+        """The default. A pool with no ashwamag URLs still yields a cohort --
+        the regression that the old hardcoded default caused for every tenant
+        that was not that one customer."""
+        analyze, conn = self._conn(
+            [
+                (
+                    "",
+                    "onbrand" + "x" * 25,
+                    0,
+                    20_000,
+                    1,
+                    1,
+                    None,
+                    "https://other.test/pages/serum",
+                    json.dumps({"purchased_at": 1}),
+                    None,
+                    None,
+                    None,
+                ),
+            ]
+        )
+        sampled = analyze.sample_cohort_rows(conn, "", purchased_n=1, all_n=0)
+        self.assertEqual([s["session_id"] for s in sampled], ["onbrand" + "x" * 25])
 
     def test_sample_any_mixes_outcomes_up_to_limit(self):
         analyze, conn = self._conn(

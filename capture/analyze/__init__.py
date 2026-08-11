@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .. import attribution
-from . import prompts, slices, stats
+from . import prompts, slices, spec, stats
 from . import store as analyze_store
 
 # The repo root: EXTRACTOR, the extractor subprocess cwd and the default data
@@ -75,17 +75,17 @@ ANALYSIS_ENABLED = bool(GEMINI_API_KEY)
 ANALYZE_EXTRACT_CONCURRENCY = max(1, int(os.environ.get("ANALYZE_EXTRACT_CONCURRENCY", "1")))
 ANALYZE_MODEL_CONCURRENCY = max(1, int(os.environ.get("ANALYZE_MODEL_CONCURRENCY", "3")))
 
-# Insights cohort defaults: latest ashwamag-01 sessions ≥5s, 50/50 split.
-COHORT_DEFAULT_PURCHASED_N = 50
-COHORT_DEFAULT_ALL_N = 50
-COHORT_MAX_SESSIONS = 500
-COHORT_MIN_DURATION_MS = 5000
-COHORT_URL_CONTAINS = "/pages/ashwamag-01"
-# How many newest index rows to scan when applying cut-style slice filters.
-COHORT_CANDIDATE_CAP = 5000
-COHORT_ORDER_LATEST = "latest"
-COHORT_ORDER_EARLIEST = "earliest"
-COHORT_ORDERS = (COHORT_ORDER_LATEST, COHORT_ORDER_EARLIEST)
+# The sampling vocabulary lives in spec.py. Aliased under the older names so the
+# sampler and the port keep reading the way they always have.
+COHORT_DEFAULT_PURCHASED_N = spec.DEFAULT_PURCHASED_N
+COHORT_DEFAULT_ALL_N = spec.DEFAULT_ALL_N
+COHORT_MAX_SESSIONS = spec.MAX_SESSIONS
+COHORT_MIN_DURATION_MS = spec.MIN_DURATION_MS
+COHORT_URL_CONTAINS = spec.URL_CONTAINS
+COHORT_CANDIDATE_CAP = spec.CANDIDATE_CAP
+COHORT_ORDER_LATEST = spec.ORDER_LATEST
+COHORT_ORDER_EARLIEST = spec.ORDER_EARLIEST
+COHORT_ORDERS = spec.ORDERS
 
 # Cohort write-ups go through Gemini Batch (≈50% cheaper). Single-session
 # Analyze stays on the interactive API. Set ANALYZE_BATCH=0 to force sync.
