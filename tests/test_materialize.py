@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import storage
+from capture import storage
 from test_storage import FakeS3, chunk_name
 
 
@@ -27,7 +27,7 @@ class Project:
 
 class MaterializeCase(unittest.TestCase):
     def setUp(self):
-        import server
+        from capture import server
 
         self.server = server
         self.tmp = tempfile.TemporaryDirectory()
@@ -96,7 +96,7 @@ class TestStaging(MaterializeCase):
     def test_a_chunk_already_on_disk_is_not_deleted(self):
         """Only what the shim fetched is cleaned up, or staging would destroy
         the local copy of a session that has not been migrated yet."""
-        from fsutil import atomic_write_bytes
+        from capture.fsutil import atomic_write_bytes
 
         local = chunk_name(1000)
         atomic_write_bytes(self.dir / local, b"local-copy")
@@ -136,7 +136,7 @@ class TestStaging(MaterializeCase):
 
     def test_it_is_a_no_op_without_a_bucket(self):
         storage.BUCKET = ""
-        from fsutil import atomic_write_bytes
+        from capture.fsutil import atomic_write_bytes
 
         name = chunk_name(1000)
         atomic_write_bytes(self.dir / name, b"local")
@@ -146,13 +146,13 @@ class TestStaging(MaterializeCase):
 
 class TestCohortSessionIds(unittest.TestCase):
     def test_it_reads_ids_and_skips_malformed_rows(self):
-        import server
+        from capture import server
 
         cohort = {"sessions": [{"session_id": "a"}, {}, None, {"session_id": "b"}]}
         self.assertEqual(server._cohort_session_ids(cohort), ["a", "b"])
 
     def test_an_empty_cohort_is_fine(self):
-        import server
+        from capture import server
 
         self.assertEqual(server._cohort_session_ids({}), [])
 

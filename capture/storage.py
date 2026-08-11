@@ -85,7 +85,7 @@ def put_chunk(storage_prefix: str, session_id: str, name: str, body: bytes) -> N
             CacheControl=CHUNK_CACHE_CONTROL,
         )
         return
-    from fsutil import atomic_write_bytes
+    from .fsutil import atomic_write_bytes
 
     atomic_write_bytes(local_dir(storage_prefix, session_id) / name, body)
 

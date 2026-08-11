@@ -26,10 +26,10 @@ class TestSweepClearsBothBackends(unittest.TestCase):
     def setUpClass(cls):
         import shutil
 
-        import db
-        import projects
-        import server
-        import storage
+        from capture import db
+        from capture import projects
+        from capture import server
+        from capture import storage
 
         cls.server, cls.storage, cls.db, cls.projects = server, storage, db, projects
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-retention-"))
@@ -76,7 +76,7 @@ class TestSweepClearsBothBackends(unittest.TestCase):
             conn.execute("DELETE FROM sessions")
 
     def seed(self, session_id: str, last_seen_ms: int):
-        from fsutil import atomic_write_bytes
+        from capture.fsutil import atomic_write_bytes
 
         name = chunk_name(1000)
         self.fake.objects[f"sessions/cap_r/{session_id}/{name}"] = b"remote"

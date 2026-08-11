@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import storage
+from capture import storage
 
 
 class FakeS3:
@@ -176,7 +176,7 @@ class TestDualReadDuringMigration(StorageCase):
         # One chunk copied to S3, one still only on disk.
         self.copied, self.pending = chunk_name(1000), chunk_name(2000)
         self.fake.objects[f"sessions/cap_a/s1/{self.copied}"] = b"from-s3"
-        from fsutil import atomic_write_bytes
+        from capture.fsutil import atomic_write_bytes
 
         atomic_write_bytes(storage.local_dir("cap_a", "s1") / self.copied, b"from-disk")
         atomic_write_bytes(storage.local_dir("cap_a", "s1") / self.pending, b"only-on-disk")

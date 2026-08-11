@@ -21,8 +21,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import projects
-import storage
+from . import projects
+from . import storage
 
 DEFAULT_CONCURRENCY = int(os.environ.get("CAPTURE_S3_COPY_CONCURRENCY", "8"))
 
@@ -148,6 +148,6 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     finally:
-        import db
+        from . import db
 
         db.close_pool()

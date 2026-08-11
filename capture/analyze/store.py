@@ -36,8 +36,8 @@ from typing import Optional
 
 from psycopg.rows import dict_row
 
-import db
-import projects
+from .. import db
+from .. import projects
 
 # Columns promoted out of the cohort blob. Everything else in a cohort dict
 # (purchased_n, all_n, slice, selection, url_contains, ...) rides in `fields`.

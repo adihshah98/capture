@@ -21,10 +21,10 @@ class TestCopier(unittest.TestCase):
     def setUpClass(cls):
         import shutil
 
-        import db
-        import projects
-        import s3copy
-        import storage
+        from capture import db
+        from capture import projects
+        from capture import s3copy
+        from capture import storage
 
         cls.s3copy, cls.storage, cls.db, cls.projects = s3copy, storage, db, projects
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-copy-"))
@@ -67,7 +67,7 @@ class TestCopier(unittest.TestCase):
         shutil.rmtree(self.storage.PROJECTS_DIR, ignore_errors=True)
 
     def seed_local(self, session_id: str, count: int = 3):
-        from fsutil import atomic_write_bytes
+        from capture.fsutil import atomic_write_bytes
 
         names = []
         for i in range(count):

@@ -255,8 +255,8 @@ class CohortStoreMixin:
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        import db
-        import projects
+        from capture import db
+        from capture import projects
 
         cls._pg_admin, cls._pg_app = fresh_database()
         cls._pg_project = seed_default_project(cls._pg_admin)

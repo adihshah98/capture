@@ -2164,7 +2164,7 @@ def _cli(argv: list) -> None:
     elif len(argv) >= 3 and argv[0] == "invite":
         invite_user(argv[1], argv[2])
     elif argv[:1] == ["reindex"]:
-        import backfill
+        from . import backfill
 
         db.migrate()
         result = backfill.backfill()

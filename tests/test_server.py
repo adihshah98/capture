@@ -53,8 +53,8 @@ class ServerCase(unittest.TestCase):
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-test-"))
         cls.prepare_data_dir()
         cls.admin_url, cls.app_url = pgfixture.fresh_database()
-        import db as _db
-        import projects as _projects
+        from capture import db as _db
+        from capture import projects as _projects
 
         cls._db, cls._projects = _db, _projects
         cls._saved_db_url = os.environ.get("CAPTURE_DATABASE_URL")
