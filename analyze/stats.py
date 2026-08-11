@@ -25,7 +25,7 @@ without it the model reads silence as uniformity and asserts the opposite.
 
 from typing import Optional
 
-from slices import OUTCOME_LABELS
+from .slices import OUTCOME_LABELS
 
 # --- Measured splits -------------------------------------------------------
 #

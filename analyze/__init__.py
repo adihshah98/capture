@@ -22,16 +22,20 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 import urllib.parse
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import analyze_prompts as prompts
-import analyze_store
+from . import prompts, slices, stats
+from . import store as analyze_store
 
-BASE_DIR = Path(__file__).resolve().parent
+# The repo root, not the package directory: EXTRACTOR, the subprocess cwd and
+# the default data dir are all repo-relative, so this has to climb out of
+# analyze/ now that this module is a package rather than a top-level file.
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 ANALYSIS_FILE = "analysis.json"
 ANALYSIS_STATUS_FILE = "analysis.status.json"
@@ -772,7 +776,7 @@ def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
 # The slice language lives in slices.py: pure predicates over dicts, shared by
 # the sampler, the cut cache key and the UI labels. Re-exported here because
 # server.py and the tests reach for these off `analyze`.
-from slices import (  # noqa: E402
+from .slices import (  # noqa: E402
     DEVICE_VALUES,
     META_SOURCES,
     MOBILE_MAX_WIDTH,
@@ -935,7 +939,7 @@ def _given_facts(spec: dict, n: int) -> str:
 # Measured splits live in stats.py: the model invents shares when asked to
 # count, so the numbers in the cut prompt are computed in Python and handed
 # over as exact. Re-exported here for server.py and the tests.
-from stats import (  # noqa: E402
+from .stats import (  # noqa: E402
     CROSS_TAB_DIMENSIONS,
     CROSS_TAB_MIN_CELL,
     CROSS_TAB_MIN_COVERAGE,
@@ -2981,6 +2985,41 @@ def main(argv: Optional[list] = None) -> int:
 
     parser.print_help()
     return 1
+
+
+# --- Patch forwarding ------------------------------------------------------
+#
+# The tests swap out the expensive edges of this module by assignment --
+# `analyze.run_extractor = fake`, `analyze.wait_gemini_batch = fake`,
+# `analyze.CUT_PROMPT = "..."` -- and then drive the real pipeline. That works
+# only while caller and callee share one namespace: a call to `wait_gemini_batch`
+# resolves through this module's globals at call time, so rebinding the
+# attribute redirects it.
+#
+# Splitting the module breaks that silently. `from .models import call_gemini`
+# copies the value into the submodule's globals at import, so a later
+# `analyze.call_gemini = fake` rebinds only the re-export while the pipeline
+# keeps calling the real one -- a real network call from a test suite that
+# still passes, because the assertions are about cohort state rather than
+# about which function ran.
+#
+# So assignment to this module forwards to whichever submodule defines the
+# name. Owners are discovered from `vars()` rather than listed here: a
+# hand-maintained map is the mechanism that rots the first time a function
+# moves between submodules (cf. ATTRIBUTION_PARAMS' "change both together"
+# comment, which is a comment and not a mechanism).
+_FORWARD_TO = (slices, stats, prompts)
+
+
+class _ForwardingModule(sys.modules[__name__].__class__):
+    def __setattr__(self, name, value):
+        for submodule in _FORWARD_TO:
+            if name in vars(submodule):
+                setattr(submodule, name, value)
+        super().__setattr__(name, value)
+
+
+sys.modules[__name__].__class__ = _ForwardingModule
 
 
 if __name__ == "__main__":

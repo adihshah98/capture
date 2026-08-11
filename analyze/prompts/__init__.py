@@ -20,7 +20,7 @@ intended behaviour — see `cut_key`.
 
 from pathlib import Path
 
-PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
+PROMPT_DIR = Path(__file__).resolve().parent
 
 
 def load(name: str) -> str:
