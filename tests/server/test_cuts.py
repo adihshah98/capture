@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pgfixture
 
 from capture import analyze
-from capture.analyze import slices
+from capture.analyze import cutfmt, slices
 
 
 def row(sid, outcome="rest", device=None, page=None, **attrs):
@@ -467,9 +467,9 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
     def test_every_insight_item_has_all_three_fields(self):
         """The renderer reads .observation/.share/.action without guarding."""
         out = analyze.normalize_cut_analysis(
-            {key: [{"observation": "x at [00:01]"}] for key in analyze.CUT_INSIGHT_SECTIONS}
+            {key: [{"observation": "x at [00:01]"}] for key in cutfmt.CUT_INSIGHT_SECTIONS}
         )
-        for key in analyze.CUT_INSIGHT_SECTIONS:
+        for key in cutfmt.CUT_INSIGHT_SECTIONS:
             self.assertEqual(set(out[key][0]), {"observation", "share", "action"}, key)
         self.assertEqual(out["recommendations"], [])
 
@@ -509,8 +509,8 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
                 "headline": "x" * 900,
             }
         )
-        self.assertEqual(len(out["journey"]), analyze.CUT_ITEMS_PER_SECTION)
-        self.assertEqual(len(out["recommendations"]), analyze.CUT_RECOMMENDATIONS_CAP)
+        self.assertEqual(len(out["journey"]), cutfmt.CUT_ITEMS_PER_SECTION)
+        self.assertEqual(len(out["recommendations"]), cutfmt.CUT_RECOMMENDATIONS_CAP)
         self.assertEqual(len(out["headline"]), 600)
 
     def test_overlong_fields_are_truncated_not_dropped(self):
@@ -785,8 +785,8 @@ class TestShareDenominator(unittest.TestCase):
 
     def test_the_group_size_reaches_the_normalizer(self):
         """len(rows), not the cohort, is what call_gemini_cut validates against."""
-        self.assertFalse(analyze._share_denominator_ok("All 46 of 46", 9))
-        self.assertTrue(analyze._share_denominator_ok("All 9 of 9", 9))
+        self.assertFalse(cutfmt._share_denominator_ok("All 46 of 46", 9))
+        self.assertTrue(cutfmt._share_denominator_ok("All 9 of 9", 9))
 
 
 class TestCutOutputBudget(unittest.TestCase):
