@@ -201,52 +201,55 @@ def status_path(session_dir: Path) -> Path:
     return session_dir / ANALYSIS_STATUS_FILE
 
 
+def _session_ref(session_dir: Path) -> tuple:
+    """(pool_key, session_id) for a session directory. The results moved into
+    the database, but every caller still identifies a session by its path."""
+    return pool_key(session_dir.parent), session_dir.name
+
+
 def read_analysis(session_dir: Path) -> Optional[dict]:
-    path = session_dir / ANALYSIS_FILE
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
+    key, sid = _session_ref(session_dir)
+    return analyze_store.read_analysis(analyze_store.connect(), key, sid)
+
+
+def write_analysis(session_dir: Path, result: dict) -> dict:
+    key, sid = _session_ref(session_dir)
+    return analyze_store.write_analysis(analyze_store.connect(), key, sid, result)
+
+
+def forget_analyses(pool: Path) -> int:
+    """Drop every write-up in a pool. For a whole-pool reset."""
+    return analyze_store.forget_analyses(analyze_store.connect(), pool_key(pool))
 
 
 def read_job(session_dir: Path) -> Optional[dict]:
     """In-progress or failed async analysis job, if any."""
-    path = status_path(session_dir)
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
+    key, sid = _session_ref(session_dir)
+    return analyze_store.read_job(analyze_store.connect(), key, sid)
 
 
 def write_job(session_dir: Path, status: str, error: Optional[str] = None) -> dict:
-    job = {
-        "status": status,
-        "updated_at": int(time.time() * 1000),
-    }
+    job = {"status": status, "updated_at": int(time.time() * 1000)}
     if error:
         job["error"] = error
-    path = status_path(session_dir)
-    path.write_text(json.dumps(job))
-    return job
+    key, sid = _session_ref(session_dir)
+    return analyze_store.write_job(analyze_store.connect(), key, sid, job)
 
 
 def clear_job(session_dir: Path) -> None:
-    status_path(session_dir).unlink(missing_ok=True)
+    key, sid = _session_ref(session_dir)
+    analyze_store.clear_job(analyze_store.connect(), key, sid)
 
 
 def clear_analysis(session_dir: Path) -> None:
     """Drop a finished result so a re-analyze starts clean."""
-    (session_dir / ANALYSIS_FILE).unlink(missing_ok=True)
-    # Sidecars from the retired theme/QA pass — inert now, but a re-analyze is
-    # the natural moment to stop carrying them.
-    for legacy in ("analysis.insights.json", "analysis.qa.json"):
+    key, sid = _session_ref(session_dir)
+    analyze_store.clear_analysis(analyze_store.connect(), key, sid)
+    # Sidecars from the retired theme/QA pass, and the pre-database result —
+    # inert now, but a re-analyze is the natural moment to stop carrying them.
+    for legacy in (ANALYSIS_FILE, "analysis.insights.json", "analysis.qa.json"):
         (session_dir / legacy).unlink(missing_ok=True)
+    # The frame cache is regenerable scratch for one run, so it stays local.
     shutil.rmtree(session_dir / ANALYSIS_DIR, ignore_errors=True)
 
 
@@ -3096,7 +3099,6 @@ def write_analysis_result(
     warnings: Optional[list] = None,
     model: Optional[str] = None,
 ) -> dict:
-    analysis_path, _ = analysis_paths(session_dir)
     result = {
         "status": "done",
         "text": text,
@@ -3105,7 +3107,7 @@ def write_analysis_result(
         "frame_count": frame_count,
         "warnings": warnings or [],
     }
-    analysis_path.write_text(json.dumps(result))
+    write_analysis(session_dir, result)
     clear_job(session_dir)
     return result
 

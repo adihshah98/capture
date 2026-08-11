@@ -80,20 +80,18 @@ class TestStaging(MaterializeCase):
 
     def test_results_written_during_the_block_survive(self):
         """The reason chunks stage into the real directory rather than a temp
-        one: analyze.py writes analysis.json here and it must outlive the run."""
+        one: analyze.py writes its frame cache here and it must outlive the run."""
         name = chunk_name(1000)
         self.put_remote(name, b"x")
 
         def write_result():
-            (self.dir / "analysis.json").write_text('{"status":"done","text":"kept"}')
             (self.dir / ".analysis").mkdir(exist_ok=True)
-            (self.dir / ".analysis" / "digest.json").write_text("{}")
+            (self.dir / ".analysis" / "digest.json").write_text('{"kept": true}')
 
         self.run_with_staging(write_result)
         self.assertEqual(
-            json.loads((self.dir / "analysis.json").read_text())["text"], "kept"
+            json.loads((self.dir / ".analysis" / "digest.json").read_text())["kept"], True
         )
-        self.assertTrue((self.dir / ".analysis" / "digest.json").exists())
 
     def test_a_chunk_already_on_disk_is_not_deleted(self):
         """Only what the shim fetched is cleaned up, or staging would destroy

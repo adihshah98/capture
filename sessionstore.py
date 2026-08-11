@@ -265,6 +265,11 @@ def listing(project_id, *, limit: int, cursor: Optional[str] = None,
 
 def forget(project_id, session_id: str) -> None:
     with db.connection(project_id) as conn:
+        # Windows and orders cascade from the session row. The analysis and its
+        # job status have no foreign key — see migrations/0004 — so they go here,
+        # where the deletion is visible.
+        conn.execute("DELETE FROM analyses WHERE session_id = %s", (session_id,))
+        conn.execute("DELETE FROM analysis_jobs WHERE session_id = %s", (session_id,))
         conn.execute("DELETE FROM sessions WHERE session_id = %s", (session_id,))
 
 

@@ -49,7 +49,7 @@ def cohort_of(stored, done, error, queued, *, writeups=True, pool=None):
         if writeups and pool is not None:
             directory = pool / sid
             directory.mkdir(parents=True, exist_ok=True)
-            (directory / "analysis.json").write_text(json.dumps({"text": "write-up"}))
+            analyze.write_analysis(directory, {"text": "write-up"})
     sessions += [{"session_id": f"e{i}", "status": "error"} for i in range(error)]
     sessions += [{"session_id": f"q{i}", "status": "queued"} for i in range(queued)]
     cohort = {"id": "c", "sessions": sessions}
@@ -75,6 +75,9 @@ class TestStatusBaseline(pgfixture.CohortStoreMixin, unittest.TestCase):
         """Rebuild one recorded case in a clean pool."""
         for path in self.pool.iterdir():
             shutil.rmtree(path, ignore_errors=True)
+        # Write-ups live in the store now, so clearing directories no longer
+        # resets them and a case with writeups=False would inherit the last one.
+        analyze.forget_analyses(self.pool)
         return cohort_of(
             case["stored"],
             case["done"],
@@ -150,7 +153,7 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
         for i in range(n):
             directory = self.pool / f"s{i}"
             directory.mkdir(exist_ok=True)
-            (directory / "analysis.json").write_text(json.dumps({"text": "write-up"}))
+            analyze.write_analysis(directory, {"text": "write-up"})
         self.addCleanup(analyze_store.close_all)
         self.addCleanup(analyze._migrated.clear)
         return analyze.read_cohort(self.pool, "c")
@@ -191,7 +194,7 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.cohort(n=1)
         analyze.clear_analysis(self.pool / "s0")
         self.assertNotEqual(self.live()["status"], "done")
-        (self.pool / "s0" / "analysis.json").write_text(json.dumps({"text": "back"}))
+        analyze.write_analysis(self.pool / "s0", {"text": "back"})
         live = self.live()
         self.assertEqual(live["status"], "done")
         self.assertEqual(live["progress"]["stale"], 0)
@@ -215,7 +218,7 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
         stored = analyze.read_cohort(self.pool, "c")
         self.assertEqual(stored["sessions"][0]["status"], analyze.SESSION_STALE)
         # Restoring the file must clear it again with no manual intervention.
-        (self.pool / "s0" / "analysis.json").write_text(json.dumps({"text": "back"}))
+        analyze.write_analysis(self.pool / "s0", {"text": "back"})
         self.assertEqual(self.live()["sessions"][0]["status"], "done")
 
 
@@ -298,6 +301,9 @@ class TestTerminalRecompute(pgfixture.CohortStoreMixin, unittest.TestCase):
         """Decide with the write-ups actually present, so `done` rows count."""
         for path in self.pool.iterdir():
             shutil.rmtree(path, ignore_errors=True)
+        # Write-ups live in the store now, so clearing directories no longer
+        # resets them and a case with writeups=False would inherit the last one.
+        analyze.forget_analyses(self.pool)
         return analyze.enrich_cohort_status(
             self.pool, cohort_of(stored, done, error, queued, pool=self.pool)
         )["status"]

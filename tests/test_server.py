@@ -22,6 +22,7 @@ REPO = Path(__file__).resolve().parent.parent
 UVICORN = REPO / ".venv" / "bin" / "uvicorn"
 
 sys.path.insert(0, str(REPO))
+import analyze
 import analyze_store
 
 def free_port() -> int:
@@ -825,8 +826,8 @@ class TestAnalysisStatus(ServerCase):
         sid = "a" * 32
         self.assertEqual(self.ingest(sid), 200)
         session = self.data_dir / "sessions" / sid
-        (session / "analysis.json").write_text(
-            json.dumps({"text": "hello", "model": "test", "frame_count": 1, "warnings": []})
+        analyze.write_analysis(
+            session, {"text": "hello", "model": "test", "frame_count": 1, "warnings": []}
         )
         status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
         self.assertEqual(status, 200)
@@ -838,9 +839,7 @@ class TestAnalysisStatus(ServerCase):
         sid = "b" * 32
         self.assertEqual(self.ingest(sid), 200)
         session = self.data_dir / "sessions" / sid
-        (session / "analysis.status.json").write_text(
-            json.dumps({"status": "running", "updated_at": 1})
-        )
+        analyze.write_job(session, "running")
         status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["status"], "running")
@@ -871,16 +870,14 @@ class TestCohort(ServerCase):
         )[0]
 
     def seed_analysis(self, sid):
-        session = self.data_dir / "sessions" / sid
-        (session / "analysis.json").write_text(
-            json.dumps(
-                {
-                    "text": f"write-up for {sid[:8]}",
-                    "model": "test",
-                    "frame_count": 1,
-                    "warnings": [],
-                }
-            )
+        analyze.write_analysis(
+            self.data_dir / "sessions" / sid,
+            {
+                "text": f"write-up for {sid[:8]}",
+                "model": "test",
+                "frame_count": 1,
+                "warnings": [],
+            },
         )
 
     def create_cohort_url(self, purchased=1, all_n=0, **extra):
@@ -1284,8 +1281,8 @@ class TestCohort(ServerCase):
         analyze_store.write_cut(
             self.cohort_store(), "", cohort_id, "some-cut", {"label": "x"}
         )
-        analysis = self.data_dir / "sessions" / sid / "analysis.json"
-        self.assertTrue(analysis.is_file())
+        session_dir = self.data_dir / "sessions" / sid
+        self.assertIsNotNone(analyze.read_analysis(session_dir))
 
         status, body = request(
             f"{self.base}/api/cohorts/{cohort_id}", method="DELETE"
@@ -1295,7 +1292,8 @@ class TestCohort(ServerCase):
         self.assertNotIn(cohort_id, [c["id"] for c in self.cohorts()])
         self.assertIsNone(self.stored_cohort(cohort_id))
         self.assertEqual(self.stored_cuts(cohort_id), {})
-        self.assertTrue(analysis.is_file())
+        # Deleting a cohort must not take the write-ups of its members with it.
+        self.assertIsNotNone(analyze.read_analysis(session_dir))
 
         status, body = request(
             f"{self.base}/api/cohorts/{cohort_id}", method="DELETE"
@@ -1344,10 +1342,8 @@ class TestCohort(ServerCase):
         # Simulate a row that failed during the run: status is re-derived from
         # disk, so the cached analysis has to go along with the error marker.
         session = self.data_dir / "sessions" / sid
-        (session / "analysis.json").unlink()
-        (session / "analysis.status.json").write_text(
-            json.dumps({"status": "error", "error": "page reconstruction timed out"})
-        )
+        analyze.clear_analysis(session)
+        analyze.write_job(session, "error", error="page reconstruction timed out")
         saved = self.stored_cohort(cohort_id)
         saved["sessions"][0]["status"] = "error"
         saved["sessions"][0]["error"] = "page reconstruction timed out"
@@ -1467,8 +1463,9 @@ class TestCutEndpoint(ServerCase):
         self.assertEqual(self.ingest(sid), 200)
         if purchased:
             self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-        (self.data_dir / "sessions" / sid / "analysis.json").write_text(
-            json.dumps({"text": f"write-up for {sid[:6]}", "model": "test", "warnings": []})
+        analyze.write_analysis(
+            self.data_dir / "sessions" / sid,
+            {"text": f"write-up for {sid[:6]}", "model": "test", "warnings": []},
         )
 
     def a_cohort(self):
@@ -1678,8 +1675,9 @@ class TestCutSlices(ServerCase):
                 self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
             elif outcome == "checkout":
                 self.assertEqual(self.order(sid, {"event": "checkout_started"}), 200)
-            (self.data_dir / "sessions" / sid / "analysis.json").write_text(
-                json.dumps({"text": f"write-up {outcome}", "model": "test", "warnings": []})
+            analyze.write_analysis(
+                self.data_dir / "sessions" / sid,
+                {"text": f"write-up {outcome}", "model": "test", "warnings": []},
             )
         qs = urllib.parse.urlencode(
             {

@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pgfixture
 import analyze
 
 
@@ -27,8 +29,9 @@ class GateProbe:
         self.active -= 1
 
 
-class TestAnalyzeGates(unittest.TestCase):
+class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self._saved = {
@@ -100,7 +103,7 @@ class TestAnalyzeGates(unittest.TestCase):
     def test_each_session_still_writes_its_results(self):
         _, _, dirs = self.run_cohort(n=3)
         for d in dirs:
-            saved = json.loads((d / analyze.ANALYSIS_FILE).read_text())
+            saved = analyze.read_analysis(d)
             self.assertEqual(saved["status"], "done")
             self.assertIn("What stands out", saved["text"])
 

@@ -188,9 +188,7 @@ class TestChatEndpoint(unittest.TestCase):
         for sid, text in (("a" * 32, "S-a write-up"), ("b" * 32, "S-b write-up")):
             d = cls.pool / sid
             d.mkdir(parents=True, exist_ok=True)
-            (d / analyze.ANALYSIS_FILE).write_text(
-                '{"status":"done","text":' + f'"{text}"' + "}"
-            )
+            analyze.write_analysis(d, {"status": "done", "text": text})
         cls.cohort = analyze.write_cohort(
             cls.pool,
             {

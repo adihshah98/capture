@@ -560,3 +560,89 @@ def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
     finally:
         legacy.close()
     return counts
+
+
+# --- per-session analysis results and job status ------------------------------
+# These were analysis.json and analysis.status.json beside the recording. The
+# frame cache stays on disk: it is regenerable scratch for one run, not state.
+
+
+def read_analysis(store: Store, pool_key: str, session_id: str) -> Optional[dict]:
+    with store.tx(pool_key) as (conn, project_id):
+        row = conn.execute(
+            "SELECT body FROM analyses WHERE project_id = %s AND session_id = %s",
+            (project_id, session_id),
+        ).fetchone()
+    if row is None:
+        return None
+    return row[0] if isinstance(row[0], dict) else None
+
+
+def write_analysis(store: Store, pool_key: str, session_id: str, result: dict) -> dict:
+    with store.tx(pool_key) as (conn, project_id):
+        conn.execute(
+            "INSERT INTO analyses (project_id, session_id, body, created_at)"
+            " VALUES (%s, %s, %s::jsonb, %s)"
+            " ON CONFLICT (project_id, session_id) DO UPDATE SET"
+            " body = excluded.body, created_at = excluded.created_at",
+            (
+                project_id, session_id, json.dumps(result),
+                int(result.get("created_at") or _now()),
+            ),
+        )
+    return result
+
+
+def clear_analysis(store: Store, pool_key: str, session_id: str) -> None:
+    with store.tx(pool_key) as (conn, project_id):
+        conn.execute(
+            "DELETE FROM analyses WHERE project_id = %s AND session_id = %s",
+            (project_id, session_id),
+        )
+
+
+def forget_analyses(store: Store, pool_key: str) -> int:
+    """Drop every write-up and job in a pool. The analysis half of a reset,
+    alongside forget_pool for cohorts."""
+    with store.tx(pool_key) as (conn, project_id):
+        removed = conn.execute(
+            "DELETE FROM analyses WHERE project_id = %s", (project_id,)
+        ).rowcount
+        conn.execute("DELETE FROM analysis_jobs WHERE project_id = %s", (project_id,))
+    return removed
+
+
+def read_job(store: Store, pool_key: str, session_id: str) -> Optional[dict]:
+    with store.tx(pool_key) as (conn, project_id):
+        row = _rows(conn).execute(
+            "SELECT status, error, updated_at FROM analysis_jobs"
+            " WHERE project_id = %s AND session_id = %s",
+            (project_id, session_id),
+        ).fetchone()
+    if row is None:
+        return None
+    job = {"status": row["status"], "updated_at": row["updated_at"]}
+    if row["error"]:
+        job["error"] = row["error"]
+    return job
+
+
+def write_job(store: Store, pool_key: str, session_id: str, job: dict) -> dict:
+    with store.tx(pool_key) as (conn, project_id):
+        conn.execute(
+            "INSERT INTO analysis_jobs (project_id, session_id, status, error, updated_at)"
+            " VALUES (%s, %s, %s, %s, %s)"
+            " ON CONFLICT (project_id, session_id) DO UPDATE SET"
+            " status = excluded.status, error = excluded.error,"
+            " updated_at = excluded.updated_at",
+            (project_id, session_id, job["status"], job.get("error"), job["updated_at"]),
+        )
+    return job
+
+
+def clear_job(store: Store, pool_key: str, session_id: str) -> None:
+    with store.tx(pool_key) as (conn, project_id):
+        conn.execute(
+            "DELETE FROM analysis_jobs WHERE project_id = %s AND session_id = %s",
+            (project_id, session_id),
+        )

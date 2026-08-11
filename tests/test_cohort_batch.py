@@ -131,8 +131,8 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.assertEqual(final["status"], "done")
         self.assertEqual(final["progress"]["done"], 2)
         self.assertNotIn("batch", final)
-        self.assertIn("What stands out", (a / "analysis.json").read_text())
-        self.assertIn("What stands out", (b / "analysis.json").read_text())
+        self.assertIn("What stands out", analyze.read_analysis(a)["text"])
+        self.assertIn("What stands out", analyze.read_analysis(b)["text"])
 
         still = analyze.read_cohort(self.pool, older["id"])
         self.assertEqual(still["label"], "keep me")
@@ -449,9 +449,7 @@ class TestPersistableCohort(pgfixture.CohortStoreMixin, unittest.TestCase):
         # leaves rows claiming "running" that only a re-read corrects.
         session_dir = self.pool / "s1"
         session_dir.mkdir()
-        (session_dir / analyze.ANALYSIS_FILE).write_text(
-            json.dumps({"status": "done", "text": "write-up"})
-        )
+        analyze.write_analysis(session_dir, {"status": "done", "text": "write-up"})
         stored = self.store(sessions=[{"session_id": "s1", "status": "running"}])
         _, saved = self.round_trip(stored)
         self.assertEqual(saved["status"], "done")
@@ -460,9 +458,7 @@ class TestPersistableCohort(pgfixture.CohortStoreMixin, unittest.TestCase):
     def test_write_ups_are_still_kept_out_of_the_file(self):
         session_dir = self.pool / "s1"
         session_dir.mkdir()
-        (session_dir / analyze.ANALYSIS_FILE).write_text(
-            json.dumps({"status": "done", "text": "write-up", "model": "m"})
-        )
+        analyze.write_analysis(session_dir, {"status": "done", "text": "write-up", "model": "m"})
         stored = self.store()
         enriched = analyze.attach_cohort_insights(
             self.pool, analyze.enrich_cohort_status(self.pool, stored)

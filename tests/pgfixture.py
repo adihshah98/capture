@@ -281,7 +281,7 @@ class CohortStoreMixin:
     def setUp(self):
         super().setUp()
         with psycopg.connect(self._pg_admin, autocommit=True) as conn:
-            # Cuts have no foreign key to cohorts, so they do not cascade.
-            conn.execute("DELETE FROM cohort_cuts")
-            conn.execute("DELETE FROM cohorts")
+            # None of these cascade from each other, so each is cleared.
+            for table in ("cohort_cuts", "cohorts", "analyses", "analysis_jobs"):
+                conn.execute(f"DELETE FROM {table}")
         self._pg_projects.invalidate()

@@ -281,7 +281,7 @@ class TestSessionDeletion(StoreCase):
     def seed(self):
         for sid in ("s0", "s1"):
             (self.pool / sid).mkdir()
-            (self.pool / sid / "analysis.json").write_text(json.dumps({"text": "write-up"}))
+            analyze.write_analysis(self.pool / sid, {"text": "write-up"})
         analyze.write_cohort(
             self.pool,
             {
