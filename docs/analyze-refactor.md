@@ -1,10 +1,15 @@
 # analyze.py refactor — handoff
 
-Working notes for the Tier 2 restructuring of [`analyze.py`](../analyze.py).
-Tier 1 (correctness) is done and on the `cleanups` branch; this file exists so
-the next session does not have to re-derive the analysis.
+Working notes for the Tier 2 restructuring of what was `analyze.py` and is now
+the [`analyze/`](../analyze/) package. Tier 1 (correctness) is done; this file
+exists so the next session does not have to re-derive the analysis.
 
 ## Where things stand
+
+**This work is on `main`, not `cleanups`.** The `cleanups` branch was rebased
+onto the Postgres move (`b3c6943`), so every SHA in the table below is the
+pre-rebase one and exists only on `cleanups`; `analyze.py` is byte-identical
+between the two. Work on `main`.
 
 Branch `cleanups`, five commits past `fbbc156`:
 
@@ -21,13 +26,25 @@ Branch `cleanups`, five commits past `fbbc156`:
 | `a1b4063` | A row claiming done with no write-up is `stale`, not done |
 | `b75e06d` | The cut cache key includes the prompt version |
 
-374 tests pass (`npm test` runs build + JS + Python; `.venv/bin/python -m
-unittest discover -s tests` for Python alone).
+438 tests pass (`npm test` runs build + JS + Python; `.venv/bin/python -m
+unittest discover -s tests` for Python alone). The count was 374 before the
+Postgres move added its own suites.
+
+**One known-flaky test**, unrelated to any of this:
+`test_durability.TestUnreadableRegistryFailsClosed.test_a_database_outage_is_retryable_not_a_500`
+fails intermittently (~1 in 3) on untouched `main` too. It points the server at
+a dead Postgres and expects a fast 503; sometimes the request times out
+instead. Worth fixing separately — it makes every refactor look guilty.
 
 **Not ours:** atomic writes (`os.replace` on every `write_text`) are being done
 on another branch. Do not touch the write paths in `analyze.py` —
 `write_cohort`, `write_analysis_result`, `write_job`, `write_cut` — beyond what
 a data-layer move unavoidably rewrites, and expect a merge conflict there.
+
+Partly landed as of `main`: `fsutil.atomic_write_{text,json}` exist and
+`server.py` uses them, but `analyze/__init__.py` still has three raw
+`write_text` calls (`write_job`, the legacy cohort migration,
+`write_analysis_result`). Still treat those three as someone else's.
 
 ## What the module is
 
@@ -37,10 +54,15 @@ roughly that much lower.
 
 | Concern | Roughly | What it is |
 |---|---|---|
-| Storage | 179–361, 2430–2452 | ~~JSON files as a database~~ → `analyze_store.py` |
-| Slice algebra | 503–735, 1877–1949 | the `{outcome, device, page, utm_*}` filter language |
-| Prompt engineering | 114–170, 738–1083, 1117–1425, 1672–1763 | ~1,100 lines of prompt text + measured splits |
-| Orchestration | 2455–3324 | subprocess extraction, Gemini interactive + Batch, cohort job, CLI |
+| Storage | 179–361, 2430–2452 | ~~JSON files as a database~~ → `analyze/store.py` |
+| Slice algebra | 503–735, 1877–1949 | ~~the `{outcome, device, page, utm_*}` filter language~~ → `analyze/slices.py` |
+| Prompt engineering | 114–170, 738–1083, 1117–1425, 1672–1763 | ~~prompt text~~ → `analyze/prompts/*.md`; ~~measured splits~~ → `analyze/stats.py` |
+| Orchestration | 2455–3324 | subprocess extraction, Gemini interactive + Batch, cohort job, CLI — **still in `__init__.py`** |
+
+Line numbers throughout this file are from the original 3,750-line `analyze.py`
+and are now wrong by roughly a thousand lines: the §3 moves took ~940 lines out.
+Treat them as a rough ordering, and grep for the symbol name instead. The "Known
+bugs" numbers below have the same problem.
 
 Pipeline:
 
@@ -84,7 +106,7 @@ Load-bearing decisions that look incidental. Do not lose these in a rewrite.
 ### 1. Cohort state into SQLite — **done** (`14ce676`)
 
 Cohorts, membership and the cut cache are three tables in `data/index.db`, in
-[`analyze_store.py`](../analyze_store.py). Storage functions in `analyze.py` keep
+[`analyze/store.py`](../analyze/store.py). Storage functions in `analyze.py` keep
 their `pool: Path` signatures and dict shapes, so `server.py` was not touched.
 
 What landed:
@@ -198,7 +220,65 @@ is why the bug survived the first pass.
 record and the response view. Making that a type distinction rather than a
 field list is still open, and is the natural companion to §3.
 
-### 3. Package, with prompts as files
+### 3. Package, with prompts as files — **in progress**
+
+Landed so far (`933bbe5`, `f4c01b4`, `ab6ef7d`, `da3a9ca`). `analyze.py` 3,967 →
+3,030 lines, and it is now `analyze/__init__.py`:
+
+```
+analyze/
+  __init__.py   # everything not yet moved, + patch forwarding
+  prompts/
+    __init__.py  session.md  cut.md  chat.md
+  slices.py     # the filter language — pure, 292 lines
+  stats.py      # measured splits — 273 lines
+  store.py      # was analyze_store.py, moved unchanged
+```
+
+`server.py` and the tests were not touched; all 52 `analyze.*` call sites still
+resolve through `__init__.py`. `analyze_store.py` remains as a shim that rebinds
+`sys.modules` to `analyze.store` — not a re-export, because three test modules
+call `analyze_store.close_all` in cleanup and the connection cache is module
+state, so it has to be the same module object.
+
+**Prompt hashes are unchanged** — `session 5637eecc`, `cut d6416d2b`,
+`chat 6007448b`. The files were written out of the loaded literals and verified
+to round-trip, because `cut_key` bakes that hash into every cached cut key and
+one changed byte re-bills every cut. `load()` therefore does not strip:
+`session.md` genuinely ends in a trailing space. It was ~495 lines of literal,
+not the ~1,100 estimated below — the rest is prompt-adjacent Python that stays
+code.
+
+**`cut_key` and `prompt_version` stayed in `__init__.py`.** `cut_key` reads the
+`CUT_PROMPT` global and the cache tests reassign `analyze.CUT_PROMPT` to check
+invalidation; moving it into `prompts/` would bind the value at import and break
+that seam with the tests still green.
+
+**Patch forwarding** (`da3a9ca`) is the constraint the rest of this split has to
+respect. The tests swap the expensive edges by assignment
+(`analyze.run_extractor = fake`, `analyze.wait_gemini_batch = fake`) and then
+drive the real pipeline — which works only while caller and callee share one
+namespace. Once `pipeline.py` does `from .models import call_gemini`, the name
+is bound at import and `analyze.call_gemini = fake` rebinds only the re-export:
+a real network call from a suite that still passes, because those tests assert
+on cohort state rather than on which function ran. `__init__.py` therefore
+forwards attribute assignment to whichever submodule defines the name, with
+owners discovered from `vars()` rather than a hand-written map. **Submodules
+must call through the module object** (`models.call_gemini(...)`), not import
+the name.
+
+Still to move: `extract.py`, `models.py`, `pipeline.py`, `cli.py` — the
+orchestration half, which is also where the three remaining raw `write_text`
+calls live (see the atomic-write note above; `fsutil` landed in `server.py` but
+not here).
+
+**`deploy.sh` names the package now.** It listed `analyze.py` in both the
+tarball and the rollback copy, and never listed `analyze_store.py` at all — so
+the store had been shipping stale since `14ce676`. Both now name `analyze`,
+which recurses. The tarball must carry `prompts/*.md`: the loader reads them at
+import, so a missing `cut.md` is a startup crash rather than a degraded mode.
+
+#### Original plan
 
 ~1,100 of 3,500 lines are prompt literals interleaved with the code that uses
 them. The git log is almost entirely prompt work, yet a prompt cannot be
@@ -281,6 +361,13 @@ From the audit, not yet fixed. Numbers are `analyze.py` lines.
 10. **`prepared.append` from concurrent coroutines (3151, 3159)** atomic under the
     GIL, but the order is nondeterministic. Latent trap if anything ever assumes
     `prepared[i]` matches `sessions[i]`.
+11. ~~**`deploy.sh` never shipped `analyze_store.py`.**~~ Fixed in `da3a9ca`. It
+    listed files by name in both the tarball and the rollback copy, and the
+    store was added to neither when it was introduced in `14ce676` — so the
+    deployed box kept running the pre-SQLite module. Now names the `analyze`
+    directory, which recurses. Worth auditing the rest of that list against a
+    fresh checkout: it is a hand-maintained enumeration of every deployable
+    file, which is the same rot mechanism as bug 8.
 
 ## Tier 3, for later
 
