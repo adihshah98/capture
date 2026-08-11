@@ -1,0 +1,38 @@
+# Tool configuration only. Dependencies stay in requirements.txt for now.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# capture/analyze is the co-founder's; src/analyze is its Node extractor.
+extend-exclude = ["capture/analyze", "src/analyze", ".venv", "node_modules"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
+ignore = [
+    # The formatter owns line length; it cannot always split a long string.
+    "E501",
+    # FastAPI's Query()/Depends() defaults are the framework's calling convention.
+    "B008",
+    # ClassVar annotations on mutable class attrs — noise for this codebase's shape.
+    "RUF012",
+    # `×` in cross-tab labels is deliberate and matches analyze.py's output.
+    "RUF001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+exclude = ["^capture/analyze/", "^\\.venv/", "^tests/"]
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: no database, no network, no disk",
+    "integration: needs a real Postgres",
+]

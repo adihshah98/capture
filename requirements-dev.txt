@@ -1,0 +1,9 @@
+-r requirements.txt
+
+# Pinned exactly, and kept in step with .pre-commit-config.yaml: two ruff
+# versions disagree about formatting, and the disagreement surfaces as a CI
+# failure on code that was clean locally.
+ruff==0.8.5
+mypy==1.14.1
+pytest==8.3.4
+pre-commit==4.0.1
