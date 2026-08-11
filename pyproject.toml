@@ -4,7 +4,9 @@
 line-length = 100
 target-version = "py311"
 # capture/analyze is the co-founder's; src/analyze is its Node extractor.
-extend-exclude = ["capture/analyze", "src/analyze", ".venv", "node_modules"]
+# .claude holds agent git worktrees — full copies of this repo. Without this,
+# `ruff .` walks them and reports (or fixes) findings in someone else's checkout.
+extend-exclude = ["capture/analyze", "src/analyze", ".venv", "node_modules", ".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]

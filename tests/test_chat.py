@@ -175,6 +175,7 @@ class TestChatEndpoint(unittest.TestCase):
         os.environ["CAPTURE_PROJECT_CACHE_TTL_S"] = "0"
         pgfixture.seed_default_project(cls.admin_url)
         from capture import server
+        from capture.api import deps
 
         cls.server = server
         from fastapi.testclient import TestClient
@@ -182,7 +183,7 @@ class TestChatEndpoint(unittest.TestCase):
         cls.client = TestClient(server.app)
 
         # A cohort of two analyzed sessions, written straight to disk.
-        cls.pool = server.resolve_pool(None)
+        cls.pool = deps.resolve_pool(None)
         for sid, text in (("a" * 32, "S-a write-up"), ("b" * 32, "S-b write-up")):
             d = cls.pool / sid
             d.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,5 @@
 import asyncio
 import base64
-import hashlib
-import hmac
 import json
 import random
 import re
@@ -37,8 +35,14 @@ except ImportError:
     pass
 
 from . import analysis_port as ap
-from . import compat, config, db, paths, projects, sessionstore, snippet, storage, workos
-from .api import meta
+from . import compat, config, db, paths, projects, session, sessionstore, storage, workos
+from .api import auth, meta
+from .api.deps import (
+    allowed_projects,
+    require_read_access,
+    resolve_project,
+    resolve_session,
+)
 from .errors import ApiError
 from .fsutil import atomic_write_bytes
 from .paths import SAFE_CHUNK, SAFE_ID, chunk_timestamp, chunk_window
@@ -49,7 +53,7 @@ from .projects import ProjectsUnavailable
 async def lifespan(_app):
     if config.REPLAY_AUTH_DISABLED:
         print(
-            "warning: config.REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
+            "warning: REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
             "open to anyone who can reach this server"
         )
     elif workos.enabled():
@@ -60,8 +64,7 @@ async def lifespan(_app):
         )
     elif not config.REPLAY_PASSWORD:
         print(
-            "config.REPLAY_PASSWORD is not set — the replay UI and read API will "
-            "return 503 until it is"
+            "REPLAY_PASSWORD is not set — the replay UI and read API will " "return 503 until it is"
         )
 
     if config.READ_ONLY:
@@ -113,6 +116,7 @@ async def lifespan(_app):
 app = FastAPI(title="capture", lifespan=lifespan)
 
 app.include_router(meta.router)
+app.include_router(auth.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -128,18 +132,18 @@ async def replay_auth(request: Request, call_next):
     protected = path.startswith("/api/") or path == "/replay.html"
     if protected and not config.REPLAY_AUTH_DISABLED:
         if workos.enabled():
-            session = read_session(request.cookies.get(config.SESSION_COOKIE))
+            claims = session.read(request.cookies.get(config.SESSION_COOKIE))
 
-            if not session or not session.get("user_id"):
+            if not claims or not claims.get("user_id"):
                 if path == "/replay.html":
                     return RedirectResponse("/login", status_code=302)
                 return JSONResponse({"error": "login required", "login": "/login"}, status_code=401)
-            request.state.auth = session
+            request.state.auth = claims
         elif not config.REPLAY_PASSWORD:
             return Response(
-                "Replay access is unconfigured. Set config.REPLAY_PASSWORD to a secret "
+                "Replay access is unconfigured. Set REPLAY_PASSWORD to a secret "
                 "(or WORKOS_API_KEY + WORKOS_CLIENT_ID for per-user logins), "
-                "or config.REPLAY_AUTH_DISABLED=1 to serve recordings to anyone.\n",
+                "or REPLAY_AUTH_DISABLED=1 to serve recordings to anyone.\n",
                 status_code=503,
                 media_type="text/plain",
             )
@@ -181,30 +185,6 @@ async def revalidate_static(request: Request, call_next):
 paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _sign(raw: str) -> str:
-    return hmac.new(config.SESSION_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
-
-
-def make_session(payload: dict) -> str:
-    raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-    return f"{raw}.{_sign(raw)}"
-
-
-def read_session(cookie: str | None) -> dict | None:
-    if not cookie or "." not in cookie:
-        return None
-    raw, sig = cookie.rsplit(".", 1)
-    if not secrets.compare_digest(_sign(raw), sig):
-        return None
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
-    except Exception:
-        return None
-    if not isinstance(payload, dict) or payload.get("exp", 0) < time.time():
-        return None
-    return payload
-
-
 def require_allowed_domain(request: Request, project: projects.Project | None) -> None:
     domains = list(project.domains) if project else []
     if not domains:
@@ -243,26 +223,6 @@ async def api_error_response(_request, exc: ApiError) -> JSONResponse:
 async def projects_unavailable_response(_request, exc: ProjectsUnavailable) -> JSONResponse:
     print(f"projects: refusing to serve — {exc}")
     return JSONResponse({"error": "project configuration unavailable"}, status_code=503)
-
-
-def resolve_project(handle: str | None) -> projects.Project:
-    found = projects.by_handle(handle)
-    if found is None:
-        raise ApiError(404, "unknown project")
-    return found
-
-
-def resolve_pool(project: str | None) -> Path:
-    return resolve_project(project).pool
-
-
-def resolve_session(session_id: str, project: str | None) -> Path:
-    if not SAFE_ID.match(session_id):
-        raise ApiError(400, "invalid session_id")
-    path = resolve_pool(project) / session_id
-    if not path.is_dir():
-        raise ApiError(404, "not found")
-    return path
 
 
 @app.post("/ingest")
@@ -506,11 +466,6 @@ def chunk_files(session_dir: Path) -> list:
     )
 
 
-def read_pool(project: str | None) -> Path | None:
-    found = projects.by_handle(project)
-    return found.pool if found else None
-
-
 ATTRIBUTION_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid")
 
 
@@ -611,75 +566,6 @@ def session_info(entry: Path) -> dict | None:
     return info
 
 
-@app.get("/login")
-def login():
-    if not workos.enabled():
-        return Response(
-            "Per-user login is not configured; set WORKOS_API_KEY and WORKOS_CLIENT_ID.\n",
-            status_code=503,
-            media_type="text/plain",
-        )
-    state = secrets.token_urlsafe(24)
-    target = workos.authorize_url(snippet.public_base_url() + "/auth/callback", state)
-    response = RedirectResponse(target, status_code=302)
-    response.set_cookie(
-        config.STATE_COOKIE, state, max_age=600, httponly=True, secure=True, samesite="lax"
-    )
-    return response
-
-
-@app.get("/auth/callback")
-def auth_callback(
-    request: Request, code: str | None = Query(None), state: str | None = Query(None)
-):
-    if not workos.enabled():
-        raise ApiError(503, "login not configured")
-    if not code or not state or state != request.cookies.get(config.STATE_COOKIE):
-        return RedirectResponse("/login", status_code=302)
-    try:
-        email, user_id = workos.authenticate(code)
-    except Exception as exc:
-        print(f"auth: WorkOS code exchange failed: {exc}")
-        raise ApiError(401, "login failed — start again at /login") from exc
-    if not user_id:
-        raise ApiError(401, "login failed — start again at /login")
-    session = make_session(
-        {"email": email, "user_id": user_id, "exp": int(time.time()) + config.SESSION_TTL_S}
-    )
-    response = RedirectResponse("/replay.html", status_code=302)
-    response.set_cookie(
-        config.SESSION_COOKIE,
-        session,
-        max_age=config.SESSION_TTL_S,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-    )
-    response.delete_cookie(config.STATE_COOKIE)
-    return response
-
-
-@app.get("/logout")
-def logout():
-    response = RedirectResponse("/", status_code=302)
-    response.delete_cookie(config.SESSION_COOKIE)
-    return response
-
-
-def allowed_projects(request: Request) -> set | None:
-    auth = getattr(request.state, "auth", None)
-    if auth is None or (auth.get("email") or "").lower() in config.OPERATORS:
-        return None
-    orgs = workos.user_orgs(auth.get("user_id") or "")
-    return {p.handle for p in projects.for_orgs(orgs)}
-
-
-def require_read_access(request: Request, project: str | None) -> None:
-    allowed = allowed_projects(request)
-    if allowed is not None and (not project or project not in allowed):
-        raise ApiError(403, "not your project")
-
-
 @app.get("/api/projects")
 def list_projects(request: Request):
     allowed = allowed_projects(request)
@@ -694,9 +580,6 @@ def list_projects(request: Request):
         "analysis_enabled": ap.enabled() and ap.runtime_present(),
         **({"email": email} if email else {}),
     }
-
-
-SESSION_FILTERS = sessionstore.FILTERS
 
 
 @app.get("/api/sessions")
