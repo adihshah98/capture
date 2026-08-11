@@ -20,10 +20,12 @@ class FakeS3:
 
     def __init__(self):
         self.objects: dict = {}
+        self.put_kwargs: dict = {}
         self.presigned: list = []
 
     def put_object(self, Bucket, Key, Body, **kw):
         self.objects[Key] = Body
+        self.put_kwargs[Key] = kw
 
     def get_object(self, Bucket, Key):
         if Key not in self.objects:
@@ -150,6 +152,15 @@ class TestS3Backend(StorageCase):
         storage.put_chunk("cap_a", "s1", name, b"x")
         url = storage.chunk_url("cap_a", "s1", name)
         self.assertIn(f"sessions/cap_a/s1/{name}", url)
+
+    def test_chunks_are_stored_immutable_and_cacheable(self):
+        """A redirect cannot set caching for the object it points at, so the
+        header has to be on the object or every replay re-downloads."""
+        name = chunk_name(1000)
+        storage.put_chunk("cap_a", "s1", name, b"x")
+        kw = self.fake.put_kwargs[f"sessions/cap_a/s1/{name}"]
+        self.assertEqual(kw["CacheControl"], storage.CHUNK_CACHE_CONTROL)
+        self.assertEqual(kw["ContentType"], "application/json")
 
     def test_no_presigned_url_for_a_key_that_is_not_there_yet(self):
         """The caller must fall back to serving the bytes, or a not-yet-copied

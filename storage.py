@@ -30,6 +30,7 @@ PROJECTS_DIR = DATA_ROOT / "projects"
 BUCKET = os.environ.get("CAPTURE_S3_BUCKET", "")
 S3_PREFIX = os.environ.get("CAPTURE_S3_PREFIX", "sessions").strip("/")
 URL_TTL_S = int(os.environ.get("CAPTURE_S3_URL_TTL_S", "900"))
+CHUNK_CACHE_CONTROL = "public, max-age=86400, immutable"
 
 _lock = threading.Lock()
 _client = None
@@ -78,6 +79,10 @@ def put_chunk(storage_prefix: str, session_id: str, name: str, body: bytes) -> N
             Key=key_for(storage_prefix, session_id, name),
             Body=body,
             ContentType="application/json",
+            # Chunks are immutable once written, so the browser should never
+            # re-fetch one. Set on the object because a redirect cannot carry
+            # caching for the resource it points at.
+            CacheControl=CHUNK_CACHE_CONTROL,
         )
         return
     from fsutil import atomic_write_bytes

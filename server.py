@@ -43,6 +43,7 @@ import compat
 import db
 import projects
 import sessionstore
+import storage
 from projects import ProjectsUnavailable
 from fsutil import atomic_write_json, atomic_write_text
 
@@ -367,19 +368,19 @@ async def ingest(
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     window_prefix = re.sub(r"[^a-f0-9]", "", str(payload.get("window_id") or ""))[:8]
     parts = [str(now), window_prefix, suffix]
-    chunk_path = session_dir / ("-".join(p for p in parts if p) + ".json")
-    atomic_write_json(
-        chunk_path,
+    chunk_name = "-".join(p for p in parts if p) + ".json"
+    stored = json.dumps(
         {
             "window_id": payload.get("window_id"),
             "url": payload.get("url"),
             "received_at": now,
             "events": events,
-        },
-    )
+        }
+    ).encode()
+    storage.put_chunk(project.storage_prefix, session_id, chunk_name, stored)
     clicks, rage = count_clicks(events)
     device = read_device(events)
-    size = chunk_path.stat().st_size
+    size = len(stored)
     first_ts, last_ts = event_span(events) or (now, now)
 
     window_id = str(payload.get("window_id") or "default")
@@ -872,7 +873,7 @@ def delete_session(request: Request, session_id: str, project: Optional[str] = Q
     require_read_access(request, project)
     found = resolve_project(project)
     session_dir = resolve_session(session_id, project)
-    freed = dir_bytes(session_dir)
+    freed = storage.delete_session(found.storage_prefix, session_id)
     shutil.rmtree(session_dir, ignore_errors=True)
     sessionstore.forget(found.id, session_id)
     # Cohort membership references a recording that no longer exists. Left
@@ -891,19 +892,23 @@ def delete_session(request: Request, session_id: str, project: Optional[str] = Q
 @app.get("/api/sessions/{session_id}/chunks")
 def session_chunks(request: Request, session_id: str, project: Optional[str] = Query(None)):
     require_read_access(request, project)
-    chunks = chunk_files(resolve_session(session_id, project))
+    found = resolve_project(project)
+    chunks = storage.list_chunks(found.storage_prefix, session_id)
+    if not chunks:
+        raise ApiError(404, "not found")
     url = None
-    if chunks:
+    first = storage.open_chunk(found.storage_prefix, session_id, chunks[0].name)
+    if first:
         try:
-            url = json.loads(chunks[0].read_text()).get("url")
+            url = json.loads(first).get("url")
         except Exception:
             pass
     manifest = [
         {
             "name": c.name,
-            "timestamp": chunk_timestamp(c),
-            "bytes": c.stat().st_size,
-            "window": chunk_window(c),
+            "timestamp": storage.chunk_timestamp(c.name),
+            "bytes": c.size,
+            "window": storage.chunk_window(c.name),
         }
         for c in chunks
     ]
@@ -915,12 +920,25 @@ def session_chunk(request: Request, session_id: str, chunk_name: str, project: O
     require_read_access(request, project)
     if not SAFE_ID.match(session_id) or not SAFE_CHUNK.match(chunk_name):
         raise ApiError(400, "invalid id")
-    path = resolve_pool(project) / session_id / chunk_name
-    if not path.is_file():
-        raise ApiError(404, "not found")
+    prefix = resolve_project(project).storage_prefix
 
-    return FileResponse(
-        path, media_type="application/json", headers={"Cache-Control": "max-age=86400"}
+    # Hand the browser a presigned URL so the bytes never transit the origin.
+    # None means the chunk has not reached S3 yet, so serve it from the pool.
+    signed = storage.chunk_url(prefix, session_id, chunk_name)
+    if signed:
+        # The redirect itself must not be cached — the URL it carries expires.
+        # The object it points at is immutable and caches for a day.
+        return RedirectResponse(
+            signed, status_code=307, headers={"Cache-Control": "no-store"}
+        )
+
+    body = storage.open_chunk(prefix, session_id, chunk_name)
+    if body is None:
+        raise ApiError(404, "not found")
+    return Response(
+        body,
+        media_type="application/json",
+        headers={"Cache-Control": storage.CHUNK_CACHE_CONTROL},
     )
 
 _analysis_tasks: dict = {}
