@@ -26,6 +26,11 @@ jobs:
       - run: ruff format --check .
       - run: mypy capture/
 
+      # The fast tier: no Postgres, so it belongs here rather than in the test
+      # job. Enforced by tests/conftest.py, which fails a unit test that opens a
+      # database connection.
+      - run: pytest tests/ -m unit -q
+
   test:
     runs-on: ubuntu-latest
 

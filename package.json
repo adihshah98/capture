@@ -7,6 +7,8 @@
     "test": "npm run build && node --test tests/*.test.mjs && .venv/bin/python -m unittest discover -s tests",
     "test:client": "npm run build && node --test tests/*.test.mjs",
     "test:server": ".venv/bin/python -m unittest discover -s tests",
+    "test:fast": ".venv/bin/python -m pytest tests/ -m unit -q",
+    "lint": ".venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy capture/",
     "start": ".venv/bin/uvicorn capture.server:app --port 3000",
     "dev": "npm run build && REPLAY_AUTH_DISABLED=1 .venv/bin/uvicorn capture.server:app --port 3000"
   },
