@@ -11,14 +11,33 @@ The client SDK is JavaScript (rrweb runs in the browser); the server is Python
 ```bash
 npm install                                  # build-time deps (esbuild, rrweb)
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-dev.txt # ruff, mypy, pytest — for lint and the fast tests
 npm run dev        # builds bundles + starts the server on :3000
-npm test           # client + server tests (no test dependencies to install)
+npm test           # client + server tests (needs no dev dependencies)
 ```
 
 `npm test` runs the client tests through Node's built-in runner and the server
 tests through `unittest`. The server tests boot real uvicorn processes against
 a throwaway `CAPTURE_DATA_DIR`, so they exercise what ships — middleware order,
 env parsing, status codes — and never touch your recordings.
+
+Two shorter loops, both needing `requirements-dev.txt`:
+
+```bash
+npm run test:fast  # the tests that need no database — ~1s
+npm run lint       # ruff check, ruff format --check, mypy
+```
+
+`npm run test:fast` runs what `tests/conftest.py` marks `unit`, and that marker is
+enforced: a unit test that opens a database connection fails. Everything else
+needs Postgres and takes about two and a half minutes. `capture/analyze/` is
+excluded from ruff and mypy — it belongs to the analysis refactor.
+
+Install the pre-commit hook once and formatting stops reaching CI:
+
+```bash
+.venv/bin/pre-commit install
+```
 
 - **Demo page** (instrumented): http://localhost:3000/
 - **Replay UI**: http://localhost:3000/replay.html
