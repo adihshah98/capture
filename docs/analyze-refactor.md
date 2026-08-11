@@ -19,8 +19,9 @@ Branch `cleanups`, five commits past `fbbc156`:
 | `60759c8` | **Tier 2.2**: the cohort state machine (below) |
 | `e8b1cc4` | Per-session marks write one row, not the whole document |
 | `a1b4063` | A row claiming done with no write-up is `stale`, not done |
+| `b75e06d` | The cut cache key includes the prompt version |
 
-364 tests pass (`npm test` runs build + JS + Python; `.venv/bin/python -m
+374 tests pass (`npm test` runs build + JS + Python; `.venv/bin/python -m
 unittest discover -s tests` for Python alone).
 
 **Not ours:** atomic writes (`os.replace` on every `write_text`) are being done
@@ -216,10 +217,25 @@ analyze/
   cli.py
 ```
 
-**`cut_key` must include the prompt version hash.** It currently hashes only the
-filter (725–729), so editing `CUT_PROMPT` leaves every cached cut stale forever
-with no invalidation path — the docstring at 338 acknowledges this as
-intentional. Fixing it is part of moving prompts to files.
+**`cut_key` includes the prompt version hash** — **done** (`b75e06d`), ahead of
+the package move rather than as part of it. The key is now
+`{"filter": …, "prompt": <8 hex>}`, where the hash is `prompt_version(CUT_PROMPT)`
+— content-addressed, because a version constant someone must remember to bump
+is the mechanism that rots. Reverting a prompt restores the old key, so a
+revert reuses its cache rather than paying again.
+
+The model is deliberately *not* in the key: switching `GEMINI_MODEL` is rare
+and intentional, and each cut already records the `model` that made it, so it
+stays traceable without invalidating every cohort at once on an env-var change.
+
+When prompts become files, `prompt_version` should hash the file rather than
+the literal — the function is the seam, and nothing else needs to move.
+
+**Dead data found:** one of the three cached cuts is keyed
+`{"a":{"outcome":"purchased"},"b":{"outcome":"all"}}`, a shape no current code
+can produce or read — a leftover from a retired A/B compare feature. It was
+already unreachable before `b75e06d`. Worth a sweep of cut rows whose key does
+not parse to the current shape.
 
 `server.py` imports `analyze` as a module and uses ~60 attributes off it. Keep
 `analyze/__init__.py` re-exporting the current surface so the split lands without
