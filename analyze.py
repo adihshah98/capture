@@ -541,8 +541,11 @@ COHORT_TRANSITIONS = {
                           CohortState.RUNNING},
     CohortState.PAUSED: {CohortState.RUNNING, CohortState.QUEUED, CohortState.DONE,
                          CohortState.PAUSED},
-    # Terminal, but recomputed: see above.
-    CohortState.DONE: {CohortState.DONE, CohortState.ERROR, CohortState.RUNNING},
+    # Terminal, but recomputed: see above. QUEUED is reachable from both
+    # because a write-up can go missing after the fact (rule 5), which returns
+    # the cohort to needing work.
+    CohortState.DONE: {CohortState.DONE, CohortState.ERROR, CohortState.RUNNING,
+                       CohortState.QUEUED},
     CohortState.ERROR: {CohortState.ERROR, CohortState.DONE, CohortState.RUNNING,
                         CohortState.QUEUED},
 }
@@ -570,6 +573,14 @@ def cohort_transition(current: str, nxt: str, *, why: str = "") -> str:
 _undeclared_transitions: list = []
 
 
+# A row that claims to be analyzed but has no write-up behind it. Not an
+# error (nothing failed) and not queued (nothing scheduled it): the result was
+# removed after the fact — `clear_analysis` on a re-analyze, a deleted file, a
+# crash between clearing and re-queuing. Named so the cohort can decline to
+# count it as done instead of reporting a result it cannot show.
+SESSION_STALE = "stale"
+
+
 def project_cohort_status(stored: str, tally: dict, *, total: int) -> str:
     """Decide a cohort's status from its session tallies.
 
@@ -585,14 +596,20 @@ def project_cohort_status(stored: str, tally: dict, *, total: int) -> str:
          resurrected by one leftover row; the user has to retry.
       4. Everything settled with at least one error — done if anything
          succeeded, error if nothing did.
+
+    A `stale` row (claims done, has no write-up) counts as outstanding
+    throughout: it blocks rule 1, and rule 4 will not call the cohort settled
+    while one is present. The cohort must not report a completed analysis it
+    cannot substantiate.
     """
     current = stored if stored in COHORT_STATES else CohortState.IDLE
     done, running, queued, errors = (
         tally["done"], tally["running"], tally["queued"], tally["error"],
     )
+    stale = tally.get("stale", 0)
 
     # 1. Nothing left to do.
-    if not total or done >= total:
+    if not total or (done >= total and not stale):
         return cohort_transition(current, CohortState.DONE, why="all sessions accounted for")
 
     # 2. Sticky states.
@@ -606,9 +623,16 @@ def project_cohort_status(stored: str, tally: dict, *, total: int) -> str:
         return cohort_transition(current, CohortState.RUNNING, why="sessions still to analyze")
 
     # 4. Settled with errors.
-    if errors and done + errors >= total and not queued and not running:
+    if errors and done + errors >= total and not queued and not running and not stale:
         settled = CohortState.ERROR if done == 0 else CohortState.DONE
         return cohort_transition(current, settled, why="every session settled")
+
+    # 5. Stale rows with nothing in flight. Not done — the write-ups those
+    # rows claim are gone — but nothing is working on them either, so the
+    # cohort needs a re-analyze rather than a wait. `queued` says exactly
+    # that: work outstanding, nothing running.
+    if stale and current in (CohortState.DONE, CohortState.ERROR):
+        return cohort_transition(current, CohortState.QUEUED, why="write-ups missing, needs re-analysis")
 
     return current
 
@@ -616,7 +640,7 @@ def project_cohort_status(stored: str, tally: dict, *, total: int) -> str:
 def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
     """Refresh per-session status from analysis.json / analysis.status.json on disk."""
     sessions = []
-    done = running = queued = errors = 0
+    done = running = queued = errors = stale = 0
     for entry in cohort.get("sessions") or []:
         row = dict(entry)
         # Insights text is attached on read for the API — never persist it here.
@@ -646,7 +670,13 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
         elif row.get("status") == "error":
             errors += 1
         elif row.get("status") == "done":
-            done += 1
+            # Claims done, but the branches above found no analysis.json. The
+            # write-up was removed after the fact (clear_analysis on a
+            # re-analyze, a deleted file, a crash between the two). Counting it
+            # done would have the cohort report a result with nothing behind it.
+            row["status"] = SESSION_STALE
+            row["error"] = row.get("error") or "write-up is missing — re-analyze this session"
+            stale += 1
         else:
             row["status"] = "queued"
             queued += 1
@@ -658,6 +688,7 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
         "running": running,
         "queued": queued,
         "error": errors,
+        "stale": stale,
     }
     status = project_cohort_status(
         cohort.get("status") or CohortState.IDLE, progress, total=len(sessions)

@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import analyze
+import analyze_store
 
 BASELINE = json.loads((Path(__file__).parent / "fixtures" / "cohort_status_baseline.json").read_text())
 
@@ -32,8 +33,21 @@ BASELINE = json.loads((Path(__file__).parent / "fixtures" / "cohort_status_basel
 KNOWN_DIVERGENCES: dict = {}
 
 
-def cohort_of(stored, done, error, queued):
-    sessions = [{"session_id": f"d{i}", "status": "done"} for i in range(done)]
+def cohort_of(stored, done, error, queued, *, writeups=True, pool=None):
+    """A cohort with the given tallies.
+
+    `writeups` decides whether the done rows have an analysis.json behind them.
+    False is the stale case: a row claiming done whose write-up was removed
+    after the fact. The distinction is the point of half the baseline.
+    """
+    sessions = []
+    for i in range(done):
+        sid = f"d{i}"
+        sessions.append({"session_id": sid, "status": "done"})
+        if writeups and pool is not None:
+            directory = pool / sid
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "analysis.json").write_text(json.dumps({"text": "write-up"}))
     sessions += [{"session_id": f"e{i}", "status": "error"} for i in range(error)]
     sessions += [{"session_id": f"q{i}", "status": "queued"} for i in range(queued)]
     cohort = {"id": "c", "sessions": sessions}
@@ -54,13 +68,24 @@ class TestStatusBaseline(unittest.TestCase):
     def test_the_baseline_is_not_empty(self):
         self.assertGreater(len(BASELINE), 100)
 
+    def build(self, case):
+        """Rebuild one recorded case in a clean pool."""
+        for path in self.pool.iterdir():
+            shutil.rmtree(path, ignore_errors=True)
+        return cohort_of(
+            case["stored"],
+            case["done"],
+            case["error"],
+            case["queued"],
+            writeups=case["writeups"],
+            pool=self.pool,
+        )
+
     def test_every_recorded_case_still_decides_the_same_way(self):
         mismatches = []
         for case in BASELINE:
-            key = (case["stored"], case["done"], case["error"], case["queued"])
-            got = analyze.enrich_cohort_status(
-                self.pool, cohort_of(*key)
-            )["status"]
+            key = (case["writeups"], case["stored"], case["done"], case["error"], case["queued"])
+            got = analyze.enrich_cohort_status(self.pool, self.build(case))["status"]
             expect = KNOWN_DIVERGENCES.get(key, (case["expect"], None))[0]
             if got != expect:
                 mismatches.append(f"{key}: expected {expect}, got {got}")
@@ -68,9 +93,126 @@ class TestStatusBaseline(unittest.TestCase):
 
     def test_progress_tallies_are_unchanged(self):
         for case in BASELINE:
-            key = (case["stored"], case["done"], case["error"], case["queued"])
-            got = analyze.enrich_cohort_status(self.pool, cohort_of(*key))["progress"]
+            key = (case["writeups"], case["stored"], case["done"], case["error"], case["queued"])
+            got = analyze.enrich_cohort_status(self.pool, self.build(case))["progress"]
             self.assertEqual(got, case["progress"], f"progress changed for {key}")
+
+    def test_the_baseline_covers_both_the_write_up_and_stale_cases(self):
+        """Half the value is the contrast: identical tallies decide
+        differently depending on whether the write-ups are actually there."""
+        self.assertTrue(any(c["writeups"] for c in BASELINE))
+        self.assertTrue(any(not c["writeups"] for c in BASELINE))
+        with_ups = {
+            (c["stored"], c["done"], c["error"], c["queued"]): c["expect"]
+            for c in BASELINE
+            if c["writeups"]
+        }
+        without = {
+            (c["stored"], c["done"], c["error"], c["queued"]): c["expect"]
+            for c in BASELINE
+            if not c["writeups"]
+        }
+        differing = [k for k in with_ups if with_ups[k] != without.get(k)]
+        self.assertTrue(differing, "the two halves must not be identical")
+
+
+class TestStaleRows(unittest.TestCase):
+    """A row claiming done with no analysis.json behind it.
+
+    The old fall-through counted it as done, so a cohort reported a completed
+    analysis it could not show — the UI offered a session that opened to
+    nothing, and a cut would cite it as evidence.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.pool = Path(self.tmp) / "sessions"
+        self.pool.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def cohort(self, n=1, status="done"):
+        analyze.write_cohort(
+            self.pool,
+            {
+                "id": "c",
+                "created_at": 1,
+                "status": status,
+                "sessions": [
+                    {"session_id": f"s{i}", "status": "done", "analysis": "analysis.json"}
+                    for i in range(n)
+                ],
+            },
+        )
+        for i in range(n):
+            directory = self.pool / f"s{i}"
+            directory.mkdir(exist_ok=True)
+            (directory / "analysis.json").write_text(json.dumps({"text": "write-up"}))
+        self.addCleanup(analyze_store.close_all)
+        self.addCleanup(analyze._migrated.clear)
+        return analyze.read_cohort(self.pool, "c")
+
+    def live(self):
+        return analyze.enrich_cohort_status(self.pool, analyze.read_cohort(self.pool, "c"))
+
+    def test_a_missing_write_up_is_not_counted_as_done(self):
+        self.cohort(n=1)
+        self.assertEqual(self.live()["progress"]["done"], 1)
+        analyze.clear_analysis(self.pool / "s0")
+        live = self.live()
+        self.assertEqual(live["progress"]["done"], 0)
+        self.assertEqual(live["progress"]["stale"], 1)
+        self.assertEqual(live["sessions"][0]["status"], analyze.SESSION_STALE)
+
+    def test_the_cohort_stops_reporting_done(self):
+        """The whole point: no claiming a result that cannot be shown."""
+        self.cohort(n=1)
+        self.assertEqual(self.live()["status"], "done")
+        analyze.clear_analysis(self.pool / "s0")
+        self.assertNotEqual(self.live()["status"], "done")
+
+    def test_one_stale_row_among_finished_ones_still_blocks_done(self):
+        self.cohort(n=3)
+        analyze.clear_analysis(self.pool / "s1")
+        live = self.live()
+        self.assertEqual(live["progress"]["done"], 2)
+        self.assertEqual(live["progress"]["stale"], 1)
+        self.assertNotEqual(live["status"], "done")
+
+    def test_a_stale_row_explains_itself(self):
+        self.cohort(n=1)
+        analyze.clear_analysis(self.pool / "s0")
+        self.assertIn("re-analyze", self.live()["sessions"][0]["error"])
+
+    def test_restoring_the_write_up_restores_done(self):
+        self.cohort(n=1)
+        analyze.clear_analysis(self.pool / "s0")
+        self.assertNotEqual(self.live()["status"], "done")
+        (self.pool / "s0" / "analysis.json").write_text(json.dumps({"text": "back"}))
+        live = self.live()
+        self.assertEqual(live["status"], "done")
+        self.assertEqual(live["progress"]["stale"], 0)
+
+    def test_a_running_job_takes_precedence_over_stale(self):
+        """The normal re-analyze path clears the write-up and immediately
+        writes a running job, so it must read as running, not stale."""
+        self.cohort(n=1)
+        analyze.clear_analysis(self.pool / "s0")
+        analyze.write_job(self.pool / "s0", "running")
+        live = self.live()
+        self.assertEqual(live["sessions"][0]["status"], "running")
+        self.assertEqual(live["progress"]["stale"], 0)
+
+    def test_a_stale_row_is_never_persisted(self):
+        """It is a read-time observation about the disk, not durable state."""
+        self.cohort(n=1)
+        analyze.clear_analysis(self.pool / "s0")
+        live = self.live()
+        analyze.write_cohort(self.pool, analyze.persistable_cohort(live, analyze.read_cohort(self.pool, "c")))
+        stored = analyze.read_cohort(self.pool, "c")
+        self.assertEqual(stored["sessions"][0]["status"], analyze.SESSION_STALE)
+        # Restoring the file must clear it again with no manual intervention.
+        (self.pool / "s0" / "analysis.json").write_text(json.dumps({"text": "back"}))
+        self.assertEqual(self.live()["sessions"][0]["status"], "done")
 
 
 class TestTransitionTable(unittest.TestCase):
@@ -102,9 +244,18 @@ class TestTransitionTable(unittest.TestCase):
         """Replaying every case the old engine could produce must not trip the
         table — otherwise the table describes something other than this code."""
         for case in BASELINE:
+            for path in self.pool.iterdir():
+                shutil.rmtree(path, ignore_errors=True)
             analyze.enrich_cohort_status(
                 self.pool,
-                cohort_of(case["stored"], case["done"], case["error"], case["queued"]),
+                cohort_of(
+                    case["stored"],
+                    case["done"],
+                    case["error"],
+                    case["queued"],
+                    writeups=case["writeups"],
+                    pool=self.pool,
+                ),
             )
         self.assertEqual(analyze._undeclared_transitions, [])
 
@@ -138,8 +289,11 @@ class TestTerminalRecompute(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
     def status(self, stored, done, error, queued):
+        """Decide with the write-ups actually present, so `done` rows count."""
+        for path in self.pool.iterdir():
+            shutil.rmtree(path, ignore_errors=True)
         return analyze.enrich_cohort_status(
-            self.pool, cohort_of(stored, done, error, queued)
+            self.pool, cohort_of(stored, done, error, queued, pool=self.pool)
         )["status"]
 
     def test_a_done_cohort_whose_sessions_all_failed_reports_error(self):

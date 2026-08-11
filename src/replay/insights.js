@@ -92,8 +92,10 @@ function cohortCanAnalyze() {
   if (cohortIsRunning()) return false;
   if (cohort.status === 'done') return false;
   const prog = cohort.progress || {};
+  // Stale rows count as pending: their write-ups are gone, so the cohort has
+  // real work left even though nothing failed and nothing is queued.
   const pending =
-    (prog.queued || 0) + (prog.running || 0) + (prog.error || 0) > 0 ||
+    (prog.queued || 0) + (prog.running || 0) + (prog.error || 0) + (prog.stale || 0) > 0 ||
     cohort.status === 'idle' ||
     cohort.status === 'paused';
   return pending;
@@ -788,6 +790,7 @@ function progressText(body) {
     `${prog.done || 0} / ${prog.total || 0} done · ${prog.running || 0} running · ` +
     `${prog.queued || 0} queued` +
     (prog.error ? ` · ${prog.error} failed` : '') +
+    (prog.stale ? ` · ${prog.stale} missing a write-up` : '') +
     batch
   );
 }
@@ -821,11 +824,13 @@ function renderQueue(body) {
       const err = entry.error
         ? `<div style="color:#b91c1c;font-size:11px;margin-top:2px">${escapeHtml(entry.error)}</div>`
         : '';
+      // A stale row lost its write-up, so it needs the same re-run an errored
+      // one does — the only difference is that nothing actually failed.
       const retry =
-        status === 'error'
+        status === 'error' || status === 'stale'
           ? `<button type="button" class="row-retry" data-retry="${escapeAttr(
               entry.session_id
-            )}">Retry</button>`
+            )}">${status === 'stale' ? 'Re-analyze' : 'Retry'}</button>`
           : '';
       return `
         <tr class="openable" data-sid="${escapeAttr(entry.session_id)}">
