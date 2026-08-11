@@ -45,7 +45,7 @@ import projects
 import sessionstore
 import storage
 from projects import ProjectsUnavailable
-from fsutil import atomic_write_json, atomic_write_text
+from fsutil import atomic_write_bytes, atomic_write_json, atomic_write_text
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -964,10 +964,53 @@ def _analysis_key(session_dir: Path) -> str:
 def _cohort_key(pool: Path, cohort_id: str) -> str:
     return f"{pool.resolve()}::{cohort_id}"
 
+def _stage_chunks(project, session_ids: list) -> list:
+    staged = []
+    for session_id in session_ids:
+        directory = project.pool / session_id
+        for chunk in storage.list_chunks(project.storage_prefix, session_id):
+            path = directory / chunk.name
+            if path.exists():
+                continue
+            body = storage.open_chunk(project.storage_prefix, session_id, chunk.name)
+            if body is None:
+                continue
+            atomic_write_bytes(path, body)
+            staged.append(path)
+    return staged
+
+
+def _unstage_chunks(paths: list) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+@asynccontextmanager
+async def chunks_on_disk(project, session_ids: list):
+    """analyze.py reads chunks as files, and writes analysis.json, the job status
+    and the frame cache back into the same directory. Staging into a temp dir
+    would carry those results off with it when the directory was cleaned up, so
+    chunks are fetched into the real session directory and only the files this
+    fetched are removed afterwards. A no-op when chunks are already local."""
+    if not storage.configured():
+        yield
+        return
+    staged = await asyncio.to_thread(_stage_chunks, project, list(session_ids))
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(_unstage_chunks, staged)
+
+
 async def _run_analysis_job(session_dir: Path, chunk_names: list, force: bool = True) -> None:
     analyze.write_job(session_dir, "running")
     try:
-        await analyze.analyze_session(session_dir, chunk_names, force=force)
+        project = project_for_pool(session_dir.parent)
+        async with chunks_on_disk(project, [session_dir.name]):
+            await analyze.analyze_session(session_dir, chunk_names, force=force)
     except Exception as exc:
         analyze.write_job(session_dir, "error", error=str(exc))
     finally:
@@ -981,7 +1024,8 @@ def _require_analysis_runtime() -> None:
 
 async def _start_session_analysis(session_dir: Path, force: bool = False) -> dict:
     """Queue (or return) per-session analysis — shared by the single-session API and cohorts."""
-    chunks = chunk_files(session_dir)
+    project = project_for_pool(session_dir.parent)
+    chunks = storage.list_chunks(project.storage_prefix, session_dir.name)
     if not chunks:
         raise ApiError(400, "this session has no chunks to analyze")
 
@@ -1027,6 +1071,14 @@ async def _await_session_analysis(session_dir: Path, force: bool = False) -> Non
     if not analyze.read_analysis(session_dir):
         raise RuntimeError("analysis finished without a result")
 
+def _cohort_session_ids(cohort: dict) -> list:
+    return [
+        s["session_id"]
+        for s in (cohort.get("sessions") or [])
+        if isinstance(s, dict) and s.get("session_id")
+    ]
+
+
 async def _run_cohort_job(pool: Path, cohort_id: str, force: bool = False) -> None:
     """Analyze one cohort in the background. Other cohorts on disk are untouched."""
     key = _cohort_key(pool, cohort_id)
@@ -1034,7 +1086,8 @@ async def _run_cohort_job(pool: Path, cohort_id: str, force: bool = False) -> No
         cohort = analyze.read_cohort(pool, cohort_id)
         if not cohort:
             return
-        await analyze.run_cohort_job(pool, cohort, force=force)
+        async with chunks_on_disk(project_for_pool(pool), _cohort_session_ids(cohort)):
+            await analyze.run_cohort_job(pool, cohort, force=force)
     except asyncio.CancelledError:
         cohort = analyze.read_cohort(pool, cohort_id)
         if cohort:
@@ -1054,7 +1107,8 @@ async def _resume_cohort_batch(pool: Path, cohort_id: str) -> None:
         cohort = analyze.read_cohort(pool, cohort_id)
         if not cohort:
             return
-        await analyze.resume_cohort_batch(pool, cohort)
+        async with chunks_on_disk(project_for_pool(pool), _cohort_session_ids(cohort)):
+            await analyze.resume_cohort_batch(pool, cohort)
     finally:
         _cohort_tasks.pop(key, None)
 
