@@ -18,15 +18,16 @@ PREFLIGHT_PORT="${CAPTURE_PREFLIGHT_PORT:-8099}"
 
 cd "$(dirname "$0")"
 npm run build
-
 RELEASE="$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null || RELEASE="$RELEASE-dirty"
 echo "release $RELEASE"
 
-# A glob, not a list: an explicit one silently drops any module added since
-# it was last edited, and the server only fails on import at startup.
-tar czf /tmp/capture-deploy.tar.gz \
-  *.py migrations requirements.txt public \
+# `capture` is the whole Python app, so this no longer enumerates modules by
+# name -- that list silently omitted analyze_store.py from the day it was added,
+# and the box ran the pre-SQLite store until it was noticed.
+tar czf /tmp/capture-deploy.tar.gz --exclude='__pycache__' \
+  capture \
+  migrations requirements.txt public \
   package.json package-lock.json \
   src/analyze/extract.mjs src/analyze/replayer.bundle.js
 scp -q -i "$KEY" -o StrictHostKeyChecking=accept-new /tmp/capture-deploy.tar.gz "$HOST:/tmp/"

@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
-import analyze
+from capture import analyze
 
 
 class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):

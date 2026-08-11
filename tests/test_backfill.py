@@ -79,7 +79,7 @@ class TestBackfill(unittest.TestCase):
         test that runs afterwards."""
         repo = Path(__file__).resolve().parent.parent
         result = subprocess.run(
-            [str(repo / ".venv" / "bin" / "python"), "backfill.py"],
+            [str(repo / ".venv" / "bin" / "python"), "-m", "capture.backfill"],
             cwd=repo,
             env={
                 **os.environ,

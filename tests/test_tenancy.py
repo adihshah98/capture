@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import psycopg
 
-import db
+from capture import db
 import pgfixture
 
 

@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import db
+from . import db
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_ROOT = Path(os.environ.get("CAPTURE_DATA_DIR") or BASE_DIR / "data")
 DATA_DIR = DATA_ROOT / "sessions"
 PROJECTS_DIR = DATA_ROOT / "projects"

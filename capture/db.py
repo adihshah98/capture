@@ -7,7 +7,7 @@ from typing import Optional
 import psycopg
 from psycopg_pool import ConnectionPool
 
-MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 _pool: Optional[ConnectionPool] = None
 _pool_lock = threading.Lock()

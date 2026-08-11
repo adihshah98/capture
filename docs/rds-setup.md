@@ -146,7 +146,7 @@ cd /opt/capture
 .venv/bin/pip install -q 'psycopg[binary]==3.2.3' 'psycopg-pool==3.2.4'
 set -a; . /etc/capture.env; set +a
 .venv/bin/python db.py        # applies migrations
-.venv/bin/python backfill.py  # imports existing sessions
+.venv/bin/python -m capture.backfill  # imports existing sessions
 ```
 
 The running server is still on the old build and does not know Postgres exists,
@@ -185,7 +185,7 @@ Immediately after, run the backfill once more to pick up any session recorded
 between the first backfill and the restart:
 
 ```bash
-cd /opt/capture && set -a && . /etc/capture.env && set +a && .venv/bin/python backfill.py
+cd /opt/capture && set -a && . /etc/capture.env && set +a && .venv/bin/python -m capture.backfill
 ```
 
 It is idempotent, so re-running costs nothing.

@@ -34,18 +34,18 @@ from fastapi.staticfiles import StaticFiles
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 except ImportError:
     pass
 
-import analyze
-import compat
-import db
-import projects
-import sessionstore
-import storage
-from projects import ProjectsUnavailable
-from fsutil import atomic_write_bytes, atomic_write_json, atomic_write_text
+from . import analyze
+from . import compat
+from . import db
+from . import projects
+from . import sessionstore
+from . import storage
+from .projects import ProjectsUnavailable
+from .fsutil import atomic_write_bytes, atomic_write_json, atomic_write_text
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -176,7 +176,9 @@ async def revalidate_static(request: Request, call_next):
         response.headers["Cache-Control"] = "no-cache"
     return response
 
-BASE_DIR = Path(__file__).resolve().parent
+# The repo root, not the package directory: data/, public/ and .env are all
+# repo-relative and stayed there when the Python moved into capture/.
+BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_ROOT = Path(os.environ.get("CAPTURE_DATA_DIR") or BASE_DIR / "data")
 DATA_DIR = DATA_ROOT / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -2171,13 +2173,13 @@ def _cli(argv: list) -> None:
             f" {result['skipped']} empty dir(s) skipped"
         )
     else:
-        print("usage: python server.py add-project <name>")
-        print("       python server.py list-projects")
-        print("       python server.py remove-project <token> [--purge]")
-        print("       python server.py set-org <token> <workos_org_id>")
-        print("       python server.py set-domains <token> [domain ...]")
-        print("       python server.py invite <email> <project_token_or_org_id>")
-        print("       python server.py reindex")
+        print("usage: python -m capture.server add-project <name>")
+        print("       python -m capture.server list-projects")
+        print("       python -m capture.server remove-project <token> [--purge]")
+        print("       python -m capture.server set-org <token> <workos_org_id>")
+        print("       python -m capture.server set-domains <token> [domain ...]")
+        print("       python -m capture.server invite <email> <project_token_or_org_id>")
+        print("       python -m capture.server reindex")
         print("run the server with: .venv/bin/uvicorn server:app --port 3000")
 
 

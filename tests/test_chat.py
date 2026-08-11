@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import analyze
+from capture import analyze
 
 
 def row(sid, outcome="rest", device=None, page=None, text=None, **attrs):
@@ -176,7 +176,7 @@ class TestChatEndpoint(unittest.TestCase):
         os.environ["CAPTURE_DATABASE_URL"] = cls.app_url
         os.environ["CAPTURE_PROJECT_CACHE_TTL_S"] = "0"
         pgfixture.seed_default_project(cls.admin_url)
-        import server
+        from capture import server
 
         cls.server = server
         from fastapi.testclient import TestClient
@@ -206,7 +206,7 @@ class TestChatEndpoint(unittest.TestCase):
         import os
         import shutil
 
-        import db
+        from capture import db
 
         db.close_pool()
         os.environ.pop("CAPTURE_DATABASE_URL", None)

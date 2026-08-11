@@ -11,8 +11,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-import db
-import server
+from . import db
+from . import server
 
 DEFAULT_PROJECT_NAME = "Default"
 

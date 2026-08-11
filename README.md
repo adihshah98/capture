@@ -38,7 +38,7 @@ external site's entire integration is one tag.
 1. Create a project (a brand) on the server:
 
    ```bash
-   python server.py add-project "Acme Brand"
+   python -m capture.server add-project "Acme Brand"
    # project 'Acme Brand' created — token: cap_xxxxxxxxxxxxxxxxxxxxxxxx
    ```
 
@@ -63,14 +63,14 @@ replay UI grows a project selector. Operator notes:
   to the global `data/config.json`), so each brand can have its own sample
   rate, triggers, etc.
 - Optional root-domain allowlist, enforced server-side at ingest:
-  `python server.py set-domains cap_xxx brand.com` rejects batches (403)
+  `python -m capture.server set-domains cap_xxx brand.com` rejects batches (403)
   whose Origin/Referer isn't that root or one of its subdomains, so the
   token can't be used from other sites. Run it with no domains to clear.
   Best-effort — headers are spoofable outside a browser.
 - Protect the replay side in production:
 
   ```bash
-  REPLAY_PASSWORD=... .venv/bin/uvicorn server:app --port 3000
+  REPLAY_PASSWORD=... .venv/bin/uvicorn capture.server:app --port 3000
   ```
 
   `/replay.html` and `/api/*` require the password (HTTP Basic, any
@@ -104,8 +104,8 @@ side to per-user logins backed by [WorkOS AuthKit](https://workos.com/docs/authk
    login):
 
    ```bash
-   python server.py set-org cap_xxxxxxxx org_yyyyyyyy
-   python server.py invite teammate@brand.com cap_xxxxxxxx
+   python -m capture.server set-org cap_xxxxxxxx org_yyyyyyyy
+   python -m capture.server invite teammate@brand.com cap_xxxxxxxx
    ```
 
 With both `WORKOS_*` vars set, `/replay.html` redirects to a hosted login
@@ -277,9 +277,9 @@ than `RETENTION_DAYS` (default 30; `RETENTION_DAYS=0` keeps everything forever).
 Deletion on demand, for erasure requests that can't wait for retention:
 
 ```bash
-python server.py list-projects                  # tokens, names, session counts, size
-python server.py remove-project <token>         # revoke the token, keep the recordings
-python server.py remove-project <token> --purge # revoke and erase them
+python -m capture.server list-projects                  # tokens, names, session counts, size
+python -m capture.server remove-project <token>         # revoke the token, keep the recordings
+python -m capture.server remove-project <token> --purge # revoke and erase them
 ```
 
 Individual sessions have a **Delete** button in the replay UI (two clicks to

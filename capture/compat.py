@@ -9,7 +9,7 @@ style. Both go away when those functions are ported.
 
 from contextlib import contextmanager
 
-import db
+from . import db
 
 
 def translate(sql: str, params) -> str:

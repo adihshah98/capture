@@ -125,7 +125,7 @@ def fresh_database() -> tuple:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    import db
+    from capture import db
 
     name = f"capture_test_{uuid.uuid4().hex[:12]}"
     root = cluster().admin_url

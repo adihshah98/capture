@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
-import analyze
-import analyze_store
+from capture import analyze
+from capture.analyze import store as analyze_store
 
 BASELINE = json.loads((Path(__file__).parent / "fixtures" / "cohort_status_baseline.json").read_text())
 

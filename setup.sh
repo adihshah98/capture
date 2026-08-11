@@ -71,7 +71,7 @@ Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/capture/.playwright
 Environment=CAPTURE_DATA_DIR=/var/lib/capture
 EnvironmentFile=/etc/capture.env
 EnvironmentFile=/etc/capture-cloudfront.env
-ExecStart=/opt/capture/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 80 --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS} --timeout-graceful-shutdown 25
+ExecStart=/opt/capture/.venv/bin/uvicorn capture.server:app --host 0.0.0.0 --port 80 --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS} --timeout-graceful-shutdown 25
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 # Above uvicorn's own 25s drain, so systemd never has to SIGKILL mid-write.
 TimeoutStopSec=40

@@ -32,10 +32,10 @@ from typing import List, Optional, Tuple
 from . import prompts, slices, stats
 from . import store as analyze_store
 
-# The repo root, not the package directory: EXTRACTOR, the subprocess cwd and
-# the default data dir are all repo-relative, so this has to climb out of
-# analyze/ now that this module is a package rather than a top-level file.
-BASE_DIR = Path(__file__).resolve().parent.parent
+# The repo root: EXTRACTOR, the extractor subprocess cwd and the default data
+# dir are all repo-relative, and this file is capture/analyze/__init__.py, so
+# it climbs two levels rather than the one a top-level module would.
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 ANALYSIS_FILE = "analysis.json"
 ANALYSIS_STATUS_FILE = "analysis.status.json"

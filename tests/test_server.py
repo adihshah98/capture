@@ -22,8 +22,8 @@ REPO = Path(__file__).resolve().parent.parent
 UVICORN = REPO / ".venv" / "bin" / "uvicorn"
 
 sys.path.insert(0, str(REPO))
-import analyze
-import analyze_store
+from capture import analyze
+from capture.analyze import store as analyze_store
 
 def free_port() -> int:
     with socket.socket() as s:
@@ -88,7 +88,7 @@ class ServerCase(unittest.TestCase):
         cls.log_path = cls.data_dir / "server.log"
         cls.log_file = open(cls.log_path, "ab")
         cls.proc = subprocess.Popen(
-            [str(UVICORN), "server:app", "--port", str(cls.port), "--log-level", "error"],
+            [str(UVICORN), "capture.server:app", "--port", str(cls.port), "--log-level", "error"],
             cwd=REPO,
             env=cls.run_env,
             stdout=cls.log_file,
@@ -510,7 +510,7 @@ def request_headers(url):
 class TestIntegrationSnippetMatchesDocs(unittest.TestCase):
     def test_cli_snippet_is_the_documented_snippet(self):
         sys.path.insert(0, str(REPO))
-        import server
+        from capture import server
 
         doc = (REPO / "docs" / "integration.md").read_text()
         documented = doc.split("```html\n", 1)[1].split("```", 1)[0].strip()
@@ -646,7 +646,7 @@ class TestProjectCli(unittest.TestCase):
 
     def run_cli(self, *args, env=None):
         result = subprocess.run(
-            [str(REPO / ".venv" / "bin" / "python"), "server.py", *args],
+            [str(REPO / ".venv" / "bin" / "python"), "-m", "capture.server", *args],
             cwd=REPO,
             env={
                 **os.environ,
@@ -1433,7 +1433,7 @@ class TestAttribution(ServerCase):
         self.assertNotIn("attribution", self.listed(sid))
 
     def test_parse_attribution_helpers(self):
-        import server
+        from capture import server
 
         self.assertEqual(
             server.parse_attribution(
@@ -1509,7 +1509,7 @@ class TestCutEndpoint(ServerCase):
         self.assertEqual(self.stored_cuts(cohort_id), {})
 
     def test_a_cached_cut_is_served_without_run(self):
-        import analyze
+        from capture import analyze
 
         cohort_id = self.a_cohort()
         key = analyze.cut_key({"outcome": "purchased"})
@@ -1544,7 +1544,7 @@ class TestCutEndpoint(ServerCase):
 
         A key without the prompt hash is exactly what a pre-fix cut looks like.
         """
-        import analyze
+        from capture import analyze
 
         cohort_id = self.a_cohort()
         stale_key = json.dumps(
@@ -1568,7 +1568,7 @@ class TestCutEndpoint(ServerCase):
         self.assertNotEqual(json.loads(body)["cut"], stale_key)
 
     def test_the_served_cut_key_carries_the_prompt_version(self):
-        import analyze
+        from capture import analyze
 
         cohort_id = self.a_cohort()
         _, body = request(f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased")
@@ -1576,7 +1576,7 @@ class TestCutEndpoint(ServerCase):
         self.assertEqual(served["prompt"], analyze.prompt_version(analyze.CUT_PROMPT))
 
     def test_each_filter_is_cached_separately(self):
-        import analyze
+        from capture import analyze
 
         cohort_id = self.a_cohort()
         key = analyze.cut_key({"outcome": "purchased"})
@@ -1595,7 +1595,7 @@ class TestCutEndpoint(ServerCase):
         self.assertIn("no such cohort", json.loads(body)["error"])
 
     def _cache_a_cut(self, cohort_id):
-        import analyze
+        from capture import analyze
 
         key = analyze.cut_key({"outcome": "purchased"})
         analyze.write_cut(
@@ -1607,7 +1607,7 @@ class TestCutEndpoint(ServerCase):
         return key
 
     def test_refresh_drops_the_cached_answer_and_queues_a_new_call(self):
-        import analyze
+        from capture import analyze
 
         cohort_id = self.a_cohort()
         key = self._cache_a_cut(cohort_id)
@@ -1800,7 +1800,7 @@ class TestCutSlices(ServerCase):
         self.assertNotEqual(json.loads(page_a)["cut"], json.loads(page_b)["cut"])
 
     def test_an_empty_filter_is_the_whole_cohort_cut(self):
-        import analyze
+        from capture import analyze
 
         _, body = self.cut("")
         self.assertEqual(json.loads(body)["cut"], analyze.cut_key(None))
@@ -1841,7 +1841,7 @@ class TestCohortUnavailable(ServerCase):
     def test_a_refusable_refresh_keeps_the_cached_answer(self):
         """Without a key the refresh cannot be served — it must leave the good
         answer standing rather than delete what it cannot replace."""
-        import analyze
+        from capture import analyze
 
         pool = self.data_dir / "sessions"
         cohort = analyze.write_cohort(
@@ -1860,7 +1860,7 @@ class TestCohortUnavailable(ServerCase):
 
 class TestCohortSampling(unittest.TestCase):
     def _conn(self, rows):
-        import analyze
+        from capture import analyze
 
         conn = sqlite3.connect(":memory:")
         conn.execute(
@@ -2082,7 +2082,7 @@ class TestCohortSampling(unittest.TestCase):
         )
 
     def test_standout_line_prefers_what_stands_out_section(self):
-        import analyze
+        from capture import analyze
 
         text = (
             "## What they did\nWent to cart.\n\n"

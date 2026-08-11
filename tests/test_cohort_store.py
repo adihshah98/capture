@@ -19,8 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
-import analyze
-import analyze_store
+from capture import analyze
+from capture.analyze import store as analyze_store
 
 
 def cohort(cohort_id="cohort-1", n=3, **extra):

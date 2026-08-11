@@ -8,7 +8,7 @@ customer's recordings.
 import json
 from typing import Optional
 
-import db
+from . import db
 
 SESSION_COLUMNS = """
     s.session_id, s.first_seen, s.last_seen, s.last_active, s.duration, s.windows,
