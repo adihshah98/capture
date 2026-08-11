@@ -29,7 +29,9 @@ import pgfixture
 from capture import analyze
 from capture.analyze import store as analyze_store
 
-BASELINE = json.loads((Path(__file__).parent / "fixtures" / "cohort_status_baseline.json").read_text())
+BASELINE = json.loads(
+    (Path(__file__).parent / "fixtures" / "cohort_status_baseline.json").read_text()
+)
 
 # (stored, done, error, queued) -> (new expectation, why). Empty means the
 # refactor is behavior-preserving.
@@ -215,7 +217,9 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.cohort(n=1)
         analyze.clear_analysis(self.pool / "s0")
         live = self.live()
-        analyze.write_cohort(self.pool, analyze.persistable_cohort(live, analyze.read_cohort(self.pool, "c")))
+        analyze.write_cohort(
+            self.pool, analyze.persistable_cohort(live, analyze.read_cohort(self.pool, "c"))
+        )
         stored = analyze.read_cohort(self.pool, "c")
         self.assertEqual(stored["sessions"][0]["status"], analyze.SESSION_STALE)
         # Restoring the file must clear it again with no manual intervention.
@@ -271,7 +275,9 @@ class TestTransitionTable(pgfixture.CohortStoreMixin, unittest.TestCase):
     def test_an_undeclared_move_is_reported_and_still_applied(self):
         # idle -> paused is declared; idle -> a state it cannot reach is not.
         self.assertEqual(
-            analyze.cohort_transition(analyze.CohortState.DONE, analyze.CohortState.IDLE, why="test"),
+            analyze.cohort_transition(
+                analyze.CohortState.DONE, analyze.CohortState.IDLE, why="test"
+            ),
             analyze.CohortState.IDLE,
             "an undeclared transition must still be applied, not swallowed",
         )

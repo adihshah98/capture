@@ -150,9 +150,7 @@ def create(name: str, token: str, *, is_default: bool = False) -> Project:
             " VALUES (%s, %s, %s) RETURNING id",
             (name, "" if is_default else token, is_default),
         ).fetchone()[0]
-        conn.execute(
-            "INSERT INTO project_tokens (token, project_id) VALUES (%s, %s)", (token, pid)
-        )
+        conn.execute("INSERT INTO project_tokens (token, project_id) VALUES (%s, %s)", (token, pid))
     invalidate()
     return by_id(str(pid))
 
@@ -189,7 +187,5 @@ def delete(project: Project) -> None:
 
 def usage(project: Project) -> tuple:
     with db.connection(project.id) as conn:
-        row = conn.execute(
-            "SELECT count(*), coalesce(sum(bytes), 0) FROM sessions"
-        ).fetchone()
+        row = conn.execute("SELECT count(*), coalesce(sum(bytes), 0) FROM sessions").fetchone()
     return int(row[0]), int(row[1])

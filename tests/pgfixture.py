@@ -27,9 +27,7 @@ _cluster = None
 APP_ROLE = "capture_app"
 APP_PASSWORD = "capture_app"
 
-UNAVAILABLE = (
-    "postgres unavailable — install it, or set CAPTURE_TEST_DATABASE_ADMIN_URL"
-)
+UNAVAILABLE = "postgres unavailable — install it, or set CAPTURE_TEST_DATABASE_ADMIN_URL"
 
 
 def _binary(name: str) -> str | None:
@@ -64,8 +62,14 @@ class Cluster:
     def stop(self):
         if self.base_dir:
             subprocess.run(
-                [_binary("pg_ctl"), "-D", str(Path(self.base_dir) / "pg"),
-                 "-m", "immediate", "stop"],
+                [
+                    _binary("pg_ctl"),
+                    "-D",
+                    str(Path(self.base_dir) / "pg"),
+                    "-m",
+                    "immediate",
+                    "stop",
+                ],
                 capture_output=True,
             )
             shutil.rmtree(self.base_dir, ignore_errors=True)
@@ -91,9 +95,14 @@ def _start_local_cluster() -> Cluster:
     )
     subprocess.run(
         [
-            _binary("pg_ctl"), "-D", str(data),
-            "-o", f"-p {port} -k {data} -c listen_addresses= -c fsync=off",
-            "-l", str(Path(base) / "pg.log"), "start",
+            _binary("pg_ctl"),
+            "-D",
+            str(data),
+            "-o",
+            f"-p {port} -k {data} -c listen_addresses= -c fsync=off",
+            "-l",
+            str(Path(base) / "pg.log"),
+            "start",
         ],
         check=True,
         capture_output=True,
@@ -136,9 +145,7 @@ def fresh_database() -> tuple:
     # The role has to exist before migrating: on PostgreSQL 14 the compat view
     # is kept inside RLS by being owned by it.
     with psycopg.connect(admin_url, autocommit=True) as conn:
-        exists = conn.execute(
-            "SELECT 1 FROM pg_roles WHERE rolname = %s", (APP_ROLE,)
-        ).fetchone()
+        exists = conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (APP_ROLE,)).fetchone()
         if not exists:
             conn.execute(
                 f"CREATE ROLE {APP_ROLE} LOGIN PASSWORD '{APP_PASSWORD}' NOSUPERUSER NOBYPASSRLS"
@@ -181,9 +188,7 @@ def seed_project(admin_url: str, name: str, token: str, domains=None) -> str:
             " VALUES (%s, %s, %s) RETURNING id",
             (name, token, _json.dumps(domains or [])),
         ).fetchone()[0]
-        conn.execute(
-            "INSERT INTO project_tokens (token, project_id) VALUES (%s, %s)", (token, pid)
-        )
+        conn.execute("INSERT INTO project_tokens (token, project_id) VALUES (%s, %s)", (token, pid))
     return str(pid)
 
 

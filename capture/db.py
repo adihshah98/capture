@@ -71,9 +71,7 @@ def connection(project_id=None, admin: bool = False):
             if admin:
                 cur.execute("SELECT set_config('app.admin', 'on', true)")
             else:
-                cur.execute(
-                    "SELECT set_config('app.project_id', %s, true)", (str(project_id),)
-                )
+                cur.execute("SELECT set_config('app.project_id', %s, true)", (str(project_id),))
         yield conn
 
 
@@ -103,9 +101,7 @@ def migrate(url: str | None = None) -> list:
                 if role:
                     conn.execute("SELECT set_config('capture.app_role', %s, true)", (role,))
                 conn.execute(path.read_text())
-                conn.execute(
-                    "INSERT INTO schema_migrations (version) VALUES (%s)", (version,)
-                )
+                conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
         applied.append(version)
     return applied
 

@@ -77,9 +77,7 @@ class TestChatContext(unittest.TestCase):
 
     def test_the_premises_state_the_filtered_group_size(self):
         rows = [row(str(i), device="mobile") for i in range(5)] + [row("x", device="desktop")]
-        selected, _, given, _, _ = asyncio.run(
-            analyze.chat_context(rows, {"device": ["mobile"]})
-        )
+        selected, _, given, _, _ = asyncio.run(analyze.chat_context(rows, {"device": ["mobile"]}))
         self.assertEqual(len(selected), 5)
         # The group size, not the cohort size, is the only total offered.
         self.assertIn("exactly 5 session(s)", given)
@@ -229,9 +227,7 @@ class TestChatEndpoint(unittest.TestCase):
                 yield c
 
         analyze.stream_gemini_chat = fake
-        return self.client.post(
-            "/api/cohorts/cohort-chat-test/chat", json={"messages": messages}
-        )
+        return self.client.post("/api/cohorts/cohort-chat-test/chat", json={"messages": messages})
 
     def test_meta_comes_first_so_citations_resolve_while_text_streams(self):
         res = self.ask([{"role": "user", "content": "why?"}])
@@ -265,7 +261,7 @@ class TestChatEndpoint(unittest.TestCase):
         # The status is already 200 by the time it fails, so the failure has
         # to travel in the stream.
         self.assertEqual(res.status_code, 200)
-        self.assertIn('event: error', res.text)
+        self.assertIn("event: error", res.text)
         self.assertIn("gemini exploded", res.text)
         self.assertNotIn("event: done", res.text)
 
@@ -282,9 +278,7 @@ class TestChatEndpoint(unittest.TestCase):
         self.assertEqual(res.status_code, 400)
 
     def test_a_non_json_body_is_rejected(self):
-        res = self.client.post(
-            "/api/cohorts/cohort-chat-test/chat", content=b"not json"
-        )
+        res = self.client.post("/api/cohorts/cohort-chat-test/chat", content=b"not json")
         self.assertEqual(res.status_code, 400)
 
     def test_an_unknown_cohort_is_a_404(self):

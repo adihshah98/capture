@@ -45,8 +45,21 @@ def _order(row: tuple) -> dict | None:
 
 def row_to_info(row: tuple) -> dict:
     (
-        sid, first, last, active, duration, windows, count, size, clicks, rage,
-        visitor, url, device, attribution, *order_cols
+        sid,
+        first,
+        last,
+        active,
+        duration,
+        windows,
+        count,
+        size,
+        clicks,
+        rage,
+        visitor,
+        url,
+        device,
+        attribution,
+        *order_cols,
     ) = row
     info = {
         "session_id": sid,
@@ -108,8 +121,22 @@ def window_state(project_id, session_id: str, window_id: str) -> dict:
     return state
 
 
-def record_chunk(project_id, session_id, *, window_id, first_ts, last_ts, active_ts,
-                 size, meta, clicks, rage, device, attribution, state) -> None:
+def record_chunk(
+    project_id,
+    session_id,
+    *,
+    window_id,
+    first_ts,
+    last_ts,
+    active_ts,
+    size,
+    meta,
+    clicks,
+    rage,
+    device,
+    attribution,
+    state,
+) -> None:
     """One ingested batch. Counters accumulate in SQL, so concurrent batches for
     the same session cannot lose an increment the way a read-modify-write file could."""
     with db.connection(project_id) as conn:
@@ -133,8 +160,16 @@ def record_chunk(project_id, session_id, *, window_id, first_ts, last_ts, active
                 attribution = coalesce(sessions.attribution, excluded.attribution)
             """,
             (
-                project_id, session_id, first_ts, last_ts, active_ts or 0, size, clicks, rage,
-                meta.get("visitor_id"), meta.get("url"),
+                project_id,
+                session_id,
+                first_ts,
+                last_ts,
+                active_ts or 0,
+                size,
+                clicks,
+                rage,
+                meta.get("visitor_id"),
+                meta.get("url"),
                 json.dumps(device) if device else None,
                 json.dumps(attribution) if attribution else None,
             ),
@@ -153,9 +188,13 @@ def record_chunk(project_id, session_id, *, window_id, first_ts, last_ts, active
                 href        = coalesce(excluded.href, session_windows.href)
             """,
             (
-                project_id, session_id, str(window_id),
-                int(state.get("first", first_ts)), int(state.get("last", last_ts)),
-                int(state.get("active") or 0), size,
+                project_id,
+                session_id,
+                str(window_id),
+                int(state.get("first", first_ts)),
+                int(state.get("last", last_ts)),
+                int(state.get("active") or 0),
+                size,
                 int(state["nav"]) if isinstance(state.get("nav"), (int, float)) else None,
                 state.get("href") if isinstance(state.get("href"), str) else None,
             ),
@@ -204,10 +243,15 @@ def record_order(project_id, session_id, event: str, payload: dict, now: int) ->
                     currency = coalesce(excluded.currency, orders.currency)
                 """,
                 (
-                    project_id, session_id, now,
+                    project_id,
+                    session_id,
+                    now,
                     payload["order_id"][:128] if isinstance(payload.get("order_id"), str) else None,
-                    total if isinstance(total, (int, float)) and not isinstance(total, bool)
-                    and -1e15 < total < 1e15 else None,
+                    total
+                    if isinstance(total, (int, float))
+                    and not isinstance(total, bool)
+                    and -1e15 < total < 1e15
+                    else None,
                     payload["currency"][:8] if isinstance(payload.get("currency"), str) else None,
                 ),
             )
@@ -227,8 +271,14 @@ def get(project_id, session_id: str) -> dict | None:
     return row_to_info(row) if row else None
 
 
-def listing(project_id, *, limit: int, cursor: str | None = None,
-            filter: str | None = None, q: str | None = None) -> dict:
+def listing(
+    project_id,
+    *,
+    limit: int,
+    cursor: str | None = None,
+    filter: str | None = None,
+    q: str | None = None,
+) -> dict:
     where, params = ["TRUE"], []
     if filter in FILTERS:
         where.append(FILTERS[filter])

@@ -30,7 +30,11 @@ class TenancyCase(unittest.TestCase):
             cls.beta = conn.execute(
                 "INSERT INTO projects (name) VALUES ('beta') RETURNING id"
             ).fetchone()[0]
-            for project, sid in ((cls.alpha, "alpha-1"), (cls.alpha, "alpha-2"), (cls.beta, "beta-1")):
+            for project, sid in (
+                (cls.alpha, "alpha-1"),
+                (cls.alpha, "alpha-2"),
+                (cls.beta, "beta-1"),
+            ):
                 conn.execute(
                     "INSERT INTO sessions (project_id, session_id, first_seen, last_seen)"
                     " VALUES (%s, %s, 1, 2)",
@@ -96,8 +100,13 @@ class TestRowLevelSecurity(TenancyCase):
 class TestSchemaShape(TenancyCase):
     def test_every_tenant_table_forces_rls(self):
         expected = {
-            "sessions", "session_windows", "orders",
-            "cohorts", "cohort_cuts", "analyses", "analysis_jobs",
+            "sessions",
+            "session_windows",
+            "orders",
+            "cohorts",
+            "cohort_cuts",
+            "analyses",
+            "analysis_jobs",
         }
         with psycopg.connect(self.admin_url) as conn:
             rows = conn.execute(

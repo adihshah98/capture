@@ -88,9 +88,7 @@ class TestKeys(StorageCase):
     def test_the_default_pool_gets_a_named_prefix_not_an_empty_one(self):
         """An empty segment would collapse and put default-pool sessions at the
         bucket root, colliding with the project directories."""
-        self.assertEqual(
-            storage.key_for("", "sess", "c.json"), "sessions/_default/sess/c.json"
-        )
+        self.assertEqual(storage.key_for("", "sess", "c.json"), "sessions/_default/sess/c.json")
         self.assertEqual(storage.session_key_prefix("", "sess"), "sessions/_default/sess/")
 
     def test_a_project_key_uses_its_storage_prefix(self):
@@ -136,9 +134,7 @@ class TestS3Backend(StorageCase):
     def test_put_goes_to_the_bucket_not_the_disk(self):
         name = chunk_name(1000)
         storage.put_chunk("cap_a", "s1", name, b'{"events":[]}')
-        self.assertEqual(
-            list(self.fake.objects), ["sessions/cap_a/s1/" + name]
-        )
+        self.assertEqual(list(self.fake.objects), ["sessions/cap_a/s1/" + name])
         self.assertFalse((storage.local_dir("cap_a", "s1") / name).exists())
 
     def test_round_trip(self):
@@ -200,8 +196,9 @@ class TestDualReadDuringMigration(StorageCase):
 
 class TestChunkNameParsing(unittest.TestCase):
     def test_timestamp_and_window(self):
-        self.assertEqual(storage.chunk_timestamp("1785700000000-aaaa1111-abc123.json"),
-                         1785700000000)
+        self.assertEqual(
+            storage.chunk_timestamp("1785700000000-aaaa1111-abc123.json"), 1785700000000
+        )
         self.assertEqual(storage.chunk_window("1785700000000-aaaa1111-abc123.json"), "aaaa1111")
 
     def test_a_windowless_name_still_parses(self):

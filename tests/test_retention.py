@@ -36,9 +36,14 @@ class TestSweepClearsBothBackends(unittest.TestCase):
 
         cls._saved = (
             os.environ.get("CAPTURE_DATABASE_URL"),
-            projects.DATA_DIR, projects.PROJECTS_DIR,
-            storage.DATA_DIR, storage.PROJECTS_DIR, storage.BUCKET, storage._client,
-            server.DATA_ROOT, server.RETENTION_DAYS,
+            projects.DATA_DIR,
+            projects.PROJECTS_DIR,
+            storage.DATA_DIR,
+            storage.PROJECTS_DIR,
+            storage.BUCKET,
+            storage._client,
+            server.DATA_ROOT,
+            server.RETENTION_DAYS,
         )
         cls.addClassCleanup(cls.restore)
         os.environ["CAPTURE_DATABASE_URL"] = cls.app_url
@@ -52,8 +57,7 @@ class TestSweepClearsBothBackends(unittest.TestCase):
 
     @classmethod
     def restore(cls):
-        (url, p_data, p_proj, s_data, s_proj, bucket, client,
-         data_root, retention) = cls._saved
+        (url, p_data, p_proj, s_data, s_proj, bucket, client, data_root, retention) = cls._saved
         cls.db.close_pool()
         if url is None:
             os.environ.pop("CAPTURE_DATABASE_URL", None)

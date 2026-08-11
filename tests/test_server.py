@@ -1,4 +1,3 @@
-
 import gzip
 import json
 import os
@@ -31,14 +30,15 @@ def free_port() -> int:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
-def request(url, method="GET", data=None, headers=None):
 
+def request(url, method="GET", data=None, headers=None):
     req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
     try:
         with urllib.request.urlopen(req, timeout=10) as res:
             return res.status, res.read()
     except urllib.error.HTTPError as err:
         return err.code, err.read()
+
 
 class ServerCase(unittest.TestCase):
     env: dict = {}
@@ -160,17 +160,26 @@ class ServerCase(unittest.TestCase):
         return analyze_store.read_cuts(self.cohort_store(), pool_key, cohort_id)
 
     def ingest(self, session_id, payload=None, gzipped=True, token=None, raw=None, headers=None):
-        body = raw if raw is not None else json.dumps(
-            payload if payload is not None else {"events": [{"type": 4, "data": {}}]}
-        ).encode()
+        body = (
+            raw
+            if raw is not None
+            else json.dumps(
+                payload if payload is not None else {"events": [{"type": 4, "data": {}}]}
+            ).encode()
+        )
         url = f"{self.base}/ingest?session_id={session_id}"
         if gzipped:
             body = gzip.compress(body)
             url += "&compression=gzip-js"
         if token:
             url += f"&token={token}"
-        return request(url, method="POST", data=body,
-                       headers={"Content-Type": "application/octet-stream", **(headers or {})})[0]
+        return request(
+            url,
+            method="POST",
+            data=body,
+            headers={"Content-Type": "application/octet-stream", **(headers or {})},
+        )[0]
+
 
 class TestIngestValidation(ServerCase):
     def test_accepts_a_valid_batch(self):
@@ -190,6 +199,7 @@ class TestIngestValidation(ServerCase):
     def test_undecompressable_body_is_rejected(self):
         self.assertEqual(self.ingest("v" * 32, raw=b"not gzip", gzipped=False), 400)
 
+
 class TestGzipBomb(ServerCase):
     env = {"MAX_DECOMPRESSED_BYTES": str(1024 * 1024)}
 
@@ -202,6 +212,7 @@ class TestGzipBomb(ServerCase):
         self.assertEqual(self.ingest("x" * 32, raw=bomb, gzipped=False), 400)
         self.assertEqual(request(f"{self.base}/config")[0], 200)
 
+
 class TestQuota(ServerCase):
     env = {"MAX_PROJECT_BYTES": "1"}
 
@@ -209,17 +220,20 @@ class TestQuota(ServerCase):
         self.ingest("y" * 32)
         self.assertEqual(self.ingest("z" * 32), 429)
 
+
 class TestDiskFloor(ServerCase):
     env = {"MIN_FREE_DISK_BYTES": str(10**18)}
 
     def test_low_disk_returns_507(self):
         self.assertEqual(self.ingest("a" * 32), 507)
 
+
 class TestLimitsDisabled(ServerCase):
     env = {"MAX_PROJECT_BYTES": "0", "MIN_FREE_DISK_BYTES": "0"}
 
     def test_zero_disables_the_checks(self):
         self.assertEqual(self.ingest("b" * 32), 200)
+
 
 class TestReplayAuthFailsClosed(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": ""}
@@ -237,6 +251,7 @@ class TestReplayAuthFailsClosed(ServerCase):
     def test_write_side_stays_open(self):
         self.assertEqual(request(f"{self.base}/config")[0], 200)
         self.assertEqual(request(f"{self.base}/capture.js")[0], 200)
+
 
 class TestReplayAuthWithPassword(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": "s3cret"}
@@ -261,6 +276,7 @@ class TestReplayAuthWithPassword(ServerCase):
     def test_ingest_needs_no_password(self):
         self.assertEqual(self.ingest("c" * 32), 200)
 
+
 class TestDelete(ServerCase):
     def test_delete_removes_only_the_named_session(self):
         keep, drop = "k" * 32, "d" * 32
@@ -271,7 +287,9 @@ class TestDelete(ServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["session_id"], drop)
 
-        listed = [s["session_id"] for s in json.loads(request(f"{self.base}/api/sessions")[1])["sessions"]]
+        listed = [
+            s["session_id"] for s in json.loads(request(f"{self.base}/api/sessions")[1])["sessions"]
+        ]
         self.assertIn(keep, listed)
         self.assertNotIn(drop, listed)
 
@@ -283,8 +301,10 @@ class TestDelete(ServerCase):
 
     def test_unknown_project_is_404(self):
         self.assertEqual(
-            request(f"{self.base}/api/sessions/{'f' * 32}?project=cap_nope", method="DELETE")[0], 404
+            request(f"{self.base}/api/sessions/{'f' * 32}?project=cap_nope", method="DELETE")[0],
+            404,
         )
+
 
 class TestOrderEvents(ServerCase):
     def order(self, session_id, payload):
@@ -306,7 +326,12 @@ class TestOrderEvents(ServerCase):
         self.assertEqual(
             self.order(
                 session,
-                {"event": "checkout_completed", "order_id": "1001", "total": 59.5, "currency": "USD"},
+                {
+                    "event": "checkout_completed",
+                    "order_id": "1001",
+                    "total": 59.5,
+                    "currency": "USD",
+                },
             ),
             200,
         )
@@ -328,6 +353,8 @@ class TestOrderEvents(ServerCase):
 
     def test_unrecorded_session_is_404(self):
         self.assertEqual(self.order("r" * 32, {"event": "checkout_completed"}), 404)
+
+
 class TestVisitorId(ServerCase):
     EVENTS = [{"type": 4, "data": {}}]
 
@@ -369,8 +396,18 @@ class TestVisitorId(ServerCase):
 
     def test_entry_url_comes_from_the_first_batch(self):
         session = "u" * 32
-        self.ingest(session, {"events": self.EVENTS, "visitor_id": "vis-u", "url": "https://brand.example/landing-a?x=1"})
-        self.ingest(session, {"events": self.EVENTS, "visitor_id": "vis-u", "url": "https://brand.example/checkout"})
+        self.ingest(
+            session,
+            {
+                "events": self.EVENTS,
+                "visitor_id": "vis-u",
+                "url": "https://brand.example/landing-a?x=1",
+            },
+        )
+        self.ingest(
+            session,
+            {"events": self.EVENTS, "visitor_id": "vis-u", "url": "https://brand.example/checkout"},
+        )
         listed = self.listed(session)
         self.assertEqual(listed["url"], "https://brand.example/landing-a?x=1")
         self.assertEqual(listed["visitor_id"], "vis-u")
@@ -385,6 +422,7 @@ class TestVisitorId(ServerCase):
         self.ingest(session, {"events": self.EVENTS, "url": "https://brand.example/" + "a" * 3000})
         self.assertEqual(len(self.listed(session)["url"]), 2048)
 
+
 class TestInteractions(ServerCase):
     def click(self, payload):
         return {"type": 5, "data": {"tag": "capture-click", "payload": payload}}
@@ -395,11 +433,16 @@ class TestInteractions(ServerCase):
 
     def test_clicks_are_counted_across_batches(self):
         session = "click" + "x" * 27
-        self.ingest(session, {"events": [
-            self.click({"selector": "button#buy", "text": "Buy now"}),
-            self.click({"selector": "button#buy", "rage": True}),
-            {"type": 3, "data": {"source": 2}},
-        ]})
+        self.ingest(
+            session,
+            {
+                "events": [
+                    self.click({"selector": "button#buy", "text": "Buy now"}),
+                    self.click({"selector": "button#buy", "rage": True}),
+                    {"type": 3, "data": {"source": 2}},
+                ]
+            },
+        )
         self.ingest(session, {"events": [self.click({"selector": "a.nav"})]})
         self.assertEqual(self.listed(session)["interactions"], {"clicks": 3, "rage": 1})
 
@@ -416,13 +459,19 @@ class TestInteractions(ServerCase):
 
     def test_malformed_click_events_never_break_ingest(self):
         session = "click4" + "x" * 26
-        status = self.ingest(session, {"events": [
-            {"type": 5, "data": {"tag": "capture-click", "payload": "junk"}},
-            {"type": 5, "data": "junk"},
-            {"type": 5},
-        ]})
+        status = self.ingest(
+            session,
+            {
+                "events": [
+                    {"type": 5, "data": {"tag": "capture-click", "payload": "junk"}},
+                    {"type": 5, "data": "junk"},
+                    {"type": 5},
+                ]
+            },
+        )
         self.assertEqual(status, 200)
         self.assertEqual(self.listed(session)["interactions"], {"clicks": 1, "rage": 0})
+
 
 class TestDeviceIndex(ServerCase):
     def listed(self, session_id):
@@ -431,10 +480,21 @@ class TestDeviceIndex(ServerCase):
 
     def test_first_meta_event_sets_device(self):
         session = "dev1" + "x" * 28
-        self.ingest(session, {"events": [
-            {"type": 4, "data": {"href": "https://brand.example/", "width": 390, "height": 844}},
-            {"type": 4, "data": {"href": "https://brand.example/b", "width": 390, "height": 677}},
-        ]})
+        self.ingest(
+            session,
+            {
+                "events": [
+                    {
+                        "type": 4,
+                        "data": {"href": "https://brand.example/", "width": 390, "height": 844},
+                    },
+                    {
+                        "type": 4,
+                        "data": {"href": "https://brand.example/b", "width": 390, "height": 677},
+                    },
+                ]
+            },
+        )
         self.assertEqual(self.listed(session)["device"], {"width": 390, "height": 844})
 
     def test_device_survives_later_batches_and_never_lists_as_chunk(self):
@@ -447,14 +507,20 @@ class TestDeviceIndex(ServerCase):
 
     def test_malformed_meta_events_never_break_ingest(self):
         session = "dev3" + "x" * 28
-        status = self.ingest(session, {"events": [
-            {"type": 4, "data": "junk"},
-            {"type": 4, "data": {"width": "wide", "height": 10}},
-            {"type": 4},
-            {"type": 3, "data": {"source": 2}},
-        ]})
+        status = self.ingest(
+            session,
+            {
+                "events": [
+                    {"type": 4, "data": "junk"},
+                    {"type": 4, "data": {"width": "wide", "height": 10}},
+                    {"type": 4},
+                    {"type": 3, "data": {"source": 2}},
+                ]
+            },
+        )
         self.assertEqual(status, 200)
         self.assertNotIn("device", self.listed(session))
+
 
 class TestHealthz(ServerCase):
     env = {"REPLAY_AUTH_DISABLED": "", "REPLAY_PASSWORD": "s3cret"}
@@ -476,6 +542,7 @@ class TestHealthz(ServerCase):
         self.assertNotIn("cap_", body)
         self.assertNotIn("s3cret", body)
 
+
 class TestHealthzDegraded(ServerCase):
     env = {"MIN_FREE_DISK_BYTES": str(10**18)}
 
@@ -485,6 +552,7 @@ class TestHealthzDegraded(ServerCase):
         payload = json.loads(body)
         self.assertEqual(payload["status"], "degraded")
         self.assertFalse(payload["checks"]["disk_above_floor"])
+
 
 class TestHealthzUnwritableStorage(ServerCase):
     def test_503_when_storage_cannot_be_written(self):
@@ -500,6 +568,7 @@ class TestHealthzUnwritableStorage(ServerCase):
         finally:
             os.chmod(self.data_dir, mode)
 
+
 def request_headers(url):
     req = urllib.request.Request(url)
     try:
@@ -507,6 +576,7 @@ def request_headers(url):
             return res.status, res.headers
     except urllib.error.HTTPError as err:
         return err.code, err.headers
+
 
 class TestIntegrationSnippetMatchesDocs(unittest.TestCase):
     def test_cli_snippet_is_the_documented_snippet(self):
@@ -519,6 +589,7 @@ class TestIntegrationSnippetMatchesDocs(unittest.TestCase):
             "https://capture.example.com", "cap_YOURTOKEN", indent=""
         ).strip()
         self.assertEqual(documented, generated)
+
 
 class TestVisitorAssetCaching(ServerCase):
     def test_visitor_assets_are_cacheable_and_stale_servable(self):
@@ -534,7 +605,10 @@ class TestVisitorAssetCaching(ServerCase):
     def test_everything_else_still_revalidates(self):
         for path in ("/replay.html", "/replay.bundle.js", "/config"):
             with self.subTest(path=path):
-                self.assertEqual(request_headers(self.base + path)[1].get("Cache-Control"), "no-cache")
+                self.assertEqual(
+                    request_headers(self.base + path)[1].get("Cache-Control"), "no-cache"
+                )
+
 
 class TestProjectTokens(ServerCase):
     # No default project, so a tokenless batch has nowhere to land.
@@ -563,7 +637,8 @@ class TestProjectTokens(ServerCase):
             request(f"{self.base}/order?session_id={session}&token=cap_wrong", "POST", body)[0], 401
         )
         self.assertEqual(
-            request(f"{self.base}/order?session_id={session}&token={self.token}", "POST", body)[0], 200
+            request(f"{self.base}/order?session_id={session}&token={self.token}", "POST", body)[0],
+            200,
         )
 
     def test_listing_an_unconfigured_default_pool_is_a_404(self):
@@ -589,6 +664,7 @@ class TestProjectIsolation(ServerCase):
         default = json.loads(request(f"{self.base}/api/sessions")[1])
         self.assertEqual([s["session_id"] for s in scoped["sessions"]], ["j" * 32])
         self.assertEqual([s["session_id"] for s in default["sessions"]], ["k" * 32])
+
 
 class TestDomainAllowlist(ServerCase):
     default_project = False
@@ -620,8 +696,8 @@ class TestDomainAllowlist(ServerCase):
     def test_referer_is_the_fallback(self):
         self.assertEqual(self.send("f" * 32, Referer="https://shop.brand.com/lp?x=1"), 200)
 
-class TestProjectCli(unittest.TestCase):
 
+class TestProjectCli(unittest.TestCase):
     def setUp(self):
         self.data_dir = Path(tempfile.mkdtemp(prefix="capture-cli-"))
         self.addCleanup(shutil.rmtree, self.data_dir, ignore_errors=True)
@@ -631,9 +707,7 @@ class TestProjectCli(unittest.TestCase):
         import psycopg
 
         with psycopg.connect(self.admin_url) as conn:
-            rows = conn.execute(
-                "SELECT p.storage_prefix, p.domains FROM projects p"
-            ).fetchall()
+            rows = conn.execute("SELECT p.storage_prefix, p.domains FROM projects p").fetchall()
         return dict(rows)
 
     def live_tokens(self) -> list:
@@ -664,13 +738,14 @@ class TestProjectCli(unittest.TestCase):
         return result.stdout + result.stderr
 
     def test_startup_prints_no_deprecation_warning(self):
-
         out = self.run_cli("list-projects")
         self.assertNotIn("DeprecationWarning", out)
         self.assertNotIn("on_event is deprecated", out)
 
     def test_add_project_uses_the_configured_public_url(self):
-        out = self.run_cli("add-project", "Acme", env={"CAPTURE_PUBLIC_URL": "https://cdn.example.net/"})
+        out = self.run_cli(
+            "add-project", "Acme", env={"CAPTURE_PUBLIC_URL": "https://cdn.example.net/"}
+        )
         self.assertIn("var host = 'https://cdn.example.net'", out)
         self.assertNotIn("capture.example.com", out)
 
@@ -722,6 +797,7 @@ class TestProjectCli(unittest.TestCase):
         self.run_cli("remove-project", token, "--purge")
         self.assertFalse((self.data_dir / "projects" / token).exists())
 
+
 class TestSessionPaging(ServerCase):
     def list(self, query=""):
         status, body = request(f"{self.base}/api/sessions{query}")
@@ -757,6 +833,7 @@ class TestSessionPaging(ServerCase):
         self.assertEqual(json.loads(body)["session_id"], sid)
         self.assertEqual(request(f"{self.base}/api/sessions/{'gone' + 'x' * 28}")[0], 404)
 
+
 class TestSessionFilters(ServerCase):
     EVENTS = [{"type": 4, "data": {}}]
 
@@ -778,12 +855,22 @@ class TestSessionFilters(ServerCase):
         started = "start" + "x" * 27
         bought = "buy" + "x" * 29
         ragey = "rage" + "x" * 28
-        self.ingest(plain, {"events": self.EVENTS, "url": "https://brand.example/landing-a?utm=news"})
+        self.ingest(
+            plain, {"events": self.EVENTS, "url": "https://brand.example/landing-a?utm=news"}
+        )
         self.ingest(started)
         self.assertEqual(self.order(started, {"event": "checkout_started"}), 200)
         self.ingest(bought)
         self.assertEqual(self.order(bought, {"event": "checkout_completed"}), 200)
-        self.ingest(ragey, {"events": [*self.EVENTS, {"type": 5, "data": {"tag": "capture-click", "payload": {"rage": True}}}]})
+        self.ingest(
+            ragey,
+            {
+                "events": [
+                    *self.EVENTS,
+                    {"type": 5, "data": {"tag": "capture-click", "payload": {"rage": True}}},
+                ]
+            },
+        )
 
         self.assertEqual(self.listed_ids("?filter=checkout"), {started, bought})
         self.assertEqual(self.listed_ids("?filter=purchased"), {bought})
@@ -792,6 +879,7 @@ class TestSessionFilters(ServerCase):
         self.assertEqual(self.listed_ids("?q=utm%3Dnews"), {plain})
         self.assertEqual(self.listed_ids("?q=" + started[:12]), {started})
         self.assertEqual(self.listed_ids("?q=nothing-matches"), set())
+
 
 class TestIndexRebuild(ServerCase):
     def test_index_rebuilds_from_disk_on_startup(self):
@@ -816,6 +904,7 @@ class TestIndexRebuild(ServerCase):
                 break
             time.sleep(0.2)
         self.assertEqual(listed, set(ids))
+
 
 class TestAnalysisStatus(ServerCase):
     # Isolate from a developer machine that has GEMINI_API_KEY in the environment.
@@ -907,9 +996,7 @@ class TestCohort(ServerCase):
         self.assertIn(cohort["status"], ("idle", "done"))
         self.assertNotEqual(cohort["status"], "running")
         self.assertTrue(cohort.get("selection"))
-        status, body = request(
-            self.analyze_cohort_url(cohort["id"]), method="POST", data=b""
-        )
+        status, body = request(self.analyze_cohort_url(cohort["id"]), method="POST", data=b"")
         self.assertEqual(status, 202, body)
         return json.loads(body)
 
@@ -1009,9 +1096,7 @@ class TestCohort(ServerCase):
 
         status, body = request(
             f"{self.base}/api/cohorts?"
-            + urllib.parse.urlencode(
-                {"any": 2, "min_duration_ms": 0, "url_contains": ""}
-            ),
+            + urllib.parse.urlencode({"any": 2, "min_duration_ms": 0, "url_contains": ""}),
             method="POST",
             data=b"",
         )
@@ -1068,16 +1153,13 @@ class TestCohort(ServerCase):
         self.seed_analysis(nonbuy)
 
         status, body = request(
-            f"{self.base}/api/facets?"
-            + urllib.parse.urlencode({"min_duration_ms": 0})
+            f"{self.base}/api/facets?" + urllib.parse.urlencode({"min_duration_ms": 0})
         )
         self.assertEqual(status, 200, body)
         facets = json.loads(body)
         self.assertGreaterEqual(facets["n"], 2)
         self.assertTrue(any(i["value"] == "mobile" for i in facets.get("device") or []))
-        self.assertTrue(
-            any(i["value"] == "/pages/ashwamag-01" for i in facets.get("page") or [])
-        )
+        self.assertTrue(any(i["value"] == "/pages/ashwamag-01" for i in facets.get("page") or []))
 
         status, body = request(
             f"{self.base}/api/cohorts?"
@@ -1233,9 +1315,7 @@ class TestCohort(ServerCase):
         request(f"{self.base}/api/cohorts/{cohort_id}")
 
         offenders = [
-            line
-            for line in self.server_log().splitlines()
-            if "not a declared transition" in line
+            line for line in self.server_log().splitlines() if "not a declared transition" in line
         ]
         self.assertEqual(offenders, [])
 
@@ -1277,15 +1357,11 @@ class TestCohort(ServerCase):
     def test_delete_removes_cohort_and_keeps_session_writeups(self):
         sid = "delcoh" + "x" * 26
         cohort_id = self._cohort_of_one(sid)
-        analyze_store.write_cut(
-            self.cohort_store(), "", cohort_id, "some-cut", {"label": "x"}
-        )
+        analyze_store.write_cut(self.cohort_store(), "", cohort_id, "some-cut", {"label": "x"})
         session_dir = self.data_dir / "sessions" / sid
         self.assertIsNotNone(analyze.read_analysis(session_dir))
 
-        status, body = request(
-            f"{self.base}/api/cohorts/{cohort_id}", method="DELETE"
-        )
+        status, body = request(f"{self.base}/api/cohorts/{cohort_id}", method="DELETE")
         self.assertEqual(status, 200, body)
         self.assertTrue(json.loads(body)["ok"])
         self.assertNotIn(cohort_id, [c["id"] for c in self.cohorts()])
@@ -1294,9 +1370,7 @@ class TestCohort(ServerCase):
         # Deleting a cohort must not take the write-ups of its members with it.
         self.assertIsNotNone(analyze.read_analysis(session_dir))
 
-        status, body = request(
-            f"{self.base}/api/cohorts/{cohort_id}", method="DELETE"
-        )
+        status, body = request(f"{self.base}/api/cohorts/{cohort_id}", method="DELETE")
         self.assertEqual(status, 404, body)
 
     def test_legacy_cohort_file_is_migrated_on_read(self):
@@ -1320,9 +1394,7 @@ class TestCohort(ServerCase):
         self.assertEqual([s["session_id"] for s in migrated["sessions"]], [sid])
         # Both legacy files are consumed, so the migration runs exactly once.
         self.assertFalse((self.data_dir / "cohort.json").exists())
-        self.assertFalse(
-            (self.data_dir / "cohorts" / "cohort-1700000000000.json").exists()
-        )
+        self.assertFalse((self.data_dir / "cohorts" / "cohort-1700000000000.json").exists())
 
     def _cohort_of_one(self, sid):
         """A settled one-session cohort, with cached analysis so it lands done."""
@@ -1478,9 +1550,7 @@ class TestCutEndpoint(ServerCase):
                 "url_contains": "",
             }
         )
-        status, body = request(
-            f"{self.base}/api/cohorts?{qs}", method="POST", data=b""
-        )
+        status, body = request(f"{self.base}/api/cohorts?{qs}", method="POST", data=b"")
         self.assertEqual(status, 201, body)
         cohort_id = json.loads(body)["id"]
         status, body = request(
@@ -1497,9 +1567,7 @@ class TestCutEndpoint(ServerCase):
 
     def test_uncached_cut_is_absent_rather_than_a_silent_model_call(self):
         cohort_id = self.a_cohort()
-        status, body = request(
-            f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased"
-        )
+        status, body = request(f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased")
         self.assertEqual(status, 404)
         data = json.loads(body)
         self.assertEqual(data["status"], "absent")
@@ -1528,9 +1596,7 @@ class TestCutEndpoint(ServerCase):
                 },
             },
         )
-        status, body = request(
-            f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased"
-        )
+        status, body = request(f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased")
         self.assertEqual(status, 200, body)
         data = json.loads(body)
         self.assertTrue(data["cached"])
@@ -1557,9 +1623,7 @@ class TestCutEndpoint(ServerCase):
             stale_key,
             {"cut": stale_key, "analysis": {"headline": "answer from the old prompt"}},
         )
-        status, body = request(
-            f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased"
-        )
+        status, body = request(f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased")
         # Absent, not a cache hit: the old answer is unreachable and the cut
         # will be re-asked rather than silently reused.
         self.assertEqual(status, 404, body)
@@ -1579,13 +1643,9 @@ class TestCutEndpoint(ServerCase):
 
         cohort_id = self.a_cohort()
         key = analyze.cut_key({"outcome": "purchased"})
-        analyze.write_cut(
-            self.data_dir / "sessions", cohort_id, key, {"cut": key, "analysis": {}}
-        )
+        analyze.write_cut(self.data_dir / "sessions", cohort_id, key, {"cut": key, "analysis": {}})
         # A different filter is a different key, so it is still a miss.
-        status, _ = request(
-            f"{self.base}/api/cohorts/{cohort_id}/cut?utm_source=google"
-        )
+        status, _ = request(f"{self.base}/api/cohorts/{cohort_id}/cut?utm_source=google")
         self.assertEqual(status, 404)
 
     def test_cut_on_a_missing_cohort_is_404(self):
@@ -1617,9 +1677,7 @@ class TestCutEndpoint(ServerCase):
         self.assertEqual(json.loads(body)["status"], "running")
         # The stale answer is gone, so nothing can serve it while the run is in
         # flight — the point of the refresh.
-        self.assertIsNone(
-            analyze.read_cut(self.data_dir / "sessions", cohort_id, key)
-        )
+        self.assertIsNone(analyze.read_cut(self.data_dir / "sessions", cohort_id, key))
 
     def test_refresh_on_a_cut_that_was_never_cached_just_runs(self):
         cohort_id = self.a_cohort()
@@ -1632,9 +1690,7 @@ class TestCutEndpoint(ServerCase):
     def test_without_refresh_the_cache_still_answers(self):
         cohort_id = self.a_cohort()
         self._cache_a_cut(cohort_id)
-        status, body = request(
-            f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased"
-        )
+        status, body = request(f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased")
         self.assertEqual(status, 200, body)
         self.assertTrue(json.loads(body)["cached"])
 
@@ -1667,9 +1723,7 @@ class TestCutSlices(ServerCase):
             return
         for sid, outcome, width, url in self.SPECS:
             events = [{"type": 4, "data": {"width": width, "height": 800}}]
-            self.assertEqual(
-                self.ingest(sid, {"events": events, "url": url}), 200
-            )
+            self.assertEqual(self.ingest(sid, {"events": events, "url": url}), 200)
             if outcome == "purchased":
                 self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
             elif outcome == "checkout":
@@ -1686,9 +1740,7 @@ class TestCutSlices(ServerCase):
                 "url_contains": "",
             }
         )
-        status, body = request(
-            f"{self.base}/api/cohorts?{qs}", method="POST", data=b""
-        )
+        status, body = request(f"{self.base}/api/cohorts?{qs}", method="POST", data=b"")
         self.assertEqual(status, 201, body)
         cohort_id = json.loads(body)["id"]
         status, body = request(
@@ -1746,9 +1798,7 @@ class TestCutSlices(ServerCase):
             {f["value"]: f["count"] for f in facets["page"]},
             {"/p": 2, "/collections/sale": 1, "/products/cream": 1},
         )
-        self.assertEqual(
-            {f["value"] for f in facets["utm_source"]}, {"google", "facebook"}
-        )
+        self.assertEqual({f["value"] for f in facets["utm_source"]}, {"google", "facebook"})
         self.assertEqual([f["value"] for f in facets["utm_campaign"]], ["spring"])
         # Presets are gone; the picker builds a group from these facets alone.
         self.assertNotIn("presets", facets)
@@ -1872,7 +1922,7 @@ class TestCohortSampling(unittest.TestCase):
             """
         )
         conn.executemany(
-            'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
         return analyze, conn
@@ -1880,11 +1930,76 @@ class TestCohortSampling(unittest.TestCase):
     def test_sample_prefers_newest_and_splits_filters(self):
         analyze, conn = self._conn(
             [
-                ("", "oldbuy" + "x" * 26, 0, 10_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 1}), None, None, None),
-                ("", "newbuy" + "x" * 26, 0, 30_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 2}), json.dumps({"clicks": 3}), None, None),
-                ("", "oldall" + "x" * 26, 0, 5_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None, None),
-                ("", "newall" + "x" * 26, 0, 40_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, json.dumps({"clicks": 2}), None, None),
-                ("", "nochunk" + "x" * 25, 0, 50_000, 0, 0, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 3}), None, None, None),
+                (
+                    "",
+                    "oldbuy" + "x" * 26,
+                    0,
+                    10_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    json.dumps({"purchased_at": 1}),
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "newbuy" + "x" * 26,
+                    0,
+                    30_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    json.dumps({"purchased_at": 2}),
+                    json.dumps({"clicks": 3}),
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "oldall" + "x" * 26,
+                    0,
+                    5_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "newall" + "x" * 26,
+                    0,
+                    40_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    json.dumps({"clicks": 2}),
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "nochunk" + "x" * 25,
+                    0,
+                    50_000,
+                    0,
+                    0,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    json.dumps({"purchased_at": 3}),
+                    None,
+                    None,
+                    None,
+                ),
             ]
         )
         sampled = analyze.sample_cohort_rows(conn, "", purchased_n=1, all_n=1)
@@ -1896,10 +2011,62 @@ class TestCohortSampling(unittest.TestCase):
     def test_sample_requires_ashwamag_path_and_min_duration(self):
         analyze, conn = self._conn(
             [
-                ("", "short" + "x" * 27, 0, 4_999, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 1}), None, None, None),
-                ("", "other" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/other", json.dumps({"purchased_at": 1}), None, None, None),
-                ("", "okbuy" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01?x=1", json.dumps({"purchased_at": 1}), None, None, None),
-                ("", "okall" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None, None),
+                (
+                    "",
+                    "short" + "x" * 27,
+                    0,
+                    4_999,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    json.dumps({"purchased_at": 1}),
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "other" + "x" * 27,
+                    0,
+                    20_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/other",
+                    json.dumps({"purchased_at": 1}),
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "okbuy" + "x" * 27,
+                    0,
+                    20_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01?x=1",
+                    json.dumps({"purchased_at": 1}),
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "okall" + "x" * 27,
+                    0,
+                    20_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
             ]
         )
         sampled = analyze.sample_cohort_rows(conn, "", purchased_n=5, all_n=5)
@@ -1911,9 +2078,48 @@ class TestCohortSampling(unittest.TestCase):
     def test_sample_any_mixes_outcomes_up_to_limit(self):
         analyze, conn = self._conn(
             [
-                ("", "buy1" + "x" * 28, 0, 30_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 1}), json.dumps({"clicks": 2}), None, None),
-                ("", "rest1" + "x" * 27, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, json.dumps({"clicks": 1}), None, None),
-                ("", "buy2" + "x" * 28, 0, 10_000, 1, 1, None, "https://x.test/pages/ashwamag-01", json.dumps({"purchased_at": 2}), None, None, None),
+                (
+                    "",
+                    "buy1" + "x" * 28,
+                    0,
+                    30_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    json.dumps({"purchased_at": 1}),
+                    json.dumps({"clicks": 2}),
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "rest1" + "x" * 27,
+                    0,
+                    20_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    json.dumps({"clicks": 1}),
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "buy2" + "x" * 28,
+                    0,
+                    10_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    json.dumps({"purchased_at": 2}),
+                    None,
+                    None,
+                    None,
+                ),
             ]
         )
         sampled = analyze.sample_cohort_rows(conn, "", purchased_n=0, all_n=0, any_n=2)
@@ -2049,9 +2255,48 @@ class TestCohortSampling(unittest.TestCase):
     def test_sample_time_window_and_earliest_order(self):
         analyze, conn = self._conn(
             [
-                ("", "old" + "x" * 29, 0, 10_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None, None),
-                ("", "mid" + "x" * 29, 0, 20_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None, None),
-                ("", "new" + "x" * 29, 0, 30_000, 1, 1, None, "https://x.test/pages/ashwamag-01", None, None, None, None),
+                (
+                    "",
+                    "old" + "x" * 29,
+                    0,
+                    10_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "mid" + "x" * 29,
+                    0,
+                    20_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "new" + "x" * 29,
+                    0,
+                    30_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
             ]
         )
         windowed = analyze.sample_cohort_rows(
@@ -2093,5 +2338,7 @@ class TestCohortSampling(unittest.TestCase):
 
 if __name__ == "__main__":
     if not UVICORN.exists():
-        sys.exit(f"missing {UVICORN} — run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt")
+        sys.exit(
+            f"missing {UVICORN} — run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+        )
     unittest.main()

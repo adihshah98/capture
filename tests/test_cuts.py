@@ -111,9 +111,7 @@ class TestPagePath(unittest.TestCase):
 
 class TestNormalizeSlice(unittest.TestCase):
     def test_multi_valued_outcome_and_device(self):
-        spec = analyze.normalize_slice(
-            {"outcome": ["purchased", "checkout"], "device": "mobile"}
-        )
+        spec = analyze.normalize_slice({"outcome": ["purchased", "checkout"], "device": "mobile"})
         self.assertEqual(spec["outcome"], ["checkout", "purchased"])
         self.assertEqual(spec["device"], ["mobile"])
 
@@ -223,15 +221,9 @@ class TestMatchOutcomeAndDevice(unittest.TestCase):
 
     def test_constraints_intersect(self):
         self.assertEqual(self.match({"outcome": ["purchased"], "device": ["mobile"]}), ["pm"])
-        self.assertEqual(
-            self.match({"device": ["mobile"], "utm_source": "google"}), ["pm"]
-        )
-        self.assertEqual(
-            self.match({"outcome": ["purchased"], "utm_campaign": "spring"}), []
-        )
-        self.assertEqual(
-            self.match({"page": "/p", "device": ["desktop"]}), ["rd"]
-        )
+        self.assertEqual(self.match({"device": ["mobile"], "utm_source": "google"}), ["pm"])
+        self.assertEqual(self.match({"outcome": ["purchased"], "utm_campaign": "spring"}), [])
+        self.assertEqual(self.match({"page": "/p", "device": ["desktop"]}), ["rd"])
 
     def test_unknown_device_cannot_satisfy_a_device_constraint(self):
         rows = [row("unknown", "purchased", None)]
@@ -348,9 +340,7 @@ class TestCutKeyPromptVersion(unittest.TestCase):
         self.assertEqual(before, self.key())
 
     def test_the_prompt_hash_does_not_collapse_distinct_filters(self):
-        self.assertNotEqual(
-            self.key({"outcome": "purchased"}), self.key({"outcome": "rest"})
-        )
+        self.assertNotEqual(self.key({"outcome": "purchased"}), self.key({"outcome": "rest"}))
 
     def test_whitespace_in_the_prompt_still_counts_as_a_change(self):
         """Content-addressed, so there is no judgement call about what counts
@@ -398,9 +388,7 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
                     12,
                     None,
                 ],
-                "attention": [
-                    {"observation": "40s on the guarantee at [01:10]", "share": "56%"}
-                ],
+                "attention": [{"observation": "40s on the guarantee at [01:10]", "share": "56%"}],
                 "intent": [{"observation": "Tapped 'Add to cart' at [00:44]"}],
                 "blockers": [
                     {
@@ -482,9 +470,7 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
             {key: [{"observation": "x at [00:01]"}] for key in analyze.CUT_INSIGHT_SECTIONS}
         )
         for key in analyze.CUT_INSIGHT_SECTIONS:
-            self.assertEqual(
-                set(out[key][0]), {"observation", "share", "action"}, key
-            )
+            self.assertEqual(set(out[key][0]), {"observation", "share", "action"}, key)
         self.assertEqual(out["recommendations"], [])
 
     def test_an_item_with_no_observation_is_dropped(self):
@@ -1017,8 +1003,13 @@ class TestCutCache(pgfixture.CohortStoreMixin, unittest.TestCase):
 def split_rows(converting=8, flat=8, untagged=0):
     """A group that splits hard on source: meta buys, google does not."""
     rows = [
-        row(f"m{i}", "purchased" if i < converting - 3 else "rest",
-            device="mobile", page="/p/cream", utm_source="meta")
+        row(
+            f"m{i}",
+            "purchased" if i < converting - 3 else "rest",
+            device="mobile",
+            page="/p/cream",
+            utm_source="meta",
+        )
         for i in range(converting)
     ]
     rows += [
@@ -1117,9 +1108,13 @@ class TestCrossTabSingleOutcomeGroups(unittest.TestCase):
 
     def uniform(self):
         return [
-            row(f"s{i}", "purchased",
+            row(
+                f"s{i}",
+                "purchased",
                 device="mobile" if i < 6 else "desktop",
-                page="/p", utm_source="meta" if i < 6 else "google")
+                page="/p",
+                utm_source="meta" if i < 6 else "google",
+            )
             for i in range(12)
         ]
 
@@ -1200,9 +1195,7 @@ class TestCrossTabReachesBothReaders(unittest.TestCase):
         analyze.call_gemini_cut, analyze.ANALYSIS_ENABLED = fake_cut, True
         try:
             asyncio.run(analyze.build_cut_analysis(rows, slice_spec))
-            selected, label, given, _, spec = asyncio.run(
-                analyze.chat_context(rows, slice_spec)
-            )
+            selected, label, given, _, spec = asyncio.run(analyze.chat_context(rows, slice_spec))
         finally:
             analyze.call_gemini_cut = saved_call
             analyze.ANALYSIS_ENABLED = saved_enabled

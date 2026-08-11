@@ -40,8 +40,9 @@ def _json(value):
     return json.dumps(value) if value else None
 
 
-def ensure_project(conn, *, name: str, token: str | None = None,
-                   meta: dict | None = None, is_default: bool = False) -> str:
+def ensure_project(
+    conn, *, name: str, token: str | None = None, meta: dict | None = None, is_default: bool = False
+) -> str:
     """Return the project id for a pool, creating it and its token on first run."""
     meta = meta or {}
     if token:
@@ -102,12 +103,21 @@ def upsert_session(conn, project_id: str, info: dict) -> None:
             attribution = coalesce(excluded.attribution, sessions.attribution)
         """,
         (
-            project_id, info["session_id"], info["first_seen"], info["last_seen"],
-            info.get("last_active") or 0, info.get("duration"),
-            info.get("windows") or 1, info.get("chunk_count") or 0, info.get("bytes") or 0,
-            int(interactions.get("clicks") or 0), int(interactions.get("rage") or 0),
-            info.get("visitor_id"), info.get("url"),
-            _json(info.get("device")), _json(info.get("attribution")),
+            project_id,
+            info["session_id"],
+            info["first_seen"],
+            info["last_seen"],
+            info.get("last_active") or 0,
+            info.get("duration"),
+            info.get("windows") or 1,
+            info.get("chunk_count") or 0,
+            info.get("bytes") or 0,
+            int(interactions.get("clicks") or 0),
+            int(interactions.get("rage") or 0),
+            info.get("visitor_id"),
+            info.get("url"),
+            _json(info.get("device")),
+            _json(info.get("attribution")),
         ),
     )
 
@@ -126,9 +136,13 @@ def upsert_session(conn, project_id: str, info: dict) -> None:
                 currency = coalesce(excluded.currency, orders.currency)
             """,
             (
-                project_id, info["session_id"], order.get("checkout_started_at"),
-                order.get("purchased_at"), order.get("order_id"),
-                order.get("total"), order.get("currency"),
+                project_id,
+                info["session_id"],
+                order.get("checkout_started_at"),
+                order.get("purchased_at"),
+                order.get("order_id"),
+                order.get("total"),
+                order.get("currency"),
             ),
         )
 
@@ -149,9 +163,13 @@ def upsert_windows(conn, project_id: str, session_id: str, states: dict) -> None
                 bytes       = excluded.bytes
             """,
             (
-                project_id, session_id, str(window_id),
-                int(state.get("first") or 0), int(state.get("last") or 0),
-                int(state.get("active") or 0), int(state.get("bytes") or 0),
+                project_id,
+                session_id,
+                str(window_id),
+                int(state.get("first") or 0),
+                int(state.get("last") or 0),
+                int(state.get("active") or 0),
+                int(state.get("bytes") or 0),
             ),
         )
 
@@ -185,7 +203,7 @@ def import_from_index(conn, index, project_id: str, pool: Path, pool_key: str) -
     new schema needs, so this costs seconds where re-deriving from the chunk
     files costs an hour of parsing at production data sizes."""
     rows = index.execute(
-        'SELECT session_id, first_seen, last_seen, last_active, duration, windows,'
+        "SELECT session_id, first_seen, last_seen, last_active, duration, windows,"
         ' chunk_count, bytes, visitor_id, url, "order", interactions, device, attribution'
         " FROM sessions WHERE pool = ?",
         (pool_key,),
@@ -194,32 +212,72 @@ def import_from_index(conn, index, project_id: str, pool: Path, pool_key: str) -
         return set()
 
     sessions, orders, windows_rows, seen = [], [], [], set()
-    for (sid, first, last, active, duration, window_count, chunks, size,
-         visitor, url, order_raw, inter_raw, device_raw, attr_raw) in rows:
+    for (
+        sid,
+        first,
+        last,
+        active,
+        duration,
+        window_count,
+        chunks,
+        size,
+        visitor,
+        url,
+        order_raw,
+        inter_raw,
+        device_raw,
+        attr_raw,
+    ) in rows:
         seen.add(sid)
         counts = _loads(inter_raw) or {}
-        sessions.append((
-            project_id, sid, first, last, active or 0, duration, window_count or 1,
-            chunks or 0, size or 0,
-            int(counts.get("clicks") or 0), int(counts.get("rage") or 0),
-            visitor, url, device_raw, attr_raw,
-        ))
+        sessions.append(
+            (
+                project_id,
+                sid,
+                first,
+                last,
+                active or 0,
+                duration,
+                window_count or 1,
+                chunks or 0,
+                size or 0,
+                int(counts.get("clicks") or 0),
+                int(counts.get("rage") or 0),
+                visitor,
+                url,
+                device_raw,
+                attr_raw,
+            )
+        )
         order = _loads(order_raw)
         if order:
-            orders.append((
-                project_id, sid, order.get("checkout_started_at"), order.get("purchased_at"),
-                order.get("order_id"), order.get("total"), order.get("currency"),
-            ))
+            orders.append(
+                (
+                    project_id,
+                    sid,
+                    order.get("checkout_started_at"),
+                    order.get("purchased_at"),
+                    order.get("order_id"),
+                    order.get("total"),
+                    order.get("currency"),
+                )
+            )
         for window_id, state in read_states(pool / sid, parse_chunks=False).items():
             if not isinstance(state, dict) or state.get("first") is None:
                 continue
-            windows_rows.append((
-                project_id, sid, str(window_id),
-                int(state.get("first") or 0), int(state.get("last") or 0),
-                int(state.get("active") or 0), int(state.get("bytes") or 0),
-                int(state["nav"]) if isinstance(state.get("nav"), (int, float)) else None,
-                state.get("href") if isinstance(state.get("href"), str) else None,
-            ))
+            windows_rows.append(
+                (
+                    project_id,
+                    sid,
+                    str(window_id),
+                    int(state.get("first") or 0),
+                    int(state.get("last") or 0),
+                    int(state.get("active") or 0),
+                    int(state.get("bytes") or 0),
+                    int(state["nav"]) if isinstance(state.get("nav"), (int, float)) else None,
+                    state.get("href") if isinstance(state.get("href"), str) else None,
+                )
+            )
 
     conn.cursor().executemany(
         """

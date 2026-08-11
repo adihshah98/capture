@@ -98,9 +98,7 @@ class TestUnreadableRegistryFailsClosed(ServerCase):
         self.assertEqual(self.ingest("d" * 32, token="cap_anything"), 503)
         pool = self.data_dir / "sessions"
         stored = list(pool.iterdir()) if pool.is_dir() else []
-        self.assertEqual(
-            stored, [], "an unreadable registry must not route recordings anywhere"
-        )
+        self.assertEqual(stored, [], "an unreadable registry must not route recordings anywhere")
 
     def test_untokened_ingest_also_refuses(self):
         self.assertEqual(self.ingest("e" * 32), 503)
@@ -143,9 +141,7 @@ class TestReadOnlyServer(ServerCase):
 
     def test_order_is_refused(self):
         body = json.dumps({"event": "checkout_completed"}).encode()
-        status = request(
-            f"{self.base}/order?session_id={'r' * 32}", method="POST", data=body
-        )[0]
+        status = request(f"{self.base}/order?session_id={'r' * 32}", method="POST", data=body)[0]
         self.assertEqual(status, 403)
 
     def test_nothing_is_written_to_disk(self):

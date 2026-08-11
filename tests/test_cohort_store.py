@@ -51,7 +51,8 @@ class StoreCase(pgfixture.CohortStoreMixin, unittest.TestCase):
 class TestRoundTrip(StoreCase):
     def test_a_cohort_survives_a_write_read_cycle_intact(self):
         written = analyze.write_cohort(
-            self.pool, cohort(purchased_n=5, all_n=5, label="Sample", slice={"outcome": "purchased"})
+            self.pool,
+            cohort(purchased_n=5, all_n=5, label="Sample", slice={"outcome": "purchased"}),
         )
         got = analyze.read_cohort(self.pool, "cohort-1")
         self.assertEqual(got["label"], "Sample")
@@ -130,9 +131,7 @@ class TestRoundTrip(StoreCase):
         stored = analyze.read_cohort(self.pool, "cohort-1")
         stored.pop("created_at")
         analyze.write_cohort(self.pool, {**stored, "status": "running"})
-        self.assertEqual(
-            analyze.read_cohort(self.pool, "cohort-1")["created_at"], 1700000000000
-        )
+        self.assertEqual(analyze.read_cohort(self.pool, "cohort-1")["created_at"], 1700000000000)
 
 
 class TestConcurrency(StoreCase):
@@ -395,8 +394,12 @@ class TestConcurrentMarks(StoreCase):
         # Two holders of the same cohort, as the pipeline's coroutines have.
         a = analyze.read_cohort(self.pool, "c")
         b = analyze.read_cohort(self.pool, "c")
-        analyze.mark_cohort_session(self.pool, a, a["sessions"][0], "done", analysis="analysis.json")
-        analyze.mark_cohort_session(self.pool, b, b["sessions"][1], "done", analysis="analysis.json")
+        analyze.mark_cohort_session(
+            self.pool, a, a["sessions"][0], "done", analysis="analysis.json"
+        )
+        analyze.mark_cohort_session(
+            self.pool, b, b["sessions"][1], "done", analysis="analysis.json"
+        )
 
         got = [s["status"] for s in analyze.read_cohort(self.pool, "c")["sessions"]]
         self.assertEqual(got, ["done", "done", "queued", "queued"])
@@ -424,16 +427,15 @@ class TestConcurrentMarks(StoreCase):
             },
         )
         cohort = analyze.read_cohort(self.pool, "c")
-        analyze.mark_cohort_session(self.pool, cohort, cohort["sessions"][0], "done",
-                                    analysis="analysis.json")
+        analyze.mark_cohort_session(
+            self.pool, cohort, cohort["sessions"][0], "done", analysis="analysis.json"
+        )
         self.assertEqual(analyze.read_cohort(self.pool, "c")["sessions"][0]["filter"], "purchased")
 
     def test_marking_a_session_that_left_the_cohort_is_reported(self):
         self.cohort()
         conn, key = analyze.cohort_store(self.pool)
-        self.assertTrue(
-            analyze_store.update_session_status(conn, key, "c", "s0", status="done")
-        )
+        self.assertTrue(analyze_store.update_session_status(conn, key, "c", "s0", status="done"))
         analyze.forget_session(self.pool, "s0")
         self.assertFalse(
             analyze_store.update_session_status(conn, key, "c", "s0", status="done"),
@@ -470,9 +472,7 @@ class TestPoolLayout(pgfixture.CohortStoreMixin, unittest.TestCase):
     def test_default_and_project_pools(self):
         self.assertEqual(analyze.data_root_for(Path("/data/sessions")), Path("/data"))
         self.assertEqual(analyze.pool_key(Path("/data/sessions")), "")
-        self.assertEqual(
-            analyze.data_root_for(Path("/data/projects/acme/sessions")), Path("/data")
-        )
+        self.assertEqual(analyze.data_root_for(Path("/data/projects/acme/sessions")), Path("/data"))
         self.assertEqual(analyze.pool_key(Path("/data/projects/acme/sessions")), "acme")
 
     def test_a_data_root_named_projects_is_not_mistaken_for_one(self):

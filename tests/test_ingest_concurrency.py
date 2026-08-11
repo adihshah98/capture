@@ -45,8 +45,10 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
 
         cls._saved = (
             os.environ.get("CAPTURE_DATABASE_URL"),
-            projects.DATA_DIR, projects.PROJECTS_DIR,
-            storage.DATA_DIR, storage.PROJECTS_DIR,
+            projects.DATA_DIR,
+            projects.PROJECTS_DIR,
+            storage.DATA_DIR,
+            storage.PROJECTS_DIR,
             server.DATA_ROOT,
         )
         cls.addClassCleanup(cls.restore_environment)
@@ -83,8 +85,12 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
 
     def body(self):
         return gzip.compress(
-            json.dumps({"events": [{"type": 3, "data": {"source": 2}, "timestamp": 1}],
-                        "window_id": "aaaa1111"}).encode()
+            json.dumps(
+                {
+                    "events": [{"type": 3, "data": {"source": 2}, "timestamp": 1}],
+                    "window_id": "aaaa1111",
+                }
+            ).encode()
         )
 
     def test_concurrent_ingests_overlap_instead_of_queueing(self):
@@ -95,6 +101,7 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
         async def main():
             transport = httpx.ASGITransport(app=self.server.app)
             async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+
                 async def one(n):
                     return await client.post(
                         f"/ingest?session_id={'c' * 24}{n:02d}&compression=gzip-js",
@@ -125,14 +132,16 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
         async def main():
             transport = httpx.ASGITransport(app=self.server.app)
             async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-                await asyncio.gather(*(
-                    client.post(
-                        f"/ingest?session_id={'d' * 24}{n:02d}&compression=gzip-js",
-                        content=payload,
-                        headers={"Content-Type": "application/octet-stream"},
+                await asyncio.gather(
+                    *(
+                        client.post(
+                            f"/ingest?session_id={'d' * 24}{n:02d}&compression=gzip-js",
+                            content=payload,
+                            headers={"Content-Type": "application/octet-stream"},
+                        )
+                        for n in range(CONCURRENCY)
                     )
-                    for n in range(CONCURRENCY)
-                ))
+                )
 
         asyncio.run(main())
         import psycopg

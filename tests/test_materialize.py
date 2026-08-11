@@ -66,10 +66,12 @@ class TestStaging(MaterializeCase):
         name = chunk_name(1000)
         self.put_remote(name, b'{"events":[]}')
         seen = {}
-        self.run_with_staging(lambda: seen.update(
-            exists=(self.dir / name).exists(),
-            body=(self.dir / name).read_bytes(),
-        ))
+        self.run_with_staging(
+            lambda: seen.update(
+                exists=(self.dir / name).exists(),
+                body=(self.dir / name).read_bytes(),
+            )
+        )
         self.assertTrue(seen["exists"])
         self.assertEqual(seen["body"], b'{"events":[]}')
 

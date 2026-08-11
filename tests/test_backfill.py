@@ -20,8 +20,9 @@ def chunk(ts: int, window: str = "aaaa1111", suffix: str = "abc123") -> str:
     return f"{ts}-{window}-{suffix}.json"
 
 
-def write_session(pool: Path, session_id: str, *, url=None, visitor=None,
-                  order=None, clicks=0, rage=0, width=None):
+def write_session(
+    pool: Path, session_id: str, *, url=None, visitor=None, order=None, clicks=0, rage=0, width=None
+):
     d = pool / session_id
     d.mkdir(parents=True, exist_ok=True)
     events = [{"type": 3, "data": {"source": 2}, "timestamp": 1000}]
@@ -29,26 +30,30 @@ def write_session(pool: Path, session_id: str, *, url=None, visitor=None,
         events.append({"type": 4, "data": {"width": width, "height": 800}, "timestamp": 1000})
     for _ in range(clicks):
         events.append(
-            {"type": 5, "timestamp": 1500,
-             "data": {"tag": "capture-click", "payload": {"rage": rage > 0}}}
+            {
+                "type": 5,
+                "timestamp": 1500,
+                "data": {"tag": "capture-click", "payload": {"rage": rage > 0}},
+            }
         )
     (d / chunk(1785700000000)).write_text(
-        json.dumps({"window_id": "aaaa1111", "url": url, "received_at": 1785700000000,
-                    "events": events})
+        json.dumps(
+            {"window_id": "aaaa1111", "url": url, "received_at": 1785700000000, "events": events}
+        )
     )
     if visitor or url:
-        (d / "visitor.json").write_text(json.dumps(
-            {k: v for k, v in (("visitor_id", visitor), ("url", url)) if v}
-        ))
+        (d / "visitor.json").write_text(
+            json.dumps({k: v for k, v in (("visitor_id", visitor), ("url", url)) if v})
+        )
     if order:
         (d / "order.json").write_text(json.dumps(order))
     if clicks:
         (d / "interactions.json").write_text(json.dumps({"clicks": clicks, "rage": rage}))
     if width:
         (d / "device.json").write_text(json.dumps({"width": width, "height": 800}))
-    (d / "window-state.json").write_text(json.dumps(
-        {"aaaa1111": {"first": 1000, "last": 2000, "active": 1500, "bytes": 512}}
-    ))
+    (d / "window-state.json").write_text(
+        json.dumps({"aaaa1111": {"first": 1000, "last": 2000, "active": 1500, "bytes": 512}})
+    )
 
 
 @unittest.skipUnless(pgfixture.available(), pgfixture.UNAVAILABLE)
@@ -57,16 +62,33 @@ class TestBackfill(unittest.TestCase):
     def setUpClass(cls):
         cls.data_dir = Path(tempfile.mkdtemp(prefix="capture-backfill-"))
         legacy = cls.data_dir / "sessions"
-        write_session(legacy, "legacy-one", url="https://shop.test/?utm_source=meta",
-                      visitor="v1", clicks=3, rage=1, width=390)
-        write_session(legacy, "legacy-two",
-                      order={"checkout_started_at": 10, "purchased_at": 20,
-                             "order_id": "#1001", "total": 49.5, "currency": "USD"})
+        write_session(
+            legacy,
+            "legacy-one",
+            url="https://shop.test/?utm_source=meta",
+            visitor="v1",
+            clicks=3,
+            rage=1,
+            width=390,
+        )
+        write_session(
+            legacy,
+            "legacy-two",
+            order={
+                "checkout_started_at": 10,
+                "purchased_at": 20,
+                "order_id": "#1001",
+                "total": 49.5,
+                "currency": "USD",
+            },
+        )
         tenant = cls.data_dir / "projects" / "cap_tenant" / "sessions"
         write_session(tenant, "tenant-one", url="https://brand.test/")
-        (cls.data_dir / "projects.json").write_text(json.dumps(
-            {"cap_tenant": {"name": "Brand", "org_id": "org_42", "domains": ["brand.test"]}}
-        ))
+        (cls.data_dir / "projects.json").write_text(
+            json.dumps(
+                {"cap_tenant": {"name": "Brand", "org_id": "org_42", "domains": ["brand.test"]}}
+            )
+        )
 
         cls.admin_url, cls.app_url = pgfixture.fresh_database()
         cls.run_backfill()
@@ -202,25 +224,33 @@ class TestBackfillPrefersTheIndex(unittest.TestCase):
         d = pool / "indexed-session"
         d.mkdir(parents=True)
         (d / chunk(1785700000000)).write_text("{ truncated garbage")
-        (d / "window-state.json").write_text(json.dumps(
-            {"w1": {"first": 500, "last": 9500, "active": 9000, "bytes": 4242}}
-        ))
+        (d / "window-state.json").write_text(
+            json.dumps({"w1": {"first": 500, "last": 9500, "active": 9000, "bytes": 4242}})
+        )
 
         index = sqlite3.connect(cls.data_dir / "index.db")
         index.execute(LEGACY_INDEX_DDL)
         index.execute(
-            'INSERT INTO sessions (pool, session_id, first_seen, last_seen, chunk_count,'
+            "INSERT INTO sessions (pool, session_id, first_seen, last_seen, chunk_count,"
             ' bytes, visitor_id, url, "order", interactions, device, attribution,'
             " last_active, duration, windows)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                "cap_indexed", "indexed-session", 500, 9500, 7, 123456, "v-idx",
+                "cap_indexed",
+                "indexed-session",
+                500,
+                9500,
+                7,
+                123456,
+                "v-idx",
                 "https://shop.test/?utm_source=meta",
                 json.dumps({"purchased_at": 9000, "total": 12.5, "currency": "GBP"}),
                 json.dumps({"clicks": 11, "rage": 3}),
                 json.dumps({"width": 414, "height": 896}),
                 json.dumps({"utm_source": "meta"}),
-                9000, 8800, 2,
+                9000,
+                8800,
+                2,
             ),
         )
         index.commit()
@@ -255,9 +285,7 @@ class TestBackfillPrefersTheIndex(unittest.TestCase):
 
     def test_window_rows_come_from_the_sidecar(self):
         self.assertEqual(
-            self.rows(
-                "SELECT window_id, first_seen, last_seen, bytes FROM session_windows"
-            ),
+            self.rows("SELECT window_id, first_seen, last_seen, bytes FROM session_windows"),
             [("w1", 500, 9500, 4242)],
         )
 

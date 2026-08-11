@@ -65,10 +65,7 @@ class Progress:
 def local_chunks(session_dir: Path) -> list:
     if not session_dir.is_dir():
         return []
-    return [
-        p for p in session_dir.iterdir()
-        if p.is_file() and storage.SAFE_CHUNK.match(p.name)
-    ]
+    return [p for p in session_dir.iterdir() if p.is_file() and storage.SAFE_CHUNK.match(p.name)]
 
 
 def copy_session(prefix: str, session_dir: Path, progress: Progress, dry_run: bool) -> None:
@@ -93,8 +90,9 @@ def copy_session(prefix: str, session_dir: Path, progress: Progress, dry_run: bo
             print(f"  failed {session_id}/{path.name}: {exc}", file=sys.stderr, flush=True)
 
 
-def copy_all(concurrency: int = DEFAULT_CONCURRENCY, limit=None,
-             dry_run: bool = False, verbose: bool = True) -> Progress:
+def copy_all(
+    concurrency: int = DEFAULT_CONCURRENCY, limit=None, dry_run: bool = False, verbose: bool = True
+) -> Progress:
     work = []
     for project in projects.all_projects(fresh=True):
         pool = project.pool
@@ -108,8 +106,11 @@ def copy_all(concurrency: int = DEFAULT_CONCURRENCY, limit=None,
 
     progress = Progress(len(work))
     if verbose:
-        print(f"copying {len(work)} session(s) with {concurrency} workers"
-              f"{' (dry run)' if dry_run else ''}", flush=True)
+        print(
+            f"copying {len(work)} session(s) with {concurrency} workers"
+            f"{' (dry run)' if dry_run else ''}",
+            flush=True,
+        )
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool_exec:
         futures = [

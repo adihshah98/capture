@@ -31,8 +31,12 @@ class TestCopier(unittest.TestCase):
 
         cls._saved = (
             os.environ.get("CAPTURE_DATABASE_URL"),
-            projects.DATA_DIR, projects.PROJECTS_DIR,
-            storage.DATA_DIR, storage.PROJECTS_DIR, storage.BUCKET, storage._client,
+            projects.DATA_DIR,
+            projects.PROJECTS_DIR,
+            storage.DATA_DIR,
+            storage.PROJECTS_DIR,
+            storage.BUCKET,
+            storage._client,
         )
         cls.addClassCleanup(cls.restore)
         os.environ["CAPTURE_DATABASE_URL"] = cls.app_url
@@ -115,9 +119,7 @@ class TestCopier(unittest.TestCase):
         names = self.seed_local("s1")
         self.s3copy.copy_all(concurrency=2, verbose=False)
         for i, name in enumerate(names):
-            self.assertEqual(
-                self.fake.objects[f"sessions/cap_c/s1/{name}"], b"chunk" + bytes([i])
-            )
+            self.assertEqual(self.fake.objects[f"sessions/cap_c/s1/{name}"], b"chunk" + bytes([i]))
 
     def test_many_sessions_across_workers(self):
         for n in range(12):

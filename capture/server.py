@@ -43,7 +43,6 @@ from .projects import ProjectsUnavailable
 
 @asynccontextmanager
 async def lifespan(_app):
-
     if REPLAY_AUTH_DISABLED:
         print(
             "warning: REPLAY_AUTH_DISABLED=1 — the replay UI and read API are "
@@ -56,8 +55,7 @@ async def lifespan(_app):
         )
     elif not REPLAY_PASSWORD:
         print(
-            "REPLAY_PASSWORD is not set — the replay UI and read API will "
-            "return 503 until it is"
+            "REPLAY_PASSWORD is not set — the replay UI and read API will " "return 503 until it is"
         )
 
     if READ_ONLY:
@@ -76,6 +74,7 @@ async def lifespan(_app):
             await asyncio.sleep(24 * 3600)
 
     task = None if (READ_ONLY or PREFLIGHT) else asyncio.create_task(loop())
+
     # Cohorts mid-Batch lose their asyncio task on restart — pick them back up.
     # Cohort state moved to Postgres, so this now depends on the database being
     # reachable. Failing to resume must not stop the server booting: it comes up
@@ -92,10 +91,10 @@ async def lifespan(_app):
     for pool, cohort in _resumable():
         key = _cohort_key(pool, cohort["id"])
         if key not in _cohort_tasks:
-            print(f"resuming cohort batch {cohort['id']} ({(cohort.get('batch') or {}).get('name')})")
-            _cohort_tasks[key] = asyncio.create_task(
-                _resume_cohort_batch(pool, cohort["id"])
+            print(
+                f"resuming cohort batch {cohort['id']} ({(cohort.get('batch') or {}).get('name')})"
             )
+            _cohort_tasks[key] = asyncio.create_task(_resume_cohort_batch(pool, cohort["id"]))
     try:
         yield
     finally:
@@ -103,6 +102,7 @@ async def lifespan(_app):
             task.cancel()
         await _stop_background_jobs()
         await asyncio.to_thread(db.close_pool)
+
 
 app = FastAPI(title="capture", lifespan=lifespan)
 
@@ -113,9 +113,9 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
+
 @app.middleware("http")
 async def replay_auth(request: Request, call_next):
-
     path = re.sub(r"/+", "/", request.url.path).lower()
     protected = path.startswith("/api/") or path == "/replay.html"
     if protected and not REPLAY_AUTH_DISABLED:
@@ -125,9 +125,7 @@ async def replay_auth(request: Request, call_next):
             if not session or not session.get("user_id"):
                 if path == "/replay.html":
                     return RedirectResponse("/login", status_code=302)
-                return JSONResponse(
-                    {"error": "login required", "login": "/login"}, status_code=401
-                )
+                return JSONResponse({"error": "login required", "login": "/login"}, status_code=401)
             request.state.auth = session
         elif not REPLAY_PASSWORD:
             return Response(
@@ -152,13 +150,14 @@ async def replay_auth(request: Request, call_next):
                 )
     return await call_next(request)
 
+
 # Stale-servable on purpose: a customer's page must never wait on our health.
 VISITOR_ASSETS = frozenset({"/capture.js", "/recorder.bundle.js"})
 VISITOR_ASSET_CACHE = "public, max-age=3600, stale-while-revalidate=86400, stale-if-error=86400"
 
+
 @app.middleware("http")
 async def revalidate_static(request: Request, call_next):
-
     response = await call_next(request)
     if "cache-control" in response.headers:
         return response
@@ -169,6 +168,7 @@ async def revalidate_static(request: Request, call_next):
     if path.endswith((".js", ".css", ".html")) or path == "/":
         response.headers["Cache-Control"] = "no-cache"
     return response
+
 
 # The repo root, not the package directory: data/, public/ and .env are all
 # repo-relative and stayed there when the Python moved into capture/.
@@ -189,21 +189,27 @@ WORKOS_ENABLED = bool(WORKOS_API_KEY and WORKOS_CLIENT_ID)
 WORKOS_API = os.environ.get("WORKOS_API") or "https://api.workos.com"
 ORG_CACHE_TTL_S = float(os.environ.get("ORG_CACHE_TTL_S", "60"))
 
-OPERATORS = {e.strip().lower() for e in os.environ.get("CAPTURE_OPERATORS", "").split(",") if e.strip()}
+OPERATORS = {
+    e.strip().lower() for e in os.environ.get("CAPTURE_OPERATORS", "").split(",") if e.strip()
+}
 
-SESSION_SECRET = os.environ.get("SESSION_SECRET") or hashlib.sha256(
-    f"session:{WORKOS_API_KEY}".encode()
-).hexdigest()
+SESSION_SECRET = (
+    os.environ.get("SESSION_SECRET")
+    or hashlib.sha256(f"session:{WORKOS_API_KEY}".encode()).hexdigest()
+)
 SESSION_TTL_S = 7 * 24 * 3600
 SESSION_COOKIE = "capture_session"
 STATE_COOKIE = "capture_login_state"
 
+
 def _sign(raw: str) -> str:
     return hmac.new(SESSION_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
+
 
 def make_session(payload: dict) -> str:
     raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return f"{raw}.{_sign(raw)}"
+
 
 def read_session(cookie: str | None) -> dict | None:
     if not cookie or "." not in cookie:
@@ -219,6 +225,7 @@ def read_session(cookie: str | None) -> dict | None:
         return None
     return payload
 
+
 def load_projects() -> dict:
     """Kept for the read paths that only need name/org/domains by handle. The
     record of truth is Postgres; a database that will not answer must fail
@@ -231,6 +238,7 @@ def load_projects() -> dict:
     except Exception as exc:
         raise ProjectsUnavailable(f"cannot read projects: {exc}") from exc
 
+
 def require_allowed_domain(request: Request, project: projects.Project | None) -> None:
     domains = list(project.domains) if project else []
     if not domains:
@@ -240,13 +248,17 @@ def require_allowed_domain(request: Request, project: projects.Project | None) -
     if not any(host == d or host.endswith("." + d) for d in domains):
         raise ApiError(403, "domain not allowed for this project")
 
+
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
 
+
 def chunk_window(path) -> str | None:
     parts = path.name.rsplit(".", 1)[0].split("-")
     return parts[1] if len(parts) == 3 else None
+
+
 MAX_BODY_BYTES = 50 * 1024 * 1024
 
 MAX_DECOMPRESSED_BYTES = int(os.environ.get("MAX_DECOMPRESSED_BYTES", 32 * 1024 * 1024))
@@ -269,24 +281,25 @@ READ_ONLY = os.environ.get("CAPTURE_READ_ONLY") == "1"
 # a second time.
 PREFLIGHT = os.environ.get("CAPTURE_PREFLIGHT") == "1"
 
-def gunzip(body: bytes, limit: int) -> bytes:
 
+def gunzip(body: bytes, limit: int) -> bytes:
     stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
     raw = stream.decompress(body, limit)
     if stream.unconsumed_tail:
         raise ValueError("decompressed payload too large")
     return raw
 
+
 def dir_bytes(path: Path) -> int:
     # Only recorded chunks count toward the ingest quota. Analysis output is
     # derived, is bounded per session, and must never throttle recording.
     return sum(
-        f.stat().st_size
-        for f in path.rglob("*.json")
-        if f.is_file() and SAFE_CHUNK.match(f.name)
+        f.stat().st_size for f in path.rglob("*.json") if f.is_file() and SAFE_CHUNK.match(f.name)
     )
 
+
 _bytes_used: dict = {}
+
 
 def project_bytes_used(project) -> int:
     """Cached so the quota check is not a query per ingest; the running total is
@@ -295,21 +308,26 @@ def project_bytes_used(project) -> int:
         _bytes_used[project.id] = sessionstore.project_bytes(project.id)
     return _bytes_used[project.id]
 
+
 CONFIG_PATH = DATA_ROOT / "config.json"
+
 
 class ApiError(Exception):
     def __init__(self, status: int, message: str):
         self.status = status
         self.message = message
 
+
 @app.exception_handler(ApiError)
 async def api_error_response(_request, exc: ApiError) -> JSONResponse:
     return JSONResponse({"error": exc.message}, status_code=exc.status)
+
 
 @app.exception_handler(ProjectsUnavailable)
 async def projects_unavailable_response(_request, exc: ProjectsUnavailable) -> JSONResponse:
     print(f"projects: refusing to serve — {exc}")
     return JSONResponse({"error": "project configuration unavailable"}, status_code=503)
+
 
 def resolve_project(handle: str | None) -> projects.Project:
     found = projects.by_handle(handle)
@@ -317,8 +335,10 @@ def resolve_project(handle: str | None) -> projects.Project:
         raise ApiError(404, "unknown project")
     return found
 
+
 def resolve_pool(project: str | None) -> Path:
     return resolve_project(project).pool
+
 
 def resolve_session(session_id: str, project: str | None) -> Path:
     if not SAFE_ID.match(session_id):
@@ -327,6 +347,7 @@ def resolve_session(session_id: str, project: str | None) -> Path:
     if not path.is_dir():
         raise ApiError(404, "not found")
     return path
+
 
 @app.post("/ingest")
 async def ingest(
@@ -401,9 +422,7 @@ async def ingest(
     first_ts, last_ts = event_span(events) or (now, now)
 
     window_id = str(payload.get("window_id") or "default")
-    state = await asyncio.to_thread(
-        sessionstore.window_state, project.id, session_id, window_id
-    )
+    state = await asyncio.to_thread(sessionstore.window_state, project.id, session_id, window_id)
     active_ts = last_active_scan(events, state)
     if active_ts:
         state["active"] = max(state.get("active", 0), active_ts)
@@ -412,14 +431,24 @@ async def ingest(
 
     await asyncio.to_thread(
         sessionstore.record_chunk,
-        project.id, session_id,
-        window_id=window_id, first_ts=first_ts, last_ts=last_ts, active_ts=active_ts,
-        size=size, meta=meta, clicks=clicks, rage=rage, device=device,
-        attribution=parse_attribution(meta.get("url")), state=state,
+        project.id,
+        session_id,
+        window_id=window_id,
+        first_ts=first_ts,
+        last_ts=last_ts,
+        active_ts=active_ts,
+        size=size,
+        meta=meta,
+        clicks=clicks,
+        rage=rage,
+        device=device,
+        attribution=parse_attribution(meta.get("url")),
+        state=state,
     )
     _bytes_used[project.id] = _bytes_used.get(project.id, 0) + size
 
     return {"status": "ok", "stored": len(events)}
+
 
 ORDER_FILE = "order.json"
 ORDER_MAX_BODY_BYTES = 4096
@@ -429,6 +458,7 @@ VISITOR_FILE = "visitor.json"
 INTERACTIONS_FILE = "interactions.json"
 
 DEVICE_FILE = "device.json"
+
 
 def read_device(events: list) -> dict | None:
     for event in events:
@@ -441,6 +471,7 @@ def read_device(events: list) -> dict | None:
         if isinstance(width, int) and isinstance(height, int) and width > 0:
             return {"width": width, "height": height}
     return None
+
 
 def count_clicks(events: list) -> tuple:
     """This batch's clicks only. The running totals accumulate in SQL, where an
@@ -458,13 +489,13 @@ def count_clicks(events: list) -> tuple:
             rage += 1
     return clicks, rage
 
+
 @app.post("/order")
 async def order_event(
     request: Request,
     session_id: str = Query(""),
     token: str | None = Query(None),
 ):
-
     if READ_ONLY:
         raise ApiError(403, "this server is read-only and does not accept recordings")
     if not SAFE_ID.match(session_id):
@@ -492,9 +523,9 @@ async def order_event(
         raise ApiError(404, "unknown session")
     return {"status": "ok"}
 
+
 @app.get("/healthz")
 def healthz():
-
     checks = {}
 
     try:
@@ -521,7 +552,9 @@ def healthz():
         (BASE_DIR / "public" / name).is_file()
         for name in ("capture.js", "recorder.bundle.js", "replay.bundle.js")
     )
-    checks["replay_auth_enabled"] = bool(REPLAY_PASSWORD or WORKOS_ENABLED) and not REPLAY_AUTH_DISABLED
+    checks["replay_auth_enabled"] = (
+        bool(REPLAY_PASSWORD or WORKOS_ENABLED) and not REPLAY_AUTH_DISABLED
+    )
     # Reported, not health-gating: analysis is an optional extra, and a box
     # without a key or a browser is still a perfectly healthy recorder.
     checks["read_only"] = READ_ONLY
@@ -529,7 +562,10 @@ def healthz():
     checks["analysis_runtime_present"] = analyze.runtime_present()
 
     informational = (
-        "replay_auth_enabled", "read_only", "analysis_configured", "analysis_runtime_present",
+        "replay_auth_enabled",
+        "read_only",
+        "analysis_configured",
+        "analysis_runtime_present",
     )
     healthy = all(v for k, v in checks.items() if k not in informational)
     return JSONResponse(
@@ -537,9 +573,9 @@ def healthz():
         status_code=200 if healthy else 503,
     )
 
+
 @app.get("/config")
 def remote_config(token: str | None = Query(None)):
-
     project = projects.by_token(token) if token else None
     if project is not None and project.config:
         response = JSONResponse(project.config)
@@ -563,15 +599,18 @@ def remote_config(token: str | None = Query(None)):
     response.headers["Cache-Control"] = "no-cache"
     return response
 
+
 def chunk_timestamp(path: Path) -> int:
     try:
         return int(path.name.split("-")[0])
     except ValueError:
         return 0
 
+
 ACTIVE_SOURCES = {1, 2, 3, 4, 5, 6, 7, 12}
 SNAPSHOT_META_WINDOW_MS = 500
 WINDOW_STATE_FILE = "window-state.json"
+
 
 def last_active_scan(events: list, state: dict) -> int | None:
     """Mirror the player's buildSegments activity rules; `state` carries the
@@ -602,6 +641,7 @@ def last_active_scan(events: list, state: dict) -> int | None:
     state["nav"] = nav
     return int(last) if last is not None else None
 
+
 def event_span(events: list) -> tuple | None:
     ts = [
         e["timestamp"]
@@ -609,6 +649,7 @@ def event_span(events: list) -> tuple | None:
         if isinstance(e, dict) and isinstance(e.get("timestamp"), (int, float))
     ]
     return (int(min(ts)), int(max(ts))) if ts else None
+
 
 def window_duration(states: dict) -> int | None:
     """Clamped span of the primary (biggest) window — the one the player
@@ -622,18 +663,21 @@ def window_duration(states: dict) -> int | None:
         end = min(end, primary["active"] + 1500)
     return max(int(end - primary["first"]), 0)
 
-def chunk_files(session_dir: Path) -> list:
 
+def chunk_files(session_dir: Path) -> list:
     return sorted(
         (c for c in session_dir.glob("*.json") if SAFE_CHUNK.match(c.name)),
         key=chunk_timestamp,
     )
 
+
 def read_pool(project: str | None) -> Path | None:
     found = projects.by_handle(project)
     return found.pool if found else None
 
+
 ATTRIBUTION_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "fbclid")
+
 
 def parse_attribution(url: str | None) -> dict | None:
     """Pull utm_* / fbclid from an entry URL for indexing and segment rollups."""
@@ -662,6 +706,7 @@ def parse_attribution(url: str | None) -> dict | None:
             out[key] = str(params[key])[:256]
     return out or None
 
+
 def session_states(entry: Path) -> tuple:
     """Rebuild per-window spans from the chunks themselves, so a session that
     predates window-state.json still resolves. Returns (states, first, last, active)."""
@@ -688,6 +733,7 @@ def session_states(entry: Path) -> tuple:
         state["last"] = max(state.get("last", span[1]), span[1])
         state["bytes"] = state.get("bytes", 0) + chunk.stat().st_size
     return states, first, last, active
+
 
 def session_info(entry: Path) -> dict | None:
     chunks = chunk_files(entry)
@@ -729,6 +775,7 @@ def session_info(entry: Path) -> dict | None:
         info["attribution"] = attribution
     return info
 
+
 def workos_call(path: str, payload: dict | None = None, bearer: bool = False) -> dict:
     req = urllib.request.Request(
         WORKOS_API + path,
@@ -740,6 +787,7 @@ def workos_call(path: str, payload: dict | None = None, bearer: bool = False) ->
     )
     with urllib.request.urlopen(req, timeout=10) as res:
         return json.load(res)
+
 
 def workos_authenticate(code: str) -> tuple:
     auth = workos_call(
@@ -754,7 +802,9 @@ def workos_authenticate(code: str) -> tuple:
     user = auth.get("user") or {}
     return (user.get("email") or "").lower(), user.get("id") or ""
 
+
 _org_cache: dict = {}
+
 
 def user_orgs(user_id: str) -> set:
     now = time.time()
@@ -767,7 +817,9 @@ def user_orgs(user_id: str) -> set:
             f"?user_id={urllib.parse.quote(user_id)}&statuses=active&limit=100",
             bearer=True,
         )
-        orgs = {m["organization_id"] for m in memberships.get("data", []) if m.get("organization_id")}
+        orgs = {
+            m["organization_id"] for m in memberships.get("data", []) if m.get("organization_id")
+        }
     except Exception as exc:
         print(f"auth: membership lookup failed for {user_id}: {exc}")
         if cached:
@@ -775,6 +827,7 @@ def user_orgs(user_id: str) -> set:
         raise ApiError(503, "could not verify project access — try again shortly") from exc
     _org_cache[user_id] = (now + ORG_CACHE_TTL_S, orgs)
     return orgs
+
 
 @app.get("/login")
 def login():
@@ -795,15 +848,19 @@ def login():
         }
     )
     response = RedirectResponse(f"{WORKOS_API}/user_management/authorize?{query}", status_code=302)
-    response.set_cookie(STATE_COOKIE, state, max_age=600, httponly=True, secure=True, samesite="lax")
+    response.set_cookie(
+        STATE_COOKIE, state, max_age=600, httponly=True, secure=True, samesite="lax"
+    )
     return response
 
+
 @app.get("/auth/callback")
-def auth_callback(request: Request, code: str | None = Query(None), state: str | None = Query(None)):
+def auth_callback(
+    request: Request, code: str | None = Query(None), state: str | None = Query(None)
+):
     if not WORKOS_ENABLED:
         raise ApiError(503, "login not configured")
     if not code or not state or state != request.cookies.get(STATE_COOKIE):
-
         return RedirectResponse("/login", status_code=302)
     try:
         email, user_id = workos_authenticate(code)
@@ -812,7 +869,9 @@ def auth_callback(request: Request, code: str | None = Query(None), state: str |
         raise ApiError(401, "login failed — start again at /login") from exc
     if not user_id:
         raise ApiError(401, "login failed — start again at /login")
-    session = make_session({"email": email, "user_id": user_id, "exp": int(time.time()) + SESSION_TTL_S})
+    session = make_session(
+        {"email": email, "user_id": user_id, "exp": int(time.time()) + SESSION_TTL_S}
+    )
     response = RedirectResponse("/replay.html", status_code=302)
     response.set_cookie(
         SESSION_COOKIE, session, max_age=SESSION_TTL_S, httponly=True, secure=True, samesite="lax"
@@ -820,11 +879,13 @@ def auth_callback(request: Request, code: str | None = Query(None), state: str |
     response.delete_cookie(STATE_COOKIE)
     return response
 
+
 @app.get("/logout")
 def logout():
     response = RedirectResponse("/", status_code=302)
     response.delete_cookie(SESSION_COOKIE)
     return response
+
 
 def allowed_projects(request: Request) -> set | None:
     auth = getattr(request.state, "auth", None)
@@ -833,10 +894,12 @@ def allowed_projects(request: Request) -> set | None:
     orgs = user_orgs(auth.get("user_id") or "")
     return {p.handle for p in projects.for_orgs(orgs)}
 
+
 def require_read_access(request: Request, project: str | None) -> None:
     allowed = allowed_projects(request)
     if allowed is not None and (not project or project not in allowed):
         raise ApiError(403, "not your project")
+
 
 @app.get("/api/projects")
 def list_projects(request: Request):
@@ -853,7 +916,9 @@ def list_projects(request: Request):
         **({"email": email} if email else {}),
     }
 
+
 SESSION_FILTERS = sessionstore.FILTERS
+
 
 @app.get("/api/sessions")
 def list_sessions(
@@ -872,6 +937,7 @@ def list_sessions(
     except ValueError as exc:
         raise ApiError(400, "bad cursor") from exc
 
+
 @app.get("/api/sessions/{session_id}")
 def get_session(request: Request, session_id: str, project: str | None = Query(None)):
     require_read_access(request, project)
@@ -883,9 +949,9 @@ def get_session(request: Request, session_id: str, project: str | None = Query(N
         raise ApiError(404, "not found")
     return info
 
+
 @app.delete("/api/sessions/{session_id}")
 def delete_session(request: Request, session_id: str, project: str | None = Query(None)):
-
     require_read_access(request, project)
     found = resolve_project(project)
     # Called for its 404: deleting an unknown session must not report success.
@@ -904,6 +970,7 @@ def delete_session(request: Request, session_id: str, project: str | None = Quer
     _bytes_used.pop(found.id, None)
     print(f"deleted session {session_id} ({freed} bytes)")
     return {"status": "deleted", "session_id": session_id, "bytes_freed": freed}
+
 
 @app.get("/api/sessions/{session_id}/chunks")
 def session_chunks(request: Request, session_id: str, project: str | None = Query(None)):
@@ -931,8 +998,11 @@ def session_chunks(request: Request, session_id: str, project: str | None = Quer
     windows = list(dict.fromkeys(c["window"] for c in manifest))
     return {"session_id": session_id, "url": url, "windows": windows, "chunks": manifest}
 
+
 @app.get("/api/sessions/{session_id}/chunks/{chunk_name}")
-def session_chunk(request: Request, session_id: str, chunk_name: str, project: str | None = Query(None)):
+def session_chunk(
+    request: Request, session_id: str, chunk_name: str, project: str | None = Query(None)
+):
     require_read_access(request, project)
     if not SAFE_ID.match(session_id) or not SAFE_CHUNK.match(chunk_name):
         raise ApiError(400, "invalid id")
@@ -944,9 +1014,7 @@ def session_chunk(request: Request, session_id: str, chunk_name: str, project: s
     if signed:
         # The redirect itself must not be cached — the URL it carries expires.
         # The object it points at is immutable and caches for a day.
-        return RedirectResponse(
-            signed, status_code=307, headers={"Cache-Control": "no-store"}
-        )
+        return RedirectResponse(signed, status_code=307, headers={"Cache-Control": "no-store"})
 
     body = storage.open_chunk(prefix, session_id, chunk_name)
     if body is None:
@@ -957,10 +1025,12 @@ def session_chunk(request: Request, session_id: str, chunk_name: str, project: s
         headers={"Cache-Control": storage.CHUNK_CACHE_CONTROL},
     )
 
+
 _analysis_tasks: dict = {}
 # Concurrency lives in analyze.py: one Chromium at a time for reconstruction,
 # a few overlapping Gemini calls. Both gates are shared by every caller here.
 _cohort_tasks: dict = {}
+
 
 async def _stop_background_jobs() -> None:
     """On a clean stop, leave no job claiming to be running with no task behind it."""
@@ -974,11 +1044,14 @@ async def _stop_background_jobs() -> None:
         await asyncio.gather(*pending, return_exceptions=True)
         print(f"shutdown: cancelled {len(pending)} background job(s)")
 
+
 def _analysis_key(session_dir: Path) -> str:
     return str(session_dir.resolve())
 
+
 def _cohort_key(pool: Path, cohort_id: str) -> str:
     return f"{pool.resolve()}::{cohort_id}"
+
 
 def _stage_chunks(project, session_ids: list) -> list:
     staged = []
@@ -1032,11 +1105,13 @@ async def _run_analysis_job(session_dir: Path, chunk_names: list, force: bool = 
     finally:
         _analysis_tasks.pop(_analysis_key(session_dir), None)
 
+
 def _require_analysis_runtime() -> None:
     if not analyze.ANALYSIS_ENABLED:
         raise ApiError(503, "analysis is not configured on this server")
     if not analyze.runtime_present():
         raise ApiError(503, "analysis runtime is unavailable on this server")
+
 
 async def _start_session_analysis(session_dir: Path, force: bool = False) -> dict:
     """Queue (or return) per-session analysis — shared by the single-session API and cohorts."""
@@ -1066,11 +1141,10 @@ async def _start_session_analysis(session_dir: Path, force: bool = False) -> dic
         analyze.clear_analysis(session_dir)
 
     analyze.write_job(session_dir, "running")
-    task = asyncio.create_task(
-        _run_analysis_job(session_dir, [c.name for c in chunks], force=True)
-    )
+    task = asyncio.create_task(_run_analysis_job(session_dir, [c.name for c in chunks], force=True))
     _analysis_tasks[key] = task
     return {"status": "running", "accepted": True}
+
 
 async def _await_session_analysis(session_dir: Path, force: bool = False) -> None:
     """Run one session through the shared analysis queue and wait until it settles."""
@@ -1086,6 +1160,7 @@ async def _await_session_analysis(session_dir: Path, force: bool = False) -> Non
         raise RuntimeError(job.get("error") or "analysis failed")
     if not analyze.read_analysis(session_dir):
         raise RuntimeError("analysis finished without a result")
+
 
 def _cohort_session_ids(cohort: dict) -> list:
     return [
@@ -1128,6 +1203,7 @@ async def _resume_cohort_batch(pool: Path, cohort_id: str) -> None:
     finally:
         _cohort_tasks.pop(key, None)
 
+
 @app.get("/api/sessions/{session_id}/analysis")
 def get_analysis(request: Request, session_id: str, project: str | None = Query(None)):
     require_read_access(request, project)
@@ -1167,6 +1243,7 @@ async def create_analysis(
     if result.get("accepted"):
         return JSONResponse({"status": "running"}, status_code=202)
     return result
+
 
 def _resolve_cohort_or_404(pool: Path, cohort_id: str | None) -> dict:
     """A cohort by id, or the newest one when the caller did not name one."""
@@ -1375,9 +1452,7 @@ async def create_cohort(
         any_count = any_n
         total = any_n
     else:
-        purchased_n = (
-            analyze.COHORT_DEFAULT_PURCHASED_N if purchased is None else purchased
-        )
+        purchased_n = analyze.COHORT_DEFAULT_PURCHASED_N if purchased is None else purchased
         all_count = analyze.COHORT_DEFAULT_ALL_N if all_n is None else all_n
         # If only one side was set, the other defaults to 0 (not the 50/50 preset).
         if purchased is not None and all_n is None:
@@ -1556,9 +1631,7 @@ async def _retry_cohort_session_job(
             row["error"] = getattr(exc, "message", None) or str(exc) or "analysis failed"
         analyze.write_cohort(
             pool,
-            analyze.persistable_cohort(
-                analyze.enrich_cohort_status(pool, cohort), cohort
-            ),
+            analyze.persistable_cohort(analyze.enrich_cohort_status(pool, cohort), cohort),
         )
     finally:
         _cohort_tasks.pop(key, None)
@@ -1582,17 +1655,13 @@ async def _run_cut_job(pool: Path, cohort_id: str, rows: list, slice_spec, key: 
         analyze.write_cut(pool, cohort_id, key, cut)
         _cut_errors.pop(task_key, None)
     except Exception as exc:
-        _cut_errors[task_key] = (
-            getattr(exc, "message", None) or str(exc) or "cut analysis failed"
-        )
+        _cut_errors[task_key] = getattr(exc, "message", None) or str(exc) or "cut analysis failed"
     finally:
         _cut_tasks.pop(task_key, None)
 
 
 @app.get("/api/cohorts/{cohort_id}/facets")
-def get_cohort_facets(
-    request: Request, cohort_id: str, project: str | None = Query(None)
-):
+def get_cohort_facets(request: Request, cohort_id: str, project: str | None = Query(None)):
     """Slice values present in this cohort, so the picker only offers real ones."""
     require_read_access(request, project)
     pool = resolve_pool(project)
@@ -1688,9 +1757,7 @@ async def get_cut(
 
     task = asyncio.create_task(_run_cut_job(pool, cohort_id, rows, slice_spec, key))
     _cut_tasks[task_key] = task
-    return JSONResponse(
-        {"status": "running", "cut": key, "cohort_id": cohort_id}, status_code=202
-    )
+    return JSONResponse({"status": "running", "cut": key, "cohort_id": cohort_id}, status_code=202)
 
 
 def _sse(event: str, data: dict) -> str:
@@ -1831,9 +1898,7 @@ def stamp_cohort_attribution(pool: Path, cohort: dict) -> dict:
 
 
 def cohort_response(pool: Path, cohort: dict) -> dict:
-    return stamp_cohort_attribution(
-        pool, analyze.attach_cohort_insights(pool, cohort)
-    )
+    return stamp_cohort_attribution(pool, analyze.attach_cohort_insights(pool, cohort))
 
 
 def project_for_pool(pool: Path) -> projects.Project:
@@ -1842,6 +1907,7 @@ def project_for_pool(pool: Path) -> projects.Project:
         if candidate.pool == pool:
             return candidate
     raise ApiError(404, "unknown project")
+
 
 def _session_facts(pool: Path) -> dict:
     """session_id → {attribution, device, outcome, page} straight from the index."""
@@ -1931,9 +1997,7 @@ def _multi_param(raw, allowed, field) -> list:
                         out.append(legacy)
                 continue
             if value not in allowed:
-                raise ApiError(
-                    400, f"{field} must be one of: " + ", ".join(allowed)
-                )
+                raise ApiError(400, f"{field} must be one of: " + ", ".join(allowed))
             if value not in out:
                 out.append(value)
     return out
@@ -1973,7 +2037,6 @@ def _slice_from_params(
 
 
 def sweep_expired_sessions() -> int:
-
     # Expiry is decided in SQL rather than by walking every session directory,
     # which is what made startup take ~23s at 9k sessions.
     if RETENTION_DAYS <= 0:
@@ -1999,12 +2062,13 @@ def sweep_expired_sessions() -> int:
         _bytes_used.clear()
     return removed
 
+
 app.mount("/", StaticFiles(directory=BASE_DIR / "public", html=True), name="static")
 
 PUBLIC_URL_FILE = DATA_ROOT / "public_url"
 
-def public_base_url() -> str:
 
+def public_base_url() -> str:
     try:
         from_file = PUBLIC_URL_FILE.read_text()
     except Exception:
@@ -2013,6 +2077,7 @@ def public_base_url() -> str:
         if value:
             return value.strip().rstrip("/")
     return "https://capture.example.com"
+
 
 # Byte-identical to the block in docs/integration.md; a test pins them.
 INTEGRATION_SNIPPET = """<script>
@@ -2040,9 +2105,11 @@ INTEGRATION_SNIPPET = """<script>
 })();
 </script>"""
 
+
 def integration_snippet(base: str, token: str, indent: str = "  ") -> str:
     body = INTEGRATION_SNIPPET.replace("__HOST__", base).replace("__TOKEN__", token)
     return "\n".join(indent + line if line else line for line in body.split("\n"))
+
 
 def add_project(name: str) -> None:
     token = "cap_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=24))
@@ -2062,9 +2129,11 @@ def add_project(name: str) -> None:
         f"data/projects/{token}/config.json (falls back to data/config.json)"
     )
 
+
 def find_project(handle: str):
     """CLI lookup: accepts the project handle or any of its ingest tokens."""
     return projects.by_handle(handle) or projects.by_token(handle)
+
 
 def list_projects_cli() -> None:
     known = projects.all_projects(fresh=True)
@@ -2081,6 +2150,7 @@ def list_projects_cli() -> None:
             f"  —  {org}  —  {tokens}"
         )
 
+
 def set_project_org(handle: str, org_id: str) -> None:
     project = find_project(handle)
     if project is None:
@@ -2088,6 +2158,7 @@ def set_project_org(handle: str, org_id: str) -> None:
         return
     projects.set_org(project, org_id)
     print(f"'{project.name}' is now readable by members of WorkOS organization {org_id}")
+
 
 def set_project_domains(handle: str, domains: list) -> None:
     project = find_project(handle)
@@ -2101,9 +2172,12 @@ def set_project_domains(handle: str, domains: list) -> None:
     ]
     projects.set_domains(project, cleaned)
     if cleaned:
-        print(f"'{project.name}' now accepts recordings only from {', '.join(cleaned)} (and subdomains)")
+        print(
+            f"'{project.name}' now accepts recordings only from {', '.join(cleaned)} (and subdomains)"
+        )
     else:
         print(f"'{project.name}' now accepts recordings from any domain")
+
 
 def invite_user(email: str, target: str) -> None:
     if not WORKOS_ENABLED:
@@ -2126,6 +2200,7 @@ def invite_user(email: str, target: str) -> None:
     expires = invitation.get("expires_at") or "?"
     print(f"invited {email} to {org_id} — they'll get an email link, valid until {expires}")
 
+
 def remove_project(handle: str, purge: bool) -> None:
     project = find_project(handle)
     if project is None:
@@ -2142,6 +2217,7 @@ def remove_project(handle: str, purge: bool) -> None:
         print(f"deleted {count} stored session(s), {used / 1024**2:.1f} MB")
     elif count:
         print(f"kept {count} session(s), {used / 1024**2:.1f} MB — re-run with --purge to erase")
+
 
 def _cli(argv: list) -> None:
     if len(argv) >= 2 and argv[0] == "add-project":

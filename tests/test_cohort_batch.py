@@ -316,9 +316,7 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
 
         analyze.wait_gemini_batch = never_finishes
         asyncio.run(
-            analyze.resume_cohort_batch(
-                self.pool, analyze.read_cohort(self.pool, "cohort-1")
-            )
+            analyze.resume_cohort_batch(self.pool, analyze.read_cohort(self.pool, "cohort-1"))
         )
 
         saved = analyze.read_cohort(self.pool, "cohort-1")
@@ -365,9 +363,7 @@ class TestWaitGeminiBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
 
     def test_a_transient_poll_failure_does_not_end_the_wait(self):
         # Escalating here would drop into the fallback and re-bill the cohort.
-        state = self.script(
-            [RuntimeError("503"), RuntimeError("503"), "JOB_STATE_SUCCEEDED"]
-        )
+        state = self.script([RuntimeError("503"), RuntimeError("503"), "JOB_STATE_SUCCEEDED"])
         job = asyncio.run(analyze.wait_gemini_batch("j", poll_s=0.001))
         self.assertEqual(job.state.name, "JOB_STATE_SUCCEEDED")
         self.assertEqual(state["calls"], 3)
@@ -380,15 +376,11 @@ class TestWaitGeminiBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
     def test_a_stuck_job_gives_up_at_the_deadline(self):
         self.script(["JOB_STATE_PENDING"] * 500)
         with self.assertRaises(analyze.BatchStillRunning):
-            asyncio.run(
-                analyze.wait_gemini_batch("j", poll_s=0.001, max_wait_s=0.05)
-            )
+            asyncio.run(analyze.wait_gemini_batch("j", poll_s=0.001, max_wait_s=0.05))
 
     def test_zero_still_means_wait_forever(self):
         self.script(["JOB_STATE_PENDING", "JOB_STATE_SUCCEEDED"])
-        job = asyncio.run(
-            analyze.wait_gemini_batch("j", poll_s=0.001, max_wait_s=0)
-        )
+        job = asyncio.run(analyze.wait_gemini_batch("j", poll_s=0.001, max_wait_s=0))
         self.assertEqual(job.state.name, "JOB_STATE_SUCCEEDED")
 
     def test_terminal_states_return_the_job(self):
@@ -464,9 +456,7 @@ class TestPersistableCohort(pgfixture.CohortStoreMixin, unittest.TestCase):
         enriched = analyze.attach_cohort_insights(
             self.pool, analyze.enrich_cohort_status(self.pool, stored)
         )
-        analyze.write_cohort(
-            self.pool, analyze.persistable_cohort(enriched, stored)
-        )
+        analyze.write_cohort(self.pool, analyze.persistable_cohort(enriched, stored))
         saved = analyze.read_cohort(self.pool, "cohort-1")
         self.assertNotIn("text", saved["sessions"][0])
         self.assertNotIn("progress", saved)

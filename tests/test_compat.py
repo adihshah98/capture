@@ -32,10 +32,18 @@ class CompatCase(unittest.TestCase):
             cls.beta = conn.execute(
                 "INSERT INTO projects (name) VALUES ('beta') RETURNING id"
             ).fetchone()[0]
-            cls.seed(conn, cls.alpha, "a-bought", url="https://shop.test/p/1?utm_source=meta",
-                    clicks=5, purchased=True, width=390)
-            cls.seed(conn, cls.alpha, "a-browsed", url="https://shop.test/p/2",
-                     clicks=1, width=1440)
+            cls.seed(
+                conn,
+                cls.alpha,
+                "a-bought",
+                url="https://shop.test/p/1?utm_source=meta",
+                clicks=5,
+                purchased=True,
+                width=390,
+            )
+            cls.seed(
+                conn, cls.alpha, "a-browsed", url="https://shop.test/p/2", clicks=1, width=1440
+            )
             cls.seed(conn, cls.beta, "b-secret", url="https://other.test/", clicks=9)
 
     @staticmethod
@@ -45,7 +53,10 @@ class CompatCase(unittest.TestCase):
             " chunk_count, clicks, url, device, attribution)"
             " VALUES (%s, %s, 1000, 60000, 2, %s, %s, %s, %s)",
             (
-                project, sid, clicks, url,
+                project,
+                sid,
+                clicks,
+                url,
                 json.dumps({"width": width, "height": 800}) if width else None,
                 json.dumps({"utm_source": "meta"}) if "utm_source" in url else None,
             ),
@@ -77,7 +88,9 @@ class TestAnalyzeRunsUnmodified(CompatCase):
 
     def test_sample_cohort_rows_returns_this_project_only(self):
         with compat.cohort_connection(self.alpha) as conn:
-            rows = analyze.sample_cohort_rows(conn, str(self.alpha), 0, 0, any_n=10, url_contains="")
+            rows = analyze.sample_cohort_rows(
+                conn, str(self.alpha), 0, 0, any_n=10, url_contains=""
+            )
         ids = sorted(r["session_id"] for r in rows)
         self.assertEqual(ids, ["a-bought", "a-browsed"])
 
@@ -86,7 +99,9 @@ class TestAnalyzeRunsUnmodified(CompatCase):
         json.loads; a dict would silently degrade to None, and every session
         would look like it never bought anything."""
         with compat.cohort_connection(self.alpha) as conn:
-            rows = analyze.sample_cohort_rows(conn, str(self.alpha), 0, 0, any_n=10, url_contains="")
+            rows = analyze.sample_cohort_rows(
+                conn, str(self.alpha), 0, 0, any_n=10, url_contains=""
+            )
         classified = {r["session_id"]: r["filter"] for r in rows}
         self.assertEqual(classified["a-bought"], "purchased")
         self.assertNotEqual(classified["a-browsed"], "purchased")
@@ -139,7 +154,9 @@ class TestCompatViewKeepsTenantsApart(CompatCase):
 
 class TestPlaceholderTranslation(unittest.TestCase):
     def test_question_marks_become_psycopg_placeholders(self):
-        self.assertEqual(compat.translate("WHERE a = ? AND b = ?", (1, 2)), "WHERE a = %s AND b = %s")
+        self.assertEqual(
+            compat.translate("WHERE a = ? AND b = ?", (1, 2)), "WHERE a = %s AND b = %s"
+        )
 
     def test_literal_percent_is_escaped_before_translation(self):
         self.assertEqual(
