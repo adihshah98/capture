@@ -18,10 +18,13 @@ PREFLIGHT_PORT="${CAPTURE_PREFLIGHT_PORT:-8099}"
 
 cd "$(dirname "$0")"
 npm run build
+
 RELEASE="$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null || RELEASE="$RELEASE-dirty"
 echo "release $RELEASE"
 
+# A glob, not a list: an explicit one silently drops any module added since
+# it was last edited, and the server only fails on import at startup.
 # `capture` is the whole Python app, so this no longer enumerates modules by
 # name -- that list silently omitted analyze_store.py from the day it was added,
 # and the box ran the pre-SQLite store until it was noticed.
@@ -84,7 +87,7 @@ fi
 
 if [ "${CAPTURE_READ_ONLY:-}" = "1" ]; then
   echo "read-only server — skipping migrations, it does not own this schema"
-elif ! (cd "$TARGET" && .venv/bin/python db.py); then
+elif ! (cd "$TARGET" && .venv/bin/python -m capture.db); then
   echo "migrations failed — the running release is untouched" >&2
   exit 1
 fi
@@ -96,7 +99,7 @@ fi
 echo "pre-flighting on port $PORT"
 # The port must be silent first. An instance leaked by an earlier deploy would
 # answer in place of the new release and pass one that cannot even import.
-pkill -f "uvicorn server:app .*--port $PORT" 2>/dev/null || true
+pkill -f "uvicorn capture.server:app .*--port $PORT" 2>/dev/null || true
 sleep 1
 if curl -sf -o /dev/null "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
   echo "something is still answering on port $PORT — refusing to pre-flight blind" >&2
@@ -106,7 +109,7 @@ fi
 # Not wrapped in a subshell: $! has to be uvicorn itself, or the kill below
 # reaps the subshell and leaves the server running.
 cd "$TARGET"
-CAPTURE_PREFLIGHT=1 .venv/bin/uvicorn server:app \
+CAPTURE_PREFLIGHT=1 .venv/bin/uvicorn capture.server:app \
   --host 127.0.0.1 --port "$PORT" --log-level warning >/tmp/preflight.log 2>&1 &
 PREFLIGHT_PID=$!
 cd "$ROOT"
@@ -118,7 +121,7 @@ for _ in $(seq 1 40); do
 done
 kill "$PREFLIGHT_PID" 2>/dev/null || true
 wait "$PREFLIGHT_PID" 2>/dev/null || true
-pkill -f "uvicorn server:app .*--port $PORT" 2>/dev/null || true
+pkill -f "uvicorn capture.server:app .*--port $PORT" 2>/dev/null || true
 if [ "$ok" -ne 1 ]; then
   echo "the new release did not come up — the running one is untouched" >&2
   tail -20 /tmp/preflight.log >&2 || true
@@ -143,7 +146,7 @@ WorkingDirectory=$ROOT/current
 Environment=PLAYWRIGHT_BROWSERS_PATH=$SHARED/playwright
 EnvironmentFile=/etc/capture.env
 EnvironmentFile=/etc/capture-cloudfront.env
-ExecStart=$ROOT/current/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 80 --proxy-headers --forwarded-allow-ips=\${FORWARDED_ALLOW_IPS} --timeout-graceful-shutdown 25
+ExecStart=$ROOT/current/.venv/bin/uvicorn capture.server:app --host 0.0.0.0 --port 80 --proxy-headers --forwarded-allow-ips=\${FORWARDED_ALLOW_IPS} --timeout-graceful-shutdown 25
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 TimeoutStopSec=40
 Restart=always
