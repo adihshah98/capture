@@ -83,5 +83,5 @@ UNIT
 
 sudo systemctl daemon-reload
 sudo systemctl enable capture 2>/dev/null
-echo "bootstrap done — run ./deploy.sh to ship the code and start the service"
+echo "bootstrap done — run ./scripts/deploy.sh to ship the code and start the service"
 REMOTE

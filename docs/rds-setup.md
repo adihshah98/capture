@@ -174,8 +174,8 @@ count should match what the replay UI shows today.
 ## 6. Deploy
 
 ```bash
-./deploy-staging.sh   # soak here first
-./deploy.sh
+./scripts/deploy-staging.sh   # soak here first
+./scripts/deploy.sh
 ```
 
 `deploy.sh` re-runs migrations (a no-op now), then restarts. It refuses to

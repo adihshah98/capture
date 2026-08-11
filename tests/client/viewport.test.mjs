@@ -19,7 +19,7 @@ function fakeViewport(props) {
 
 globalThis.window = globalThis;
 
-const { startViewportCapture } = await import('../src/recorder/viewport.js');
+const { startViewportCapture } = await import('../../src/recorder/viewport.js');
 
 const settle = () => new Promise((r) => setTimeout(r, 200));
 

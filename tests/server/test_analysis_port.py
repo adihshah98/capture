@@ -157,7 +157,7 @@ class TestNoOneElseImportsAnalyze(unittest.TestCase):
         flat, so once the routers moved under capture/api/ any one of them could
         have imported analyze directly and walked straight past the guard.
         """
-        root = Path(__file__).resolve().parent.parent / "capture"
+        root = Path(__file__).resolve().parent.parent.parent / "capture"
         offenders = []
         for source in root.rglob("*.py"):
             if source.name == "analysis_port.py":
@@ -176,7 +176,7 @@ class TestNoOneElseImportsAnalyze(unittest.TestCase):
 
     def test_the_guard_covers_the_routers(self):
         """The above is only meaningful if it actually reaches capture/api/."""
-        root = Path(__file__).resolve().parent.parent / "capture"
+        root = Path(__file__).resolve().parent.parent.parent / "capture"
         scanned = {
             str(p.relative_to(root))
             for p in root.rglob("*.py")

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { gapEntries, isAttention } = await import('../src/replay/gaps.js');
+const { gapEntries, isAttention } = await import('../../src/replay/gaps.js');
 
 const T0 = 1_700_000_000_000;
 const min = (n) => T0 + n * 60_000;

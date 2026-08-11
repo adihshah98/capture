@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { citationMs, linkCitations } = await import('../src/replay/citations.js');
+const { citationMs, linkCitations } = await import('../../src/replay/citations.js');
 
 // Matches escapeAttr in insights.js closely enough to prove quotes cannot
 // break out of the attribute.

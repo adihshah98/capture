@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-const BUILT = new URL('../public/capture.js', import.meta.url);
+const BUILT = new URL('../../public/capture.js', import.meta.url);
 const CODE = fs.readFileSync(BUILT, 'utf8');
 const CAPTURE_ORIGIN = 'https://capture.example.com';
 

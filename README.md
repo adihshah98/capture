@@ -16,15 +16,15 @@ npm run dev        # builds bundles + starts the server on :3000
 npm test           # client + server tests (needs no dev dependencies)
 ```
 
-`npm test` runs the client tests through Node's built-in runner and the server
-tests through `unittest`. The server tests boot real uvicorn processes against
+`npm test` runs `tests/client` through Node's built-in runner and `tests/server`
+through `unittest`. The server tests boot real uvicorn processes against
 a throwaway `CAPTURE_DATA_DIR`, so they exercise what ships — middleware order,
 env parsing, status codes — and never touch your recordings.
 
 Two shorter loops, both needing `requirements-dev.txt`:
 
 ```bash
-npm run test:fast  # the tests that need no database — ~1s
+npm run test:fast  # tests/server, the ones needing no database — ~1s
 npm run lint       # ruff check, ruff format --check, mypy
 ```
 

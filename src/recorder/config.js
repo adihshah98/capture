@@ -1,4 +1,4 @@
-import { DEFAULT_REDACT_PARAMS } from '../redact.js';
+import { DEFAULT_REDACT_PARAMS } from './redact.js';
 
 const DEFAULTS = {
   endpoint: '/ingest',

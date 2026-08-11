@@ -61,7 +61,7 @@ module = "capture.analyze.*"
 ignore_errors = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/server"]
 markers = [
     "unit: no database, no network, no disk",
     "integration: needs a real Postgres",

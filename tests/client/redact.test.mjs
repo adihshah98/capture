@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 globalThis.location = { href: 'https://brand.example/checkout' };
-const { redactUrl } = await import('../src/redact.js');
+const { redactUrl } = await import('../../src/recorder/redact.js');
 
 const cases = [
   ['leaves a plain URL alone', 'https://brand.example/checkout', 'https://brand.example/checkout'],

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { beaconEvents, BEACON_SPLIT_FLOOR_BYTES } = await import('../src/recorder/beacon.js');
+const { beaconEvents, BEACON_SPLIT_FLOOR_BYTES } = await import('../../src/recorder/beacon.js');
 
 const event = (bytes) => ({ pad: 'x'.repeat(bytes) });
 const encode = (events) => JSON.stringify(events);

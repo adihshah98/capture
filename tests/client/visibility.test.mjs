@@ -24,7 +24,7 @@ globalThis.addEventListener = win.addEventListener;
 globalThis.removeEventListener = win.removeEventListener;
 globalThis.document = doc;
 
-const { startVisibilityCapture } = await import('../src/recorder/visibility.js');
+const { startVisibilityCapture } = await import('../../src/recorder/visibility.js');
 
 const settle = () => new Promise((r) => setTimeout(r, 200));
 

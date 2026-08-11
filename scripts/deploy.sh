@@ -16,7 +16,9 @@ PUBLIC_URL="${CAPTURE_PUBLIC_URL:-https://d1lt8dgxjrizij.cloudfront.net}"
 KEEP_RELEASES="${CAPTURE_KEEP_RELEASES:-3}"
 PREFLIGHT_PORT="${CAPTURE_PREFLIGHT_PORT:-8099}"
 
-cd "$(dirname "$0")"
+# The repo root, not this script's directory: everything below — the build, the
+# tar whitelist, the git rev — is relative to the root.
+cd "$(dirname "$0")/.."
 npm run build
 
 RELEASE="$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"

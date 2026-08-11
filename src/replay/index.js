@@ -1,6 +1,6 @@
-import { refreshAll } from './replay/session-list.js';
-import { player } from './replay/session-player.js';
-import { initInsights, refreshCohort } from './replay/insights.js';
+import { refreshAll } from './session-list.js';
+import { player } from './session-player.js';
+import { initInsights, refreshCohort } from './insights.js';
 
 addEventListener('keydown', (e) => {
   if (!player || e.target.closest('input, select, textarea, button')) return;

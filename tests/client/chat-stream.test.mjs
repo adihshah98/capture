@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { parseFrames, splitSettled } = await import('../src/replay/chat-stream.js');
+const { parseFrames, splitSettled } = await import('../../src/replay/chat-stream.js');
 
 test('whole frames are parsed and the partial tail is returned', () => {
   const [frames, rest] = parseFrames(

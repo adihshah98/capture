@@ -1,4 +1,4 @@
-import { resolveConfig } from './recorder/config.js';
+import { resolveConfig } from './config.js';
 import {
   forgetVisitor,
   getSession,
@@ -6,11 +6,11 @@ import {
   getWindowId,
   isOptedOut,
   setOptedOut,
-} from './recorder/identity.js';
-import { setSessionId, setStatus, setVisitorId, setWindowId, status } from './recorder/state.js';
-import { flush } from './recorder/transport.js';
-import { setupTriggers } from './recorder/triggers.js';
-import { startRecording, stopRecording, watchForNextSession } from './recorder/recording.js';
+} from './identity.js';
+import { setSessionId, setStatus, setVisitorId, setWindowId, status } from './state.js';
+import { flush } from './transport.js';
+import { setupTriggers } from './triggers.js';
+import { startRecording, stopRecording, watchForNextSession } from './recording.js';
 
 let booted = false;
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { queryParams } = await import('../src/replay/params.js');
+const { queryParams } = await import('../../src/replay/params.js');
 
 const cases = [
   ['plain URL has no params', 'https://brand.example/checkout', []],

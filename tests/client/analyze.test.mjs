@@ -10,7 +10,7 @@ import {
   pickFrameTimes,
   scrollTimeline,
   viewportOf,
-} from '../src/analyze/extract.mjs';
+} from '../../src/analyze/extract.mjs';
 
 const marker = (tag, timestamp) => ({ type: 5, data: { tag, payload: {} }, timestamp });
 const scroll = (y, timestamp) => ({ type: 3, data: { source: 3, id: 1, x: 0, y }, timestamp });

@@ -97,7 +97,7 @@ class TestBackfill(unittest.TestCase):
         """Run the shipped CLI in its own process. Importing it here instead
         would leak CAPTURE_DATA_DIR and a re-imported server module into every
         test that runs afterwards."""
-        repo = Path(__file__).resolve().parent.parent
+        repo = Path(__file__).resolve().parent.parent.parent
         result = subprocess.run(
             [str(repo / ".venv" / "bin" / "python"), "-m", "capture.backfill"],
             cwd=repo,

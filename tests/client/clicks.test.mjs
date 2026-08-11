@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { selectorFor, textFor, createRageTracker } = await import('../src/recorder/clicks.js');
+const { selectorFor, textFor, createRageTracker } = await import('../../src/recorder/clicks.js');
 
 function el(tag, { id, className = '', attrs = {}, text, children = [], masked = false } = {}) {
   const node = {

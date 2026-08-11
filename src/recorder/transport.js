@@ -1,5 +1,5 @@
 import { record } from 'rrweb';
-import { redactUrl } from '../redact.js';
+import { redactUrl } from './redact.js';
 import { beaconEvents } from './beacon.js';
 import { config } from './config.js';
 import { status, sessionId, windowId, visitorId } from './state.js';

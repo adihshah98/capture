@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parent.parent.parent
 UVICORN = REPO / ".venv" / "bin" / "uvicorn"
 
 # capture.config reads the environment once, at import, and whichever test module
