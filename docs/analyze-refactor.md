@@ -1,8 +1,9 @@
 # analyze.py refactor — handoff
 
 Working notes for the Tier 2 restructuring of what was `analyze.py` and is now
-the [`analyze/`](../analyze/) package. Tier 1 (correctness) is done; this file
-exists so the next session does not have to re-derive the analysis.
+the [`capture/analyze/`](../capture/analyze/) package. Tier 1 (correctness) is
+done; this file exists so the next session does not have to re-derive the
+analysis.
 
 ## Where things stand
 
@@ -42,7 +43,7 @@ on another branch. Do not touch the write paths in `analyze.py` —
 a data-layer move unavoidably rewrites, and expect a merge conflict there.
 
 Partly landed as of `main`: `fsutil.atomic_write_{text,json}` exist and
-`server.py` uses them, but `analyze/__init__.py` still has three raw
+`server.py` uses them, but `capture/analyze/__init__.py` still has three raw
 `write_text` calls (`write_job`, the legacy cohort migration,
 `write_analysis_result`). Still treat those three as someone else's.
 
@@ -54,9 +55,9 @@ roughly that much lower.
 
 | Concern | Roughly | What it is |
 |---|---|---|
-| Storage | 179–361, 2430–2452 | ~~JSON files as a database~~ → `analyze/store.py` |
-| Slice algebra | 503–735, 1877–1949 | ~~the `{outcome, device, page, utm_*}` filter language~~ → `analyze/slices.py` |
-| Prompt engineering | 114–170, 738–1083, 1117–1425, 1672–1763 | ~~prompt text~~ → `analyze/prompts/*.md`; ~~measured splits~~ → `analyze/stats.py` |
+| Storage | 179–361, 2430–2452 | ~~JSON files as a database~~ → `capture/analyze/store.py` |
+| Slice algebra | 503–735, 1877–1949 | ~~the `{outcome, device, page, utm_*}` filter language~~ → `capture/analyze/slices.py` |
+| Prompt engineering | 114–170, 738–1083, 1117–1425, 1672–1763 | ~~prompt text~~ → `capture/analyze/prompts/*.md`; ~~measured splits~~ → `capture/analyze/stats.py` |
 | Orchestration | 2455–3324 | subprocess extraction, Gemini interactive + Batch, cohort job, CLI — **still in `__init__.py`** |
 
 Line numbers throughout this file are from the original 3,750-line `analyze.py`
@@ -106,7 +107,7 @@ Load-bearing decisions that look incidental. Do not lose these in a rewrite.
 ### 1. Cohort state into SQLite — **done** (`14ce676`)
 
 Cohorts, membership and the cut cache are three tables in `data/index.db`, in
-[`analyze/store.py`](../analyze/store.py). Storage functions in `analyze.py` keep
+[`capture/analyze/store.py`](../capture/analyze/store.py). Storage functions in `analyze.py` keep
 their `pool: Path` signatures and dict shapes, so `server.py` was not touched.
 
 What landed:
@@ -223,7 +224,7 @@ field list is still open, and is the natural companion to §3.
 ### 3. Package, with prompts as files — **in progress**
 
 Landed so far (`933bbe5`, `f4c01b4`, `ab6ef7d`, `da3a9ca`). `analyze.py` 3,967 →
-3,030 lines, and it is now `analyze/__init__.py`:
+3,030 lines, and it is now `capture/analyze/__init__.py`:
 
 ```
 analyze/
@@ -319,8 +320,60 @@ already unreachable before `b75e06d`. Worth a sweep of cut rows whose key does
 not parse to the current shape.
 
 `server.py` imports `analyze` as a module and uses ~60 attributes off it. Keep
-`analyze/__init__.py` re-exporting the current surface so the split lands without
+`capture/analyze/__init__.py` re-exporting the current surface so the split lands without
 touching `server.py`, then narrow it separately.
+
+## Repo layout
+
+`src/` was a JS tree with subdirectories while the Python was seven loose files
+at the root, and `src/analyze/` (the JS extractor) sat next to `analyze/` (the
+Python). All the Python is now under `capture/`:
+
+```
+capture/          server, db, projects, sessionstore, compat, fsutil, backfill
+  analyze/        the analysis package (§3)
+src/              JS: recorder/, analyze/ (extractor), replay/
+public/           built bundles          migrations/  tests/  docs/  data/
+```
+
+`analyze` is a **subpackage, not a peer**. `server.py` imports it directly and
+uses ~52 attributes off it, and the two ship as one FastAPI process —
+`run_cohort_job` is awaited in the server's event loop. `capture/` is the
+deployable unit; analysis is a component of it. If analysis ever becomes its own
+worker, promoting a subpackage is easier than un-splitting two top-levels.
+
+**Path anchors climb now.** `server.py`'s `BASE_DIR` (feeding `data/`, the
+`public/` static mount and `.env`), `db.py`'s `MIGRATIONS_DIR` and
+`projects.py`'s `BASE_DIR` go up one level; `analyze`'s goes up two. `data/`,
+`public/` and `migrations/` stayed at the repo root. Nothing in the suite
+catches a wrong anchor — it surfaces as a 404 on static or a silently empty data
+dir — so check `/healthz` (`bundles_present`, `analysis_runtime_present`) after
+touching them.
+
+**Entrypoints:** `uvicorn capture.server:app` (systemd unit, package.json, test
+harness), `python -m capture.server` and `python -m capture.backfill` for the
+CLIs.
+
+### Backward-compatibility layers
+
+Three existed; one is gone. Before removing either survivor, note why it is
+still there:
+
+- ~~`analyze_store.py`~~ — removed. It only existed so the package move would
+  not touch tests.
+- **`compat.py`** — still load-bearing. `pool_facets`, `build_cohort`,
+  `sample_cohort_rows` and two helpers still take a connection and emit SQLite
+  `?` placeholders against the old flat `sessions` table; `compat` supplies the
+  placeholder translation and `migrations/0002_compat.sql` the schema. Both go
+  away when those five are ported — which is the same sampling work as known
+  bug 3, so do them together.
+- **The legacy JSON cohort migration** (`migrate_legacy_cohort`,
+  `_read_cohort_file`, `migrate_json_cohorts`) — still needed. It is a one-shot
+  latch that consumes `cohorts/*.json` on first touch, and it has to run on each
+  deployed box, not just locally. Local `data/` is already migrated, which is
+  *not* evidence it has run in production — especially given that `deploy.sh`
+  was never shipping the store module at all (bug 11). Confirm on the box before
+  deleting.
 
 ## Known bugs still open
 
