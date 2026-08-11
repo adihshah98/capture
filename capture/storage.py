@@ -15,18 +15,20 @@ the backlog.
 """
 
 import os
-import re
 import threading
 from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 
-SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
+from . import paths
+from .paths import chunk_timestamp  # re-exported: callers use storage.*
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_ROOT = Path(os.environ.get("CAPTURE_DATA_DIR") or BASE_DIR / "data")
-DATA_DIR = DATA_ROOT / "sessions"
-PROJECTS_DIR = DATA_ROOT / "projects"
+SAFE_CHUNK = paths.SAFE_CHUNK
+
+BASE_DIR = paths.BASE_DIR
+DATA_ROOT = paths.DATA_ROOT
+DATA_DIR = paths.DATA_DIR
+PROJECTS_DIR = paths.PROJECTS_DIR
 
 BUCKET = os.environ.get("CAPTURE_S3_BUCKET", "")
 S3_PREFIX = os.environ.get("CAPTURE_S3_PREFIX", "sessions").strip("/")
@@ -181,15 +183,3 @@ def delete_session(storage_prefix: str, session_id: str) -> int:
         for batch in (keys[i : i + 1000] for i in range(0, len(keys), 1000)):
             client().delete_objects(Bucket=BUCKET, Delete={"Objects": batch})
     return freed
-
-
-def chunk_timestamp(name: str) -> int:
-    try:
-        return int(name.split("-")[0])
-    except ValueError:
-        return 0
-
-
-def chunk_window(name: str) -> str | None:
-    parts = name.rsplit(".", 1)[0].split("-")
-    return parts[1] if len(parts) == 3 else None

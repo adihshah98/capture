@@ -13,12 +13,12 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import db
+from . import db, paths
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_ROOT = Path(os.environ.get("CAPTURE_DATA_DIR") or BASE_DIR / "data")
-DATA_DIR = DATA_ROOT / "sessions"
-PROJECTS_DIR = DATA_ROOT / "projects"
+BASE_DIR = paths.BASE_DIR
+DATA_ROOT = paths.DATA_ROOT
+DATA_DIR = paths.DATA_DIR
+PROJECTS_DIR = paths.PROJECTS_DIR
 
 CACHE_TTL_S = float(os.environ.get("CAPTURE_PROJECT_CACHE_TTL_S", "5"))
 

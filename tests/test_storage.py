@@ -194,16 +194,8 @@ class TestDualReadDuringMigration(StorageCase):
         self.assertEqual(storage.list_chunks("cap_a", "s1"), [])
 
 
-class TestChunkNameParsing(unittest.TestCase):
-    def test_timestamp_and_window(self):
-        self.assertEqual(
-            storage.chunk_timestamp("1785700000000-aaaa1111-abc123.json"), 1785700000000
-        )
-        self.assertEqual(storage.chunk_window("1785700000000-aaaa1111-abc123.json"), "aaaa1111")
-
-    def test_a_windowless_name_still_parses(self):
-        self.assertEqual(storage.chunk_timestamp("1785700000000-abc123.json"), 1785700000000)
-        self.assertIsNone(storage.chunk_window("1785700000000-abc123.json"))
+# Chunk-name parsing moved to capture/paths.py with the rest of the naming
+# rules; tests/test_paths.py covers both helpers, and every case that was here.
 
 
 if __name__ == "__main__":

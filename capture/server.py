@@ -36,8 +36,9 @@ try:
 except ImportError:
     pass
 
-from . import analyze, compat, db, projects, sessionstore, storage
+from . import analyze, compat, db, paths, projects, sessionstore, storage
 from .fsutil import atomic_write_bytes, atomic_write_text
+from .paths import SAFE_CHUNK, SAFE_ID, chunk_timestamp, chunk_window
 from .projects import ProjectsUnavailable
 
 
@@ -170,15 +171,13 @@ async def revalidate_static(request: Request, call_next):
     return response
 
 
-# The repo root, not the package directory: data/, public/ and .env are all
-# repo-relative and stayed there when the Python moved into capture/.
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_ROOT = Path(os.environ.get("CAPTURE_DATA_DIR") or BASE_DIR / "data")
-DATA_DIR = DATA_ROOT / "sessions"
+BASE_DIR = paths.BASE_DIR
+DATA_ROOT = paths.DATA_ROOT
+DATA_DIR = paths.DATA_DIR
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-PROJECTS_PATH = DATA_ROOT / "projects.json"
-PROJECTS_DIR = DATA_ROOT / "projects"
+PROJECTS_PATH = paths.PROJECTS_PATH
+PROJECTS_DIR = paths.PROJECTS_DIR
 
 REPLAY_PASSWORD = os.environ.get("REPLAY_PASSWORD", "")
 REPLAY_AUTH_DISABLED = os.environ.get("REPLAY_AUTH_DISABLED") == "1"
@@ -249,16 +248,6 @@ def require_allowed_domain(request: Request, project: projects.Project | None) -
         raise ApiError(403, "domain not allowed for this project")
 
 
-SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-
-SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
-
-
-def chunk_window(path) -> str | None:
-    parts = path.name.rsplit(".", 1)[0].split("-")
-    return parts[1] if len(parts) == 3 else None
-
-
 MAX_BODY_BYTES = 50 * 1024 * 1024
 
 MAX_DECOMPRESSED_BYTES = int(os.environ.get("MAX_DECOMPRESSED_BYTES", 32 * 1024 * 1024))
@@ -301,7 +290,7 @@ def project_bytes_used(project) -> int:
     return _bytes_used[project.id]
 
 
-CONFIG_PATH = DATA_ROOT / "config.json"
+CONFIG_PATH = paths.CONFIG_PATH
 
 
 class ApiError(Exception):
@@ -592,13 +581,6 @@ def remote_config(token: str | None = Query(None)):
     return response
 
 
-def chunk_timestamp(path: Path) -> int:
-    try:
-        return int(path.name.split("-")[0])
-    except ValueError:
-        return 0
-
-
 ACTIVE_SOURCES = {1, 2, 3, 4, 5, 6, 7, 12}
 SNAPSHOT_META_WINDOW_MS = 500
 WINDOW_STATE_FILE = "window-state.json"
@@ -660,7 +642,7 @@ def window_duration(states: dict) -> int | None:
 def chunk_files(session_dir: Path) -> list:
     return sorted(
         (c for c in session_dir.glob("*.json") if SAFE_CHUNK.match(c.name)),
-        key=chunk_timestamp,
+        key=lambda c: chunk_timestamp(c.name),
     )
 
 
@@ -735,8 +717,8 @@ def session_info(entry: Path) -> dict | None:
     states, first, last, active = session_states(entry)
     info = {
         "session_id": entry.name,
-        "first_seen": first if first is not None else chunk_timestamp(chunks[0]),
-        "last_seen": last if last is not None else chunk_timestamp(chunks[-1]),
+        "first_seen": first if first is not None else chunk_timestamp(chunks[0].name),
+        "last_seen": last if last is not None else chunk_timestamp(chunks[-1].name),
         "last_active": active,
         "duration": window_duration(states),
         "windows": len(states) or 1,
@@ -982,9 +964,9 @@ def session_chunks(request: Request, session_id: str, project: str | None = Quer
     manifest = [
         {
             "name": c.name,
-            "timestamp": storage.chunk_timestamp(c.name),
+            "timestamp": chunk_timestamp(c.name),
             "bytes": c.size,
-            "window": storage.chunk_window(c.name),
+            "window": chunk_window(c.name),
         }
         for c in chunks
     ]
