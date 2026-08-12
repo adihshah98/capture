@@ -102,7 +102,9 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = analyze.sample_cohort_rows(conn, "", CohortSpec(purchased_n=1, all_n=1, url_contains=""))
+        sampled = analyze.sample_cohort_rows(
+            conn, "", CohortSpec(purchased_n=1, all_n=1, url_contains="")
+        )
         self.assertEqual(
             [(s["session_id"], s["filter"]) for s in sampled],
             [("newbuy" + "x" * 26, "purchased"), ("newall" + "x" * 26, "all")],
@@ -202,7 +204,9 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = analyze.sample_cohort_rows(conn, "", CohortSpec(purchased_n=1, all_n=0, url_contains=""))
+        sampled = analyze.sample_cohort_rows(
+            conn, "", CohortSpec(purchased_n=1, all_n=0, url_contains="")
+        )
         self.assertEqual([s["session_id"] for s in sampled], ["onbrand" + "x" * 25])
 
     def test_sample_any_mixes_outcomes_up_to_limit(self):

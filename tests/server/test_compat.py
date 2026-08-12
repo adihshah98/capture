@@ -88,7 +88,9 @@ class TestAnalyzeRunsUnmodified(CompatCase):
 
     def test_sample_cohort_rows_returns_this_project_only(self):
         with compat.cohort_connection(self.alpha) as conn:
-            rows = analyze.sample_cohort_rows(conn, str(self.alpha), CohortSpec(any_n=10, url_contains=""))
+            rows = analyze.sample_cohort_rows(
+                conn, str(self.alpha), CohortSpec(any_n=10, url_contains="")
+            )
         ids = sorted(r["session_id"] for r in rows)
         self.assertEqual(ids, ["a-bought", "a-browsed"])
 
@@ -97,7 +99,9 @@ class TestAnalyzeRunsUnmodified(CompatCase):
         json.loads; a dict would silently degrade to None, and every session
         would look like it never bought anything."""
         with compat.cohort_connection(self.alpha) as conn:
-            rows = analyze.sample_cohort_rows(conn, str(self.alpha), CohortSpec(any_n=10, url_contains=""))
+            rows = analyze.sample_cohort_rows(
+                conn, str(self.alpha), CohortSpec(any_n=10, url_contains="")
+            )
         classified = {r["session_id"]: r["filter"] for r in rows}
         self.assertEqual(classified["a-bought"], "purchased")
         self.assertNotEqual(classified["a-browsed"], "purchased")
@@ -115,7 +119,9 @@ class TestAnalyzeRunsUnmodified(CompatCase):
 
     def test_build_cohort_composes_a_group(self):
         with compat.cohort_connection(self.alpha) as conn:
-            cohort = analyze.build_cohort(conn, str(self.alpha), CohortSpec(any_n=2, url_contains=""))
+            cohort = analyze.build_cohort(
+                conn, str(self.alpha), CohortSpec(any_n=2, url_contains="")
+            )
         ids = sorted(s["session_id"] for s in cohort["sessions"])
         self.assertEqual(ids, ["a-bought", "a-browsed"])
 
@@ -144,7 +150,9 @@ class TestCompatViewKeepsTenantsApart(CompatCase):
 
     def test_analyze_cannot_sample_another_project(self):
         with compat.cohort_connection(self.alpha) as conn:
-            rows = analyze.sample_cohort_rows(conn, str(self.beta), CohortSpec(any_n=10, url_contains=""))
+            rows = analyze.sample_cohort_rows(
+                conn, str(self.beta), CohortSpec(any_n=10, url_contains="")
+            )
         self.assertEqual(rows, [])
 
 

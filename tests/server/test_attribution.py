@@ -11,11 +11,8 @@ than in production, where the symptom is a session whose write-up cites a
 campaign the cut picker cannot filter on.
 """
 
-import sys
 import unittest
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from capture import attribution
 
@@ -129,17 +126,24 @@ class TestBothCallersAgree(unittest.TestCase):
     def test_no_second_parser_survives(self):
         """The twins are gone, not merely agreeing. A reintroduced local parser
         is the failure this whole module exists to make impossible."""
-        root = Path(__file__).resolve().parent.parent / "capture"
+        root = Path(__file__).resolve().parent.parent.parent / "capture"
+        # The route split moved the parser's callers into capture/api/, so the
+        # whole package is swept rather than the two files that used to hold a
+        # copy -- a reintroduced parser in a new router would otherwise pass.
+        sources = [
+            p
+            for p in root.rglob("*.py")
+            if p.name != "attribution.py" and "__pycache__" not in p.parts
+        ]
+        self.assertTrue(sources, "found no sources to check -- the path is wrong")
         offenders = []
-        for source in (root / "server.py", root / "analyze" / "__init__.py"):
+        for source in sources:
             text = source.read_text()
             # parse_qs is the giveaway: reading params off a URL is this
-            # module's job, and neither caller has another reason to do it.
+            # module's job, and no caller has another reason to do it.
             if "parse_qs" in text:
                 offenders.append(source.name)
-        self.assertEqual(
-            offenders, [], f"these parse URL parameters locally again: {offenders}"
-        )
+        self.assertEqual(offenders, [], f"these parse URL parameters locally again: {offenders}")
 
 
 if __name__ == "__main__":

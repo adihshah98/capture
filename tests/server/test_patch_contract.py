@@ -28,7 +28,7 @@ import ast
 import unittest
 from pathlib import Path
 
-PACKAGE = Path(__file__).resolve().parent.parent / "capture" / "analyze"
+PACKAGE = Path(__file__).resolve().parent.parent.parent / "capture" / "analyze"
 
 # Names the suite rebinds on the package, or that a submodule could plausibly
 # rebind later. A `from .x import <one of these>` is the bug this file exists to
@@ -118,9 +118,7 @@ class TestPatchingReachesTheCallSite(unittest.TestCase):
 
         for module in (slices, stats):
             shared = PATCHABLE & set(vars(module))
-            self.assertEqual(
-                shared, set(), f"{module.__name__} holds patchable names: {shared}"
-            )
+            self.assertEqual(shared, set(), f"{module.__name__} holds patchable names: {shared}")
 
 
 if __name__ == "__main__":
