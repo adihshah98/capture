@@ -164,13 +164,12 @@ the rows A already consumed and discards them. B's effective window is smaller t
 A's by `|A|`, so in an A/B cohort the B arm comes up short first — a sampling bias
 that looks like a finding about the population.
 
-### `pool_facets` is unbounded
+### `pool_facets` scan is capped
 
-[:1394](../../capture/analyze/__init__.py#L1394) has no `LIMIT` and no `ORDER BY`,
-calls `.fetchall()`, and builds a dict per row with three `json.loads` each. It also
-hardcodes `url_contains=""`, so nothing narrows it. It is at least called from a sync
-`def` endpoint, so Starlette runs it in the threadpool — unlike `build_cohort`, which
-is `await`ed from an `async def` and blocks the event loop.
+`pool_facets` used to `fetchall()` every matching session with no `ORDER BY` /
+`LIMIT`, then run three `json.loads` per row. It now takes at most
+`CANDIDATE_CAP` newest rows under the duration gate — the same window sampling
+uses — and still classifies in Python so device/page semantics stay shared.
 
 ---
 

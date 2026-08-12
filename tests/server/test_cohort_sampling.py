@@ -173,6 +173,37 @@ class TestCohortSampling(unittest.TestCase):
             ["busy" + "x" * 28, "quiet" + "x" * 27],
         )
 
+    def test_pool_facets_caps_the_scan(self):
+        """An unbounded fetchall grew with every session in the project."""
+        from capture.analyze import spec as cohort_spec
+
+        analyze, conn = self._conn([])
+        rows = [
+            (
+                "",
+                f"row{i:02d}" + "x" * 25,
+                0,
+                100_000 - i,
+                1,
+                1,
+                None,
+                "https://x.test/pages/ashwamag-01",
+                None,
+                None,
+                json.dumps({"width": 390 if i % 2 == 0 else 1280}),
+                None,
+            )
+            for i in range(8)
+        ]
+        self._insert(conn, rows)
+        with mock.patch.object(cohort_spec, "CANDIDATE_CAP", 3):
+            facets = analyze.pool_facets(conn, "", min_duration_ms=0)
+        self.assertEqual(facets["n"], 3)
+        # Newest three: widths alternate starting mobile at i=0.
+        devices = {item["value"]: item["count"] for item in facets["device"]}
+        self.assertEqual(devices.get("mobile"), 2)
+        self.assertEqual(devices.get("desktop"), 1)
+
     def test_sample_honours_the_url_filter_and_min_duration(self):
         analyze, conn = self._conn(
             [

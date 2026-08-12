@@ -26,7 +26,7 @@ where it applies.
 | 4 | 🟠 | ~~Sampling shortfall is silent~~ — **fixed** | old bug 3 |
 | 5 | 🟠 | ~~`_cohort_order_sql` depends on a compat shim~~ — **fixed** | **new** |
 | 6 | 🟠 | ~~Group B is structurally short-sampled~~ — **fixed** | **new** |
-| 7 | 🟠 | `pool_facets` unbounded `fetchall` | old bug 4 |
+| 7 | 🟠 | ~~`pool_facets` unbounded `fetchall`~~ — **fixed** | old bug 4 |
 | 8 | 🟡 | `COHORT_URL_CONTAINS` hardcodes one customer | old bug 9 |
 | 9 | 🟡 | `_batch_jsonl_path` collides | old bug 2 |
 | 10 | 🟡 | Extractor argument order is undefended | **new** |
@@ -190,14 +190,18 @@ bias that read as a finding about the population.
 `LIMIT`/`OFFSET` window never spends slots on A's members. B's scan budget matches
 A's.
 
-## 7. 🟠 `pool_facets` is an unbounded `fetchall`
+## 7. 🟠 ~~`pool_facets` is an unbounded `fetchall`~~ — **fixed**
 
-[:1394](../capture/analyze/__init__.py#L1394): no `LIMIT`, no `ORDER BY`,
-`.fetchall()`, then a dict per row with three `json.loads` each. It hardcodes
-`url_contains=""`, so nothing narrows it. Memory grows linearly with project size.
+`pool_facets` had no `LIMIT`, no `ORDER BY`, called `.fetchall()`, then built a
+dict per row with three `json.loads` each. It hardcoded `url_contains=""`, so
+nothing narrowed it. Memory grew linearly with project size.
 
-Not a loop-blocker (its endpoint is sync `def`), but it should be bounded or
-aggregated in SQL — `facets_from_rows` is a `GROUP BY` written in Python.
+Not a loop-blocker (its endpoint is sync `def`), but it needed a bound —
+`facets_from_rows` is a `GROUP BY` written in Python, and pushing
+`device_class` / `page_path` into SQL would fork sampler semantics.
+
+**Fix (landed):** scan at most `CANDIDATE_CAP` newest sessions (same window and
+order as sampling), then classify in Python as before.
 
 ## 8. 🟡 `COHORT_URL_CONTAINS` hardcodes one customer
 

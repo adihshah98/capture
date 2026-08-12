@@ -167,15 +167,24 @@ def pool_facets(
     *,
     min_duration_ms: int = 0,
 ) -> dict:
-    """Facet values present in the pool index (for the New cohort dialog)."""
+    """Facet values present in the pool index (for the New cohort dialog).
+
+    Scans at most `CANDIDATE_CAP` newest rows under the duration gate — the same
+    window sampling uses — then classifies in Python. An unbounded fetchall of
+    every session (three json.loads each) grew with project size; pushing the
+    classifiers into SQL would fork device/page semantics from the sampler.
+    """
     where_sql, params = _cohort_where(pool, min_duration_ms=min_duration_ms, url_contains="")
+    order_sql = _cohort_order_sql(cohort_spec.ORDER_LATEST)
     rows = conn.execute(
         f"""
         SELECT url, "order", device, attribution
         FROM sessions
         WHERE {where_sql}
+        ORDER BY {order_sql}
+        LIMIT ?
         """,
-        params,
+        (*params, cohort_spec.CANDIDATE_CAP),
     ).fetchall()
     facts = [index_row_facts(url, order, device, attr) for url, order, device, attr in rows]
     return facets_from_rows(facts)
