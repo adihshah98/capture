@@ -4,9 +4,10 @@ Every expensive edge of the analysis pipeline -- the headless Chromium, the paid
 Gemini API -- is swapped in tests so CI never bills and never boots browsers,
 then the *real* pipeline is driven.
 
-Gemini sync/batch I/O lives in `capture.analyze.gemini`. Tests patch that module
+Gemini sync/batch I/O lives in `capture.analyze.gemini`. The extractor and
+single-session path live in `capture.analyze.session`. Tests patch those modules
 with `unittest.mock.patch` (or `patch.object`). Remaining edges still rebound on
-the package by assignment (`analyze.run_extractor = fake`) must resolve at call
+the package by assignment (`analyze.call_gemini_cut = fake`) must resolve at call
 time through a namespace the assignment reaches.
 
 `from .x import call_gemini_cut` (etc.) breaks package-assignment patches: the
@@ -37,12 +38,11 @@ PACKAGE = Path(__file__).resolve().parent.parent.parent / "capture" / "analyze"
 # plausibly rebind later via assignment). A `from .x import <one of these>` is
 # the bug this file exists to catch for that style.
 #
-# Gemini I/O (`call_gemini`, batch submit/wait/parse/cancel) moved to gemini.py;
-# tests patch `capture.analyze.gemini` rather than the package namespace.
+# Gemini I/O and session extraction moved to owner modules; tests patch
+# `capture.analyze.gemini` / `capture.analyze.session` rather than the package.
 # ANALYSIS_ENABLED / ANALYZE_BATCH live on runtime.py for the same reason.
 PATCHABLE = frozenset(
     {
-        "run_extractor",
         "call_gemini_cut",
         "stream_gemini_chat",
         "_cohort_sync_model",
@@ -150,20 +150,6 @@ class TestPatchableNamesAreNotBoundAtImport(unittest.TestCase):
 class TestPatchingReachesTheCallSite(unittest.TestCase):
     """The contract, demonstrated end to end rather than only asserted."""
 
-    def test_rebinding_redirects_the_pipeline(self):
-        from capture import analyze
-
-        original = analyze.run_extractor
-        try:
-            analyze.run_extractor = lambda *a, **k: "fake"
-            # Resolve the way the pipeline does: through the module's globals at
-            # call time. A `from` binding elsewhere would not see this.
-            self.assertEqual(analyze.run_extractor(), "fake")
-            self.assertIs(vars(analyze)["run_extractor"], analyze.run_extractor)
-        finally:
-            analyze.run_extractor = original
-        self.assertIs(analyze.run_extractor, original)
-
     def test_gemini_patches_reach_orchestration_via_the_owner_module(self):
         """Definition-site patch: orchestrators call gemini.call_gemini through
         the module object, so mock.patch on that path redirects the pipeline."""
@@ -176,6 +162,18 @@ class TestPatchingReachesTheCallSite(unittest.TestCase):
             self.assertIs(analyze.gemini.call_gemini, fake)
             # Package re-export tracks the owner module.
             self.assertIs(analyze.call_gemini, fake)
+
+    def test_session_extractor_patches_reach_digest_via_the_owner_module(self):
+        """Definition-site patch: extract_session_digest looks up run_extractor
+        in session.py, so mock.patch there redirects reconstruction."""
+        from capture import analyze
+
+        async def fake(*a, **k):
+            return {"frames": [], "warnings": []}
+
+        with patch.object(analyze.session, "run_extractor", fake):
+            self.assertIs(analyze.session.run_extractor, fake)
+            self.assertIs(analyze.run_extractor, fake)
 
     def test_submodules_do_not_shadow_the_package_namespace(self):
         """No submodule may hold a patchable name in its own globals.

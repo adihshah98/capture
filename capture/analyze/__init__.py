@@ -21,18 +21,15 @@ import asyncio
 import hashlib
 import json
 import re
-import shutil
 import time
 from dataclasses import replace
 from pathlib import Path
-
-from ..paths import SAFE_CHUNK
 
 # Submodules kept reachable as `analyze.<name>` for callers that navigate to
 # them that way. `as` rather than a bare import because these are re-exports,
 # not uses: this file calls through the names below, not through the modules.
 from . import cohort_state as cohort_state
-from . import gemini, prompts, runtime, spec
+from . import gemini, prompts, runtime, session, spec
 from . import slices as slices
 from . import stats as stats
 from . import storage as storage
@@ -362,12 +359,28 @@ _GEMINI_EXPORTS = frozenset(
     }
 )
 
+# Extractor + single-session analyze path live in session.py. Same forwarding
+# rule as gemini: package re-exports for callers; orchestration patches the
+# owner module (`session.run_extractor`).
+_SESSION_EXPORTS = frozenset(
+    {
+        "analyze_session",
+        "extract_session_digest",
+        "load_session_digest",
+        "run_extractor",
+        "session_chunk_names",
+        "write_analysis_result",
+    }
+)
+
 
 def __getattr__(name: str):
     if name in _RUNTIME_EXPORTS:
         return getattr(runtime, name)
     if name in _GEMINI_EXPORTS:
         return getattr(gemini, name)
+    if name in _SESSION_EXPORTS:
+        return getattr(session, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -807,71 +820,6 @@ def delete_cohort(pool: Path, cohort_id: str) -> bool:
     return analyze_store.delete_cohort(conn, key, cohort_id)
 
 
-async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> dict:
-    if not shutil.which("node"):
-        raise RuntimeError("node is not installed on this server — analysis is unavailable")
-    if not runtime.REPLAYER_BUNDLE.is_file():
-        raise RuntimeError("replayer bundle missing — run `npm run build`")
-
-    proc = await asyncio.create_subprocess_exec(
-        "node",
-        str(runtime.EXTRACTOR),
-        str(session_dir),
-        str(out_dir),
-        str(runtime.REPLAYER_BUNDLE),
-        # Positional, and ahead of the variadic chunk names.
-        str(runtime.ANALYZE_FPS),
-        str(runtime.ANALYZE_MAX_FRAMES),
-        *chunk_names,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(runtime.BASE_DIR),
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), runtime.ANALYZE_TIMEOUT_S)
-    except TimeoutError as exc:
-        proc.kill()
-        raise RuntimeError("page reconstruction timed out") from exc
-
-    if proc.returncode != 0:
-        detail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()
-        raise RuntimeError(
-            f"page reconstruction failed: {detail[-1] if detail else 'unknown error'}"
-        )
-
-    try:
-        return json.loads(stdout.decode("utf-8"))
-    except Exception as exc:
-        raise RuntimeError("page reconstruction returned no digest") from exc
-
-
-def session_chunk_names(session_dir: Path) -> list:
-    if not session_dir.is_dir():
-        return []
-    return sorted(c.name for c in session_dir.iterdir() if c.is_file() and SAFE_CHUNK.match(c.name))
-
-
-def write_analysis_result(
-    session_dir: Path,
-    text: str,
-    *,
-    frame_count: int = 0,
-    warnings: list | None = None,
-    model: str | None = None,
-) -> dict:
-    result = {
-        "status": "done",
-        "text": text,
-        "model": model or runtime.GEMINI_MODEL,
-        "created_at": int(time.time() * 1000),
-        "frame_count": frame_count,
-        "warnings": warnings or [],
-    }
-    write_analysis(session_dir, result)
-    clear_job(session_dir)
-    return result
-
-
 def mark_cohort_paused(pool: Path, cohort: dict) -> dict:
     """Persist paused status and return in-flight session rows to queued."""
     for entry in cohort.get("sessions") or []:
@@ -894,27 +842,6 @@ def mark_cohort_paused(pool: Path, cohort: dict) -> dict:
     return enrich_cohort_status(pool, cohort)
 
 
-async def extract_session_digest(
-    session_dir: Path, chunk_names: list, *, force: bool = False
-) -> dict:
-    """Rebuild frames for a session. Returns the extractor digest."""
-    if not force:
-        cached = read_analysis(session_dir)
-        if cached:
-            return {"cached": True, "analysis": cached}
-
-    _, out_dir = analysis_paths(session_dir)
-    shutil.rmtree(out_dir, ignore_errors=True)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    extract_gate, _ = runtime._gates()
-    async with extract_gate:
-        digest = await run_extractor(session_dir, out_dir, chunk_names)
-    if digest.get("error"):
-        raise RuntimeError(digest["error"])
-    return digest
-
-
 def _parse_json_object(text: str) -> dict:
     """Parse a JSON object, tolerating optional markdown fences."""
     raw = (text or "").strip()
@@ -927,40 +854,6 @@ def _parse_json_object(text: str) -> dict:
     if not isinstance(data, dict):
         raise ValueError("model response was not an object")
     return data
-
-
-async def analyze_session(session_dir: Path, chunk_names: list, force: bool = False) -> dict:
-    if not runtime.ANALYSIS_ENABLED:
-        raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
-
-    if not force:
-        cached = read_analysis(session_dir)
-        if cached:
-            return cached
-
-    digest = await extract_session_digest(session_dir, chunk_names, force=True)
-    meta = gemini.session_metadata(session_dir)
-    _, model_gate = runtime._gates()
-    async with model_gate:
-        text = await gemini.call_gemini(digest, digest.get("frames") or [], meta)
-    return write_analysis_result(
-        session_dir,
-        text,
-        frame_count=len(digest.get("frames") or []),
-        warnings=digest.get("warnings") or [],
-    )
-
-
-def load_session_digest(session_dir: Path) -> dict | None:
-    """Read extractor digest.json if a prior reconstruction left one on disk."""
-    path = session_dir / ANALYSIS_DIR / "digest.json"
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
 
 
 async def resume_cohort_batch(pool: Path, cohort: dict) -> dict:
@@ -982,7 +875,7 @@ async def resume_cohort_batch(pool: Path, cohort: dict) -> dict:
             entry["analysis"] = ANALYSIS_FILE
             entry.pop("error", None)
             continue
-        digest = load_session_digest(session_dir) or {"frames": [], "warnings": []}
+        digest = session.load_session_digest(session_dir) or {"frames": [], "warnings": []}
         entry["status"] = "running"
         write_job(session_dir, "running")
         prepared.append((entry, digest))
@@ -1045,16 +938,16 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
                 # Without this, a retry after a Batch OOM would wipe digests and
                 # spend another hour in Playwright before talking to Gemini.
                 if not force:
-                    digest = load_session_digest(session_dir)
+                    digest = session.load_session_digest(session_dir)
                     if digest and gemini._usable_frames(digest.get("frames") or []):
                         prepared.append((entry, digest))
                         return
-                chunks = session_chunk_names(session_dir)
+                chunks = session.session_chunk_names(session_dir)
                 if not chunks:
                     raise RuntimeError("no chunks to analyze")
                 if force:
                     clear_analysis(session_dir)
-                digest = await extract_session_digest(session_dir, chunks, force=True)
+                digest = await session.extract_session_digest(session_dir, chunks, force=True)
                 prepared.append((entry, digest))
             except asyncio.CancelledError:
                 raise
@@ -1195,7 +1088,7 @@ async def apply_cohort_batch(
             write_job(session_dir, "error", error=hit["error"])
             mark_cohort_session(pool, cohort, entry, "error", error=hit["error"])
         else:
-            write_analysis_result(
+            session.write_analysis_result(
                 session_dir,
                 hit["text"],
                 frame_count=len(digest.get("frames") or []),
@@ -1217,7 +1110,7 @@ async def _cohort_sync_model(pool: Path, cohort: dict, prepared: list) -> None:
                 text = await gemini.call_gemini(
                     digest, digest.get("frames") or [], gemini.session_metadata(session_dir)
                 )
-            write_analysis_result(
+            session.write_analysis_result(
                 session_dir,
                 text,
                 frame_count=len(digest.get("frames") or []),
@@ -1272,16 +1165,18 @@ def cohorts_needing_batch_resume(data_root: Path) -> list:
 # --- The patching contract -------------------------------------------------
 #
 # Tests still swap some expensive edges by assignment on this package
-# (`analyze.run_extractor = fake`, `analyze.CUT_PROMPT = "..."`) and drive the
-# real pipeline. That only works while the call site resolves the name at call
-# time through a namespace the assignment reaches — so those remaining symbols
-# must not be from-imported into a caller.
+# (`analyze.call_gemini_cut = fake`, `analyze.CUT_PROMPT = "..."`) and drive
+# the real pipeline. That only works while the call site resolves the name at
+# call time through a namespace the assignment reaches — so those remaining
+# symbols must not be from-imported into a caller.
 #
-# Gemini sync/batch I/O has moved to `gemini.py`. Orchestration here calls
-# through the module object (`gemini.call_gemini(...)`, etc.), and tests patch
-# at the definition site with `unittest.mock.patch("capture.analyze.gemini…")`.
-# Package re-exports of those names are for `analysis_port` and other readers,
-# not for assignment patching.
+# Gemini sync/batch I/O lives in `gemini.py`; extractor + session analyze in
+# `session.py`. Orchestration here calls through those module objects
+# (`gemini.call_gemini(...)`, `session.run_extractor` via extract helpers,
+# etc.), and tests patch at the definition site with
+# `unittest.mock.patch("capture.analyze.gemini…")` /
+# `patch("capture.analyze.session…")`. Package re-exports of those names are
+# for `analysis_port` and other readers, not for assignment patching.
 #
 # Config and `_gates` live in `runtime.py`. Rebound test hooks
 # (`ANALYSIS_ENABLED`, `ANALYZE_BATCH`, `_gate_loop`, the concurrency caps)

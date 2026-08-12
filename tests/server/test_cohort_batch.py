@@ -25,7 +25,6 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
         self._saved = {
             "ANALYSIS_ENABLED": analyze.runtime.ANALYSIS_ENABLED,
             "ANALYZE_BATCH": analyze.runtime.ANALYZE_BATCH,
-            "run_extractor": analyze.run_extractor,
         }
         analyze.runtime.ANALYSIS_ENABLED = True
         analyze.runtime.ANALYZE_BATCH = True
@@ -46,8 +45,7 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
 
     def restore(self):
         for key, value in self._saved.items():
-            target = analyze.runtime if key in {"ANALYSIS_ENABLED", "ANALYZE_BATCH"} else analyze
-            setattr(target, key, value)
+            setattr(analyze.runtime, key, value)
         analyze.runtime._gate_loop = None
         self.tmp.cleanup()
 
@@ -109,8 +107,6 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
         async def boom(*_a, **_k):
             raise AssertionError("sync Gemini must not run when batch succeeds")
 
-        analyze.run_extractor = fake_extract
-
         cohort = {
             "id": "cohort-new",
             "label": "new",
@@ -122,6 +118,7 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
         }
         analyze.write_cohort(self.pool, cohort)
         with (
+            patch.object(analyze.session, "run_extractor", fake_extract),
             patch.object(analyze.gemini, "submit_prepared_gemini_batch", fake_submit),
             patch.object(analyze.gemini, "wait_gemini_batch", fake_wait),
             patch.object(analyze.gemini, "parse_batch_results", fake_parse),
@@ -175,7 +172,6 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         self._saved = {
             "ANALYSIS_ENABLED": analyze.runtime.ANALYSIS_ENABLED,
             "ANALYZE_BATCH": analyze.runtime.ANALYZE_BATCH,
-            "run_extractor": analyze.run_extractor,
             "_cohort_sync_model": analyze._cohort_sync_model,
         }
         analyze.runtime.ANALYSIS_ENABLED = True
@@ -196,7 +192,7 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             for entry, _ in prepared:
                 entry["status"] = "done"
 
-        analyze.run_extractor = fake_extract
+        self._fake_extract = fake_extract
         analyze._cohort_sync_model = count_sync
         self.addCleanup(self.restore)
 
@@ -230,6 +226,9 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
 
         return patch.object(analyze.gemini, "submit_prepared_gemini_batch", fake_submit)
 
+    def extractor_patch(self):
+        return patch.object(analyze.session, "run_extractor", self._fake_extract)
+
     def test_a_batch_left_in_flight_is_resumed_not_rerun(self):
         # The expensive mistake: the job was created and is still running, so
         # re-sending the sessions interactively pays for the same work twice.
@@ -237,6 +236,7 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             raise analyze.BatchStillRunning("deadline")
 
         with (
+            self.extractor_patch(),
             self.submits_as(),
             patch.object(analyze.gemini, "wait_gemini_batch", never_finishes),
         ):
@@ -258,6 +258,7 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             raise RuntimeError("SDK blew up parsing the response")
 
         with (
+            self.extractor_patch(),
             self.submits_as(),
             patch.object(analyze.gemini, "wait_gemini_batch", explodes),
         ):
@@ -273,7 +274,10 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         async def bad_submit(prepared, *, display_name, work_dir=None, pool=None):
             raise RuntimeError("batch API unavailable")
 
-        with patch.object(analyze.gemini, "submit_prepared_gemini_batch", bad_submit):
+        with (
+            self.extractor_patch(),
+            patch.object(analyze.gemini, "submit_prepared_gemini_batch", bad_submit),
+        ):
             asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort())))
 
         saved = analyze.read_cohort(self.pool, "cohort-1")
@@ -287,6 +291,7 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             )
 
         with (
+            self.extractor_patch(),
             self.submits_as(),
             patch.object(analyze.gemini, "wait_gemini_batch", failed),
         ):
