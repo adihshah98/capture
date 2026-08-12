@@ -56,21 +56,48 @@ COHORT_STATES = (
 # a cohort marked running, a retried session turns an errored cohort back into
 # a finished one. The rows are the truth; the stored status is a cache.
 COHORT_TRANSITIONS = {
-    CohortState.IDLE: {CohortState.QUEUED, CohortState.RUNNING, CohortState.PAUSED,
-                       CohortState.DONE, CohortState.ERROR, CohortState.IDLE},
-    CohortState.QUEUED: {CohortState.RUNNING, CohortState.PAUSED, CohortState.DONE,
-                         CohortState.ERROR, CohortState.QUEUED},
-    CohortState.RUNNING: {CohortState.DONE, CohortState.ERROR, CohortState.PAUSED,
-                          CohortState.RUNNING},
-    CohortState.PAUSED: {CohortState.RUNNING, CohortState.QUEUED, CohortState.DONE,
-                         CohortState.PAUSED},
+    CohortState.IDLE: {
+        CohortState.QUEUED,
+        CohortState.RUNNING,
+        CohortState.PAUSED,
+        CohortState.DONE,
+        CohortState.ERROR,
+        CohortState.IDLE,
+    },
+    CohortState.QUEUED: {
+        CohortState.RUNNING,
+        CohortState.PAUSED,
+        CohortState.DONE,
+        CohortState.ERROR,
+        CohortState.QUEUED,
+    },
+    CohortState.RUNNING: {
+        CohortState.DONE,
+        CohortState.ERROR,
+        CohortState.PAUSED,
+        CohortState.RUNNING,
+    },
+    CohortState.PAUSED: {
+        CohortState.RUNNING,
+        CohortState.QUEUED,
+        CohortState.DONE,
+        CohortState.PAUSED,
+    },
     # Terminal, but recomputed: see above. QUEUED is reachable from both
     # because a write-up can go missing after the fact (rule 5), which returns
     # the cohort to needing work.
-    CohortState.DONE: {CohortState.DONE, CohortState.ERROR, CohortState.RUNNING,
-                       CohortState.QUEUED},
-    CohortState.ERROR: {CohortState.ERROR, CohortState.DONE, CohortState.RUNNING,
-                        CohortState.QUEUED},
+    CohortState.DONE: {
+        CohortState.DONE,
+        CohortState.ERROR,
+        CohortState.RUNNING,
+        CohortState.QUEUED,
+    },
+    CohortState.ERROR: {
+        CohortState.ERROR,
+        CohortState.DONE,
+        CohortState.RUNNING,
+        CohortState.QUEUED,
+    },
 }
 
 
@@ -127,7 +154,10 @@ def project_cohort_status(stored: str, tally: dict, *, total: int) -> str:
     """
     current = stored if stored in COHORT_STATES else CohortState.IDLE
     done, running, queued, errors = (
-        tally["done"], tally["running"], tally["queued"], tally["error"],
+        tally["done"],
+        tally["running"],
+        tally["queued"],
+        tally["error"],
     )
     stale = tally.get("stale", 0)
 
@@ -155,7 +185,9 @@ def project_cohort_status(stored: str, tally: dict, *, total: int) -> str:
     # cohort needs a re-analyze rather than a wait. `queued` says exactly
     # that: work outstanding, nothing running.
     if stale and current in (CohortState.DONE, CohortState.ERROR):
-        return cohort_transition(current, CohortState.QUEUED, why="write-ups missing, needs re-analysis")
+        return cohort_transition(
+            current, CohortState.QUEUED, why="write-ups missing, needs re-analysis"
+        )
 
     return current
 
@@ -271,11 +303,7 @@ def persistable_cohort(enriched: dict, stored: dict | None = None) -> dict:
     sessions = out.get("sessions")
     if isinstance(sessions, list):
         out["sessions"] = [
-            {
-                k: v
-                for k, v in row.items()
-                if k not in COHORT_VIEW_ONLY_SESSION_FIELDS
-            }
+            {k: v for k, v in row.items() if k not in COHORT_VIEW_ONLY_SESSION_FIELDS}
             if isinstance(row, dict)
             else row
             for row in sessions

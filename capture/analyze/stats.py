@@ -23,7 +23,6 @@ Splits that fail a gate are still named, under "Examined and not reported" --
 without it the model reads silence as uniformity and asserts the opposite.
 """
 
-
 from .slices import OUTCOME_LABELS
 
 # --- Measured splits -------------------------------------------------------
@@ -146,9 +145,7 @@ def cross_tab_cells(rows: list, left: str, right: str) -> dict:
         lift = None if rate is None or baseline is None else rate - baseline
         too_small = n < CROSS_TAB_MIN_CELL or coverage < CROSS_TAB_MIN_COVERAGE
         # Only grade on lift where outcome actually varies; see the docstring.
-        too_flat = graded == "lift" and (
-            lift is None or abs(lift) < CROSS_TAB_MIN_LIFT_PTS
-        )
+        too_flat = graded == "lift" and (lift is None or abs(lift) < CROSS_TAB_MIN_LIFT_PTS)
         if too_small or too_flat:
             suppressed += 1
             continue
@@ -205,8 +202,7 @@ def cross_tab_block(rows: list, spec: dict | None = None) -> str:
             coverage_note = ""
         if not result["kept"]:
             notes.append(
-                f"- {title}{coverage_note}: examined, nothing clears the "
-                f"reporting floor."
+                f"- {title}{coverage_note}: examined, nothing clears the " f"reporting floor."
             )
             continue
         baseline = result["baseline"]
@@ -227,8 +223,7 @@ def cross_tab_block(rows: list, spec: dict | None = None) -> str:
                 f"{k} {v}" for k, v in sorted(cell["breakdown"].items(), key=lambda kv: -kv[1])
             )
             head = (
-                f"  {cell['value']}: {cell['n']} sessions "
-                f"({_pct(cell['share'])} of the group)"
+                f"  {cell['value']}: {cell['n']} sessions " f"({_pct(cell['share'])} of the group)"
             )
             if result["graded"] == "lift":
                 sign = "+" if cell["lift"] >= 0 else "−"
@@ -238,9 +233,7 @@ def cross_tab_block(rows: list, spec: dict | None = None) -> str:
                 )
             lines.append(f"{head} · {parts}")
         if result["suppressed"]:
-            lines.append(
-                f"  (below the floor, not shown: {result['suppressed']} more)"
-            )
+            lines.append(f"  (below the floor, not shown: {result['suppressed']} more)")
 
     if not lines and not notes:
         return ""

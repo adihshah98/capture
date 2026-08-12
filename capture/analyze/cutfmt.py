@@ -140,9 +140,7 @@ def normalize_cut_analysis(raw, n: int | None = None) -> dict:
             # Caveats stay plain strings; the insight sections are objects.
             entry = _clean_text(item, 900) if key == "caveats" else _insight_item(item)
             if entry:
-                if isinstance(entry, dict) and not _share_denominator_ok(
-                    entry["share"], n
-                ):
+                if isinstance(entry, dict) and not _share_denominator_ok(entry["share"], n):
                     entry["share"] = ""
                 clean.append(entry)
             if len(clean) >= CUT_ITEMS_PER_SECTION:

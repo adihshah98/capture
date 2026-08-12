@@ -205,7 +205,9 @@ def _sample_candidates(
         start_ms=start_ms,
         end_ms=end_ms,
     )
-    order_sql = _cohort_order_sql(order if order in cohort_spec.ORDERS else cohort_spec.ORDER_LATEST)
+    order_sql = _cohort_order_sql(
+        order if order in cohort_spec.ORDERS else cohort_spec.ORDER_LATEST
+    )
     rows = conn.execute(
         f"""
         SELECT session_id, url, "order", device, attribution
@@ -353,4 +355,3 @@ def sample_cohort_rows(conn: Connection, pool: str, spec: CohortSpec) -> list:
         if len(purchased) >= spec.purchased_n and len(non_purchase) >= spec.all_n:
             break
     return purchased + non_purchase
-

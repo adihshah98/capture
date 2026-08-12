@@ -223,9 +223,7 @@ def read_cohort(pool: Path, cohort_id: str) -> dict | None:
 
 def write_cohort(pool: Path, cohort: dict) -> dict:
     conn, key = cohort_store(pool)
-    return analyze_store.write_cohort(
-        conn, key, {**cohort, "id": safe_cohort_id(cohort["id"])}
-    )
+    return analyze_store.write_cohort(conn, key, {**cohort, "id": safe_cohort_id(cohort["id"])})
 
 
 def list_cohorts(pool: Path) -> list:

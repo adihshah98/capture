@@ -163,54 +163,143 @@ from .storage import (
 # `tests/server/test_patch_contract.py` is what actually holds the surface still.
 __all__ = [
     # Configuration and runtime.
-    "ANALYSIS_ENABLED", "ANALYZE_BATCH", "ANALYZE_BATCH_MAX_WAIT_S",
-    "ANALYZE_BATCH_POLL_MAX_ERRORS", "ANALYZE_BATCH_POLL_S",
-    "ANALYZE_EXTRACT_CONCURRENCY", "ANALYZE_FPS", "ANALYZE_MAX_FRAMES",
-    "ANALYZE_MODEL_CONCURRENCY", "ANALYZE_TIMEOUT_S", "BASE_DIR", "EXTRACTOR",
-    "GEMINI_API_KEY", "GEMINI_MODEL", "REPLAYER_BUNDLE", "runtime_present",
+    "ANALYSIS_ENABLED",
+    "ANALYZE_BATCH",
+    "ANALYZE_BATCH_MAX_WAIT_S",
+    "ANALYZE_BATCH_POLL_MAX_ERRORS",
+    "ANALYZE_BATCH_POLL_S",
+    "ANALYZE_EXTRACT_CONCURRENCY",
+    "ANALYZE_FPS",
+    "ANALYZE_MAX_FRAMES",
+    "ANALYZE_MODEL_CONCURRENCY",
+    "ANALYZE_TIMEOUT_S",
+    "BASE_DIR",
+    "EXTRACTOR",
+    "GEMINI_API_KEY",
+    "GEMINI_MODEL",
+    "REPLAYER_BUNDLE",
+    "runtime_present",
     # Sampling vocabulary, aliased from spec.py under the older names.
-    "COHORT_CANDIDATE_CAP", "COHORT_DEFAULT_ALL_N", "COHORT_DEFAULT_PURCHASED_N",
-    "COHORT_MAX_SESSIONS", "COHORT_MIN_DURATION_MS", "COHORT_ORDERS",
-    "COHORT_ORDER_EARLIEST", "COHORT_ORDER_LATEST", "COHORT_URL_CONTAINS",
+    "COHORT_CANDIDATE_CAP",
+    "COHORT_DEFAULT_ALL_N",
+    "COHORT_DEFAULT_PURCHASED_N",
+    "COHORT_MAX_SESSIONS",
+    "COHORT_MIN_DURATION_MS",
+    "COHORT_ORDERS",
+    "COHORT_ORDER_EARLIEST",
+    "COHORT_ORDER_LATEST",
+    "COHORT_URL_CONTAINS",
     # Prompts.
-    "CHAT_PROMPT", "CUT_PROMPT", "SYSTEM_PROMPT", "prompt_version",
+    "CHAT_PROMPT",
+    "CUT_PROMPT",
+    "SYSTEM_PROMPT",
+    "prompt_version",
     # Persistence (storage.py).
-    "ANALYSIS_DIR", "ANALYSIS_FILE", "COHORTS_DIR", "COHORT_FILE", "CUTS_SUFFIX",
-    "PROJECTS_DIR", "SAFE_COHORT_ID", "analysis_paths", "clear_analysis",
-    "clear_cut", "clear_job", "cohort_path", "cohort_store", "cohorts_dir",
-    "cuts_path", "data_root_for", "forget_analyses", "forget_pool_cohorts",
-    "forget_session", "latest_cohort", "list_cohorts", "mark_cohort_session",
-    "migrate_legacy_cohort", "pool_key", "read_analysis", "read_cohort",
-    "read_cut", "read_cuts", "read_job", "safe_cohort_id", "write_analysis",
-    "write_cohort", "write_cut", "write_job",
+    "ANALYSIS_DIR",
+    "ANALYSIS_FILE",
+    "COHORTS_DIR",
+    "COHORT_FILE",
+    "CUTS_SUFFIX",
+    "PROJECTS_DIR",
+    "SAFE_COHORT_ID",
+    "analysis_paths",
+    "clear_analysis",
+    "clear_cut",
+    "clear_job",
+    "cohort_path",
+    "cohort_store",
+    "cohorts_dir",
+    "cuts_path",
+    "data_root_for",
+    "forget_analyses",
+    "forget_pool_cohorts",
+    "forget_session",
+    "latest_cohort",
+    "list_cohorts",
+    "mark_cohort_session",
+    "migrate_legacy_cohort",
+    "pool_key",
+    "read_analysis",
+    "read_cohort",
+    "read_cut",
+    "read_cuts",
+    "read_job",
+    "safe_cohort_id",
+    "write_analysis",
+    "write_cohort",
+    "write_cut",
+    "write_job",
     # Cohort status (cohort_state.py).
-    "COHORT_STATES", "COHORT_TRANSITIONS", "COHORT_VIEW_ONLY_FIELDS",
-    "COHORT_VIEW_ONLY_SESSION_FIELDS", "CohortState", "SESSION_STALE",
-    "attach_cohort_insights", "cohort_transition", "enrich_cohort_status",
-    "persistable_cohort", "project_cohort_status", "standout_line",
+    "COHORT_STATES",
+    "COHORT_TRANSITIONS",
+    "COHORT_VIEW_ONLY_FIELDS",
+    "COHORT_VIEW_ONLY_SESSION_FIELDS",
+    "CohortState",
+    "SESSION_STALE",
+    "attach_cohort_insights",
+    "cohort_transition",
+    "enrich_cohort_status",
+    "persistable_cohort",
+    "project_cohort_status",
+    "standout_line",
     # The slice language (slices.py) and the measured splits (stats.py).
-    "DEVICE_VALUES", "OUTCOME_LABELS", "OUTCOME_VALUES", "cross_tab_block",
-    "device_class", "normalize_slice", "outcome_class", "page_path",
-    "row_matches_slice", "slice_label",
+    "DEVICE_VALUES",
+    "OUTCOME_LABELS",
+    "OUTCOME_VALUES",
+    "cross_tab_block",
+    "device_class",
+    "normalize_slice",
+    "outcome_class",
+    "page_path",
+    "row_matches_slice",
+    "slice_label",
     # Cuts and chat.
-    "CHAT_MAX_MESSAGE_CHARS", "CHAT_MAX_TURNS", "CUT_SECTIONS",
-    "build_cut_analysis", "call_gemini_cut", "chat_context", "clean_chat_messages",
-    "cut_context", "cut_key", "empty_cut_analysis", "normalize_cut_analysis",
-    "select_rows_by_cut", "stream_gemini_chat",
+    "CHAT_MAX_MESSAGE_CHARS",
+    "CHAT_MAX_TURNS",
+    "CUT_SECTIONS",
+    "build_cut_analysis",
+    "call_gemini_cut",
+    "chat_context",
+    "clean_chat_messages",
+    "cut_context",
+    "cut_key",
+    "empty_cut_analysis",
+    "normalize_cut_analysis",
+    "select_rows_by_cut",
+    "stream_gemini_chat",
     # Cohort lifecycle (sampling.py, labels.py).
-    "build_cohort", "clean_cohort_label", "cohort_selection_text", "delete_cohort",
-    "facets_from_rows", "pool_facets", "rename_cohort", "sample_cohort_rows",
+    "build_cohort",
+    "clean_cohort_label",
+    "cohort_selection_text",
+    "delete_cohort",
+    "facets_from_rows",
+    "pool_facets",
+    "rename_cohort",
+    "sample_cohort_rows",
     # Extraction and the session write-up.
-    "analyze_session", "build_inlined_session_request", "call_gemini",
-    "extract_session_digest", "load_session_digest", "prompt_digest",
-    "run_extractor", "session_chunk_names", "session_metadata",
+    "analyze_session",
+    "build_inlined_session_request",
+    "call_gemini",
+    "extract_session_digest",
+    "load_session_digest",
+    "prompt_digest",
+    "run_extractor",
+    "session_chunk_names",
+    "session_metadata",
     "write_analysis_result",
     # Batch.
-    "BatchStillRunning", "apply_cohort_batch", "cancel_gemini_batch",
-    "parse_batch_results", "submit_prepared_gemini_batch", "wait_gemini_batch",
+    "BatchStillRunning",
+    "apply_cohort_batch",
+    "cancel_gemini_batch",
+    "parse_batch_results",
+    "submit_prepared_gemini_batch",
+    "wait_gemini_batch",
     # Orchestration.
-    "cohorts_needing_batch_resume", "iter_session_pools", "mark_cohort_paused",
-    "resume_cohort_batch", "run_cohort_job",
+    "cohorts_needing_batch_resume",
+    "iter_session_pools",
+    "mark_cohort_paused",
+    "resume_cohort_batch",
+    "run_cohort_job",
 ]
 
 # The repo root: EXTRACTOR, the extractor subprocess cwd and the default data
@@ -269,9 +358,7 @@ ANALYZE_BATCH_POLL_S = float(os.environ.get("ANALYZE_BATCH_POLL_S", "15"))
 ANALYZE_BATCH_MAX_WAIT_S = float(os.environ.get("ANALYZE_BATCH_MAX_WAIT_S", str(24 * 3600)))
 # A poll that raises is usually a blip, and escalating one would cost a re-run
 # of the whole cohort, so tolerate a few in a row before giving up.
-ANALYZE_BATCH_POLL_MAX_ERRORS = max(
-    1, int(os.environ.get("ANALYZE_BATCH_POLL_MAX_ERRORS", "5"))
-)
+ANALYZE_BATCH_POLL_MAX_ERRORS = max(1, int(os.environ.get("ANALYZE_BATCH_POLL_MAX_ERRORS", "5")))
 
 # Created lazily: a Semaphore binds to the running loop, and this module is
 # imported before the server's loop exists.
@@ -294,15 +381,13 @@ def _gates() -> tuple:
         _gate_loop = loop
     return _extract_gate, _model_gate
 
+
 SYSTEM_PROMPT = prompts.load("session.md")
+
 
 def runtime_present() -> bool:
     """Whether the headless reconstruction can run: node, the extractor, the bundle."""
-    return bool(
-        shutil.which("node") and EXTRACTOR.is_file() and REPLAYER_BUNDLE.is_file()
-    )
-
-
+    return bool(shutil.which("node") and EXTRACTOR.is_file() and REPLAYER_BUNDLE.is_file())
 
 
 def prompt_version(text: str) -> str:
@@ -448,11 +533,7 @@ def _given_facts(spec: dict, n: int) -> str:
     return "## Already known — never report these as findings\n\n" + "\n".join(lines)
 
 
-
-
-def cut_context(
-    rows: list, label: str, given: str = "", spec: dict | None = None
-) -> tuple:
+def cut_context(rows: list, label: str, given: str = "", spec: dict | None = None) -> tuple:
     """(header, side_text, citations) — the evidence a group's questions run on.
 
     Shared by the cut write-up and the chat, so the two always reason over the
@@ -658,7 +739,6 @@ async def chat_context(rows: list, slice_spec: dict | None) -> tuple:
     return selected, label, given, citations, spec
 
 
-
 def build_cohort(
     conn: spec.Connection,
     pool_key: str,
@@ -692,8 +772,12 @@ def build_cohort(
         "status": "idle",
         # The legacy arms are only meaningful in their own mode; recording them
         # alongside any_n/a_n would make the stored rule ambiguous.
-        "purchased_n": selection.purchased_n if selection.total == selection.purchased_n + selection.all_n else 0,
-        "all_n": selection.all_n if selection.total == selection.purchased_n + selection.all_n else 0,
+        "purchased_n": selection.purchased_n
+        if selection.total == selection.purchased_n + selection.all_n
+        else 0,
+        "all_n": selection.all_n
+        if selection.total == selection.purchased_n + selection.all_n
+        else 0,
         "any_n": selection.any_n,
         "a_n": selection.a_n,
         "b_n": selection.b_n,
@@ -757,7 +841,9 @@ async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> 
 
     if proc.returncode != 0:
         detail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()
-        raise RuntimeError(f"page reconstruction failed: {detail[-1] if detail else 'unknown error'}")
+        raise RuntimeError(
+            f"page reconstruction failed: {detail[-1] if detail else 'unknown error'}"
+        )
 
     try:
         return json.loads(stdout.decode("utf-8"))
@@ -854,9 +940,7 @@ def prompt_digest(digest: dict) -> dict:
 def session_chunk_names(session_dir: Path) -> list:
     if not session_dir.is_dir():
         return []
-    return sorted(
-        c.name for c in session_dir.iterdir() if c.is_file() and SAFE_CHUNK.match(c.name)
-    )
+    return sorted(c.name for c in session_dir.iterdir() if c.is_file() and SAFE_CHUNK.match(c.name))
 
 
 def _usable_frames(frames: list) -> list:
@@ -893,9 +977,7 @@ def _session_model_parts(digest: dict, frames: list, meta: dict | None = None):
     for frame in usable:
         parts.append(types.Part.from_text(text=f"[{_clock(frame['atMs'])}]"))
         parts.append(
-            types.Part.from_bytes(
-                data=Path(frame["file"]).read_bytes(), mime_type="image/jpeg"
-            )
+            types.Part.from_bytes(data=Path(frame["file"]).read_bytes(), mime_type="image/jpeg")
         )
     return parts
 
@@ -922,9 +1004,7 @@ def build_inlined_session_request(
     from google.genai import types
 
     return types.InlinedRequest(
-        contents=[
-            types.Content(role="user", parts=_session_model_parts(digest, frames, meta))
-        ],
+        contents=[types.Content(role="user", parts=_session_model_parts(digest, frames, meta))],
         metadata={"session_id": session_id},
         config=_session_model_config(),
     )
@@ -958,9 +1038,7 @@ async def call_gemini(digest: dict, frames: list, meta: dict | None = None) -> s
     client = genai.Client(api_key=GEMINI_API_KEY)
     response = await client.aio.models.generate_content(
         model=GEMINI_MODEL,
-        contents=[
-            types.Content(role="user", parts=_session_model_parts(digest, frames, meta))
-        ],
+        contents=[types.Content(role="user", parts=_session_model_parts(digest, frames, meta))],
         config=_session_model_config(),
     )
     text = (response.text or "").strip()
@@ -1023,15 +1101,11 @@ async def submit_prepared_gemini_batch(
             for entry, digest in prepared:
                 sid = entry["session_id"]
                 meta = session_metadata(pool / sid) if pool is not None else None
-                req = build_inlined_session_request(
-                    sid, digest, digest.get("frames") or [], meta
-                )
+                req = build_inlined_session_request(sid, digest, digest.get("frames") or [], meta)
                 payload = req.model_dump(mode="json", exclude_none=True)
                 del req
                 key = (payload.pop("metadata", None) or {}).get("session_id") or sid
-                out.write(
-                    json.dumps({"key": key, "request": payload}, separators=(",", ":"))
-                )
+                out.write(json.dumps({"key": key, "request": payload}, separators=(",", ":")))
                 out.write("\n")
                 del payload
         uploaded = await client.aio.files.upload(
@@ -1121,9 +1195,7 @@ def parse_batch_results(job) -> dict:
             continue
         if row.get("error"):
             err = row["error"]
-            out[sid] = {
-                "error": err.get("message") if isinstance(err, dict) else str(err)
-            }
+            out[sid] = {"error": err.get("message") if isinstance(err, dict) else str(err)}
             continue
         response = row.get("response") or {}
         text = ""
@@ -1208,9 +1280,7 @@ async def wait_gemini_batch(
             except TypeError:
                 pass
         if deadline is not None and time.monotonic() >= deadline:
-            raise BatchStillRunning(
-                f"batch {job_name} still running after {limit:.0f}s"
-            )
+            raise BatchStillRunning(f"batch {job_name} still running after {limit:.0f}s")
         await asyncio.sleep(max(1.0, interval))
 
 
@@ -1236,9 +1306,10 @@ def mark_cohort_paused(pool: Path, cohort: dict) -> dict:
             entry["analysis"] = ANALYSIS_FILE
             entry.pop("error", None)
             continue
-        if entry.get("status") in ("running", "queued") or (
-            read_job(session_dir) or {}
-        ).get("status") == "running":
+        if (
+            entry.get("status") in ("running", "queued")
+            or (read_job(session_dir) or {}).get("status") == "running"
+        ):
             entry["status"] = "queued"
             entry.pop("error", None)
             clear_job(session_dir)
@@ -1474,9 +1545,7 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
         raise
 
 
-async def _collect_cohort_batch(
-    pool: Path, cohort: dict, prepared: list, job_name: str
-) -> bool:
+async def _collect_cohort_batch(pool: Path, cohort: dict, prepared: list, job_name: str) -> bool:
     """Apply a submitted batch. False when it is still in flight.
 
     Everything past submission is recoverable: the job exists and has been paid
@@ -1557,9 +1626,7 @@ async def apply_cohort_batch(
                 frame_count=len(digest.get("frames") or []),
                 warnings=digest.get("warnings") or [],
             )
-            mark_cohort_session(
-                pool, cohort, entry, "done", analysis=ANALYSIS_FILE
-            )
+            mark_cohort_session(pool, cohort, entry, "done", analysis=ANALYSIS_FILE)
 
 
 async def _cohort_sync_model(pool: Path, cohort: dict, prepared: list) -> None:
@@ -1573,8 +1640,8 @@ async def _cohort_sync_model(pool: Path, cohort: dict, prepared: list) -> None:
             _, model_gate = _gates()
             async with model_gate:
                 text = await call_gemini(
-                digest, digest.get("frames") or [], session_metadata(session_dir)
-            )
+                    digest, digest.get("frames") or [], session_metadata(session_dir)
+                )
             write_analysis_result(
                 session_dir,
                 text,

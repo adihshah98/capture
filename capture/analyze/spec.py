@@ -35,6 +35,7 @@ class Connection(Protocol):
 
     def execute(self, sql: str, params: Any = ..., /) -> Any: ...
 
+
 # The insights cohort's defaults. A cohort sampled without arguments is the
 # latest 50 purchased plus 50 non-purchase sessions, at least five seconds long.
 DEFAULT_PURCHASED_N = 50

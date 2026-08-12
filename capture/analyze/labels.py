@@ -143,4 +143,3 @@ def _auto_cohort_label(selection: CohortSpec, *, stamp: str) -> str:
 def clean_cohort_label(label: str | None) -> str:
     """Trim and cap a cohort display name. Empty string means “use auto label”."""
     return str(label or "").strip()[:120]
-

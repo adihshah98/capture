@@ -157,21 +157,29 @@ def _now() -> int:
 
 def read_cohort(store: Store, pool_key: str, cohort_id: str) -> dict | None:
     with store.tx(pool_key) as (conn, project_id):
-        row = _rows(conn).execute(
-            "SELECT * FROM cohorts WHERE project_id = %s AND cohort_id = %s",
-            (project_id, cohort_id),
-        ).fetchone()
+        row = (
+            _rows(conn)
+            .execute(
+                "SELECT * FROM cohorts WHERE project_id = %s AND cohort_id = %s",
+                (project_id, cohort_id),
+            )
+            .fetchone()
+        )
         if row is None:
             return None
         return _row_to_cohort(row, _read_sessions(conn, project_id, cohort_id))
 
 
 def _read_sessions(conn, project_id, cohort_id: str) -> list:
-    rows = _rows(conn).execute(
-        "SELECT * FROM cohort_sessions WHERE project_id = %s AND cohort_id = %s"
-        " ORDER BY position",
-        (project_id, cohort_id),
-    ).fetchall()
+    rows = (
+        _rows(conn)
+        .execute(
+            "SELECT * FROM cohort_sessions WHERE project_id = %s AND cohort_id = %s"
+            " ORDER BY position",
+            (project_id, cohort_id),
+        )
+        .fetchall()
+    )
     return [_row_to_session(r) for r in rows]
 
 
@@ -200,8 +208,14 @@ def write_cohort(store: Store, pool_key: str, cohort: dict) -> dict:
                 fields = excluded.fields
             """,
             (
-                project_id, cols["id"], cols["label"], cols["status"],
-                cols["created_at"], updated, cols["batch"], json.dumps(fields),
+                project_id,
+                cols["id"],
+                cols["label"],
+                cols["status"],
+                cols["created_at"],
+                updated,
+                cols["batch"],
+                json.dumps(fields),
             ),
         )
         conn.execute(
@@ -227,8 +241,14 @@ def write_cohort(store: Store, pool_key: str, cohort: dict) -> dict:
 
 
 def update_session_status(
-    store: Store, pool_key: str, cohort_id: str, session_id: str, *,
-    status: str, analysis: str | None = None, error: str | None = None,
+    store: Store,
+    pool_key: str,
+    cohort_id: str,
+    session_id: str,
+    *,
+    status: str,
+    analysis: str | None = None,
+    error: str | None = None,
 ) -> bool:
     """Mark one session in one cohort.
 
@@ -254,8 +274,13 @@ def update_session_status(
 
 
 def set_cohort_status(
-    store: Store, pool_key: str, cohort_id: str, status: str, *,
-    batch: dict | None = None, clear_batch: bool = False,
+    store: Store,
+    pool_key: str,
+    cohort_id: str,
+    status: str,
+    *,
+    batch: dict | None = None,
+    clear_batch: bool = False,
 ) -> None:
     """Move a cohort's own status without rewriting its membership."""
     with store.tx(pool_key) as (conn, project_id):
@@ -282,14 +307,16 @@ def set_cohort_status(
 def list_cohorts(store: Store, pool_key: str) -> list:
     """Every cohort in this pool, newest first, with membership."""
     with store.tx(pool_key) as (conn, project_id):
-        rows = _rows(conn).execute(
-            "SELECT * FROM cohorts WHERE project_id = %s"
-            " ORDER BY created_at DESC, cohort_id DESC",
-            (project_id,),
-        ).fetchall()
-        return [
-            _row_to_cohort(r, _read_sessions(conn, project_id, r["cohort_id"])) for r in rows
-        ]
+        rows = (
+            _rows(conn)
+            .execute(
+                "SELECT * FROM cohorts WHERE project_id = %s"
+                " ORDER BY created_at DESC, cohort_id DESC",
+                (project_id,),
+            )
+            .fetchall()
+        )
+        return [_row_to_cohort(r, _read_sessions(conn, project_id, r["cohort_id"])) for r in rows]
 
 
 def resumable_cohorts(store: Store) -> list:
@@ -301,9 +328,11 @@ def resumable_cohorts(store: Store) -> list:
     handles = {p.id: p.handle for p in projects.all_projects(fresh=True)}
     out = []
     with store.admin_tx() as conn:
-        rows = _rows(conn).execute(
-            "SELECT * FROM cohorts WHERE status = 'running' AND batch IS NOT NULL"
-        ).fetchall()
+        rows = (
+            _rows(conn)
+            .execute("SELECT * FROM cohorts WHERE status = 'running' AND batch IS NOT NULL")
+            .fetchall()
+        )
         for row in rows:
             if not (row.get("batch") or {}).get("name"):
                 continue
@@ -414,16 +443,13 @@ def write_cut(store: Store, pool_key: str, cohort_id: str, key: str, cut: dict) 
 def clear_cut(store: Store, pool_key: str, cohort_id: str, key: str) -> bool:
     with store.tx(pool_key) as (conn, project_id):
         cur = conn.execute(
-            "DELETE FROM cohort_cuts"
-            " WHERE project_id = %s AND cohort_id = %s AND cut_key = %s",
+            "DELETE FROM cohort_cuts" " WHERE project_id = %s AND cohort_id = %s AND cut_key = %s",
             (project_id, cohort_id, key),
         )
     return cur.rowcount > 0
 
 
-def migrate_json_cohorts(
-    store: Store, pool_key: str, cohorts_dir: Path, cuts_suffix: str
-) -> int:
+def migrate_json_cohorts(store: Store, pool_key: str, cohorts_dir: Path, cuts_suffix: str) -> int:
     """Import cohorts/*.json and *.cuts.json, then delete them.
 
     Migrate once and leave nothing behind that a later reader could mistake for
@@ -501,9 +527,9 @@ def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
     legacy = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     legacy.row_factory = sqlite3.Row
     try:
-        names = {r[0] for r in legacy.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        )}
+        names = {
+            r[0] for r in legacy.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
         if "cohorts" not in names:
             return counts
 
@@ -514,8 +540,10 @@ def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
                 continue
             cohort = dict(json.loads(row["fields"] or "{}"))
             cohort.update(
-                id=row["id"], status=row["status"],
-                created_at=row["created_at"], updated_at=row["updated_at"],
+                id=row["id"],
+                status=row["status"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
             )
             if row["label"] is not None:
                 cohort["label"] = row["label"]
@@ -524,7 +552,8 @@ def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
             sessions = []
             for s in legacy.execute(
                 "SELECT * FROM cohort_sessions WHERE pool = ? AND cohort_id = ?"
-                " ORDER BY position", (pool_key, row["id"]),
+                " ORDER BY position",
+                (pool_key, row["id"]),
             ).fetchall():
                 entry = dict(json.loads(s["fields"] or "{}"))
                 entry["session_id"] = s["session_id"]
@@ -584,7 +613,9 @@ def write_analysis(store: Store, pool_key: str, session_id: str, result: dict) -
             " ON CONFLICT (project_id, session_id) DO UPDATE SET"
             " body = excluded.body, created_at = excluded.created_at",
             (
-                project_id, session_id, json.dumps(result),
+                project_id,
+                session_id,
+                json.dumps(result),
                 int(result.get("created_at") or _now()),
             ),
         )
@@ -603,20 +634,22 @@ def forget_analyses(store: Store, pool_key: str) -> int:
     """Drop every write-up and job in a pool. The analysis half of a reset,
     alongside forget_pool for cohorts."""
     with store.tx(pool_key) as (conn, project_id):
-        removed = conn.execute(
-            "DELETE FROM analyses WHERE project_id = %s", (project_id,)
-        ).rowcount
+        removed = conn.execute("DELETE FROM analyses WHERE project_id = %s", (project_id,)).rowcount
         conn.execute("DELETE FROM analysis_jobs WHERE project_id = %s", (project_id,))
     return removed
 
 
 def read_job(store: Store, pool_key: str, session_id: str) -> dict | None:
     with store.tx(pool_key) as (conn, project_id):
-        row = _rows(conn).execute(
-            "SELECT status, error, updated_at FROM analysis_jobs"
-            " WHERE project_id = %s AND session_id = %s",
-            (project_id, session_id),
-        ).fetchone()
+        row = (
+            _rows(conn)
+            .execute(
+                "SELECT status, error, updated_at FROM analysis_jobs"
+                " WHERE project_id = %s AND session_id = %s",
+                (project_id, session_id),
+            )
+            .fetchone()
+        )
     if row is None:
         return None
     job = {"status": row["status"], "updated_at": row["updated_at"]}
@@ -654,15 +687,19 @@ def session_facts(store: Store, pool_key: str, session_id: str) -> tuple:
     post-navigation.
     """
     with store.tx(pool_key) as (conn, project_id):
-        row = _rows(conn).execute(
-            "SELECT s.url, o.checkout_started_at, o.purchased_at, o.order_id,"
-            " o.total, o.currency"
-            " FROM sessions s"
-            " LEFT JOIN orders o"
-            "   ON o.project_id = s.project_id AND o.session_id = s.session_id"
-            " WHERE s.project_id = %s AND s.session_id = %s",
-            (project_id, session_id),
-        ).fetchone()
+        row = (
+            _rows(conn)
+            .execute(
+                "SELECT s.url, o.checkout_started_at, o.purchased_at, o.order_id,"
+                " o.total, o.currency"
+                " FROM sessions s"
+                " LEFT JOIN orders o"
+                "   ON o.project_id = s.project_id AND o.session_id = s.session_id"
+                " WHERE s.project_id = %s AND s.session_id = %s",
+                (project_id, session_id),
+            )
+            .fetchone()
+        )
     if row is None:
         return None, None
     order = {

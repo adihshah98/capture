@@ -77,9 +77,7 @@ def _unquote_segments(path: str) -> str:
     as an identity key (facet value, filter match, display label), so keeping
     it unambiguous matters more than showing the prettiest spelling.
     """
-    return "/".join(
-        urllib.parse.unquote(part).replace("/", "%2F") for part in path.split("/")
-    )
+    return "/".join(urllib.parse.unquote(part).replace("/", "%2F") for part in path.split("/"))
 
 
 def page_path(url: str | None) -> str | None:

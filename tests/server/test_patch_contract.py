@@ -60,61 +60,41 @@ PATCHABLE = frozenset(
 )
 
 
-# Everything the package exposes that callers outside its defining module reach:
-# `capture/analysis_port.py` plus thirteen test modules. Generated from the live
-# package, so regenerate rather than hand-edit when a name is deliberately added
-# or removed:
-#
-#   python -c "from capture import analyze; import types; print(sorted(
-#       n for n, v in vars(analyze).items() if not n.startswith('__')
-#       and not isinstance(v, types.ModuleType)
-#       and getattr(v, '__module__', 'capture.analyze').startswith('capture')))"
-EXPECTED_SURFACE = frozenset(
+# The private hooks the suite reaches that `__all__` deliberately does not list.
+# Underscore-prefixed and not public, but thirteen test modules depend on them:
+# `_migrated` and `_undeclared_transitions` are cleared between cases,
+# `_gate_loop` is rebound to reset the semaphores, and the rest are called
+# directly. They are named here so dropping one is a failure rather than a
+# surprise somewhere downstream.
+EXPECTED_PRIVATE_SURFACE = frozenset(
     {
-        "ANALYSIS_DIR", "ANALYSIS_ENABLED", "ANALYSIS_FILE", "ANALYZE_BATCH",
-        "ANALYZE_BATCH_MAX_WAIT_S", "ANALYZE_BATCH_POLL_MAX_ERRORS",
-        "ANALYZE_BATCH_POLL_S", "ANALYZE_EXTRACT_CONCURRENCY", "ANALYZE_FPS",
-        "ANALYZE_MAX_FRAMES", "ANALYZE_MODEL_CONCURRENCY", "ANALYZE_TIMEOUT_S",
-        "BASE_DIR", "EXTRACTOR", "REPLAYER_BUNDLE", "SAFE_COHORT_ID", "_migrate_lock",
-        "BatchStillRunning", "CHAT_MAX_MESSAGE_CHARS", "CHAT_MAX_TURNS", "CHAT_PROMPT",
-        "COHORTS_DIR", "COHORT_CANDIDATE_CAP", "COHORT_DEFAULT_ALL_N",
-        "COHORT_DEFAULT_PURCHASED_N", "COHORT_FILE", "COHORT_MAX_SESSIONS",
-        "COHORT_MIN_DURATION_MS", "COHORT_ORDERS", "COHORT_ORDER_EARLIEST",
-        "COHORT_ORDER_LATEST", "COHORT_STATES", "COHORT_TRANSITIONS",
-        "COHORT_URL_CONTAINS", "COHORT_VIEW_ONLY_FIELDS",
-        "COHORT_VIEW_ONLY_SESSION_FIELDS", "CUTS_SUFFIX", "CUT_PROMPT", "CUT_SECTIONS",
-        "CohortState", "DEVICE_VALUES", "GEMINI_API_KEY", "GEMINI_MODEL",
-        "OUTCOME_LABELS", "OUTCOME_VALUES", "PROJECTS_DIR", "SESSION_STALE",
-        "SYSTEM_PROMPT", "_auto_cohort_label", "_batch_jsonl_path",
-        "_batch_response_text", "_batch_state_name", "_clock", "_cohort_sync_model",
-        "_collect_cohort_batch", "_cut_side_text", "_extract_gate", "_gate_loop",
-        "_gates", "_given_facts", "_is_project_pool", "_mark_prepared_still_running",
-        "_migrate_cohorts_once", "_migrated", "_model_gate", "_parse_json_object",
-        "_read_cohort_file", "_seconds", "_session_attribution",
-        "_session_model_config", "_session_model_parts", "_session_ref",
-        "_undeclared_transitions", "_usable_frames", "analysis_paths",
-        "analyze_session", "apply_cohort_batch", "attach_cohort_insights",
-        "build_cohort", "build_cut_analysis", "build_inlined_session_request",
-        "call_gemini", "call_gemini_cut", "cancel_gemini_batch", "chat_context",
-        "clean_chat_messages", "clean_cohort_label", "clear_analysis", "clear_cut",
-        "clear_job", "cohort_path", "cohort_selection_text", "cohort_store",
-        "cohort_transition", "cohorts_dir", "cohorts_needing_batch_resume",
-        "cross_tab_block", "cut_context", "cut_key", "cuts_path", "data_root_for",
-        "delete_cohort", "device_class", "empty_cut_analysis", "enrich_cohort_status",
-        "extract_session_digest", "facets_from_rows", "forget_analyses",
-        "forget_pool_cohorts", "forget_session", "iter_session_pools", "latest_cohort",
-        "list_cohorts", "load_session_digest", "mark_cohort_paused",
-        "mark_cohort_session", "migrate_legacy_cohort", "normalize_cut_analysis",
-        "normalize_slice", "outcome_class", "page_path", "parse_batch_results",
-        "persistable_cohort", "pool_facets", "pool_key", "project_cohort_status",
-        "prompt_digest", "prompt_version", "read_analysis", "read_cohort", "read_cut",
-        "read_cuts", "read_job", "rename_cohort", "resume_cohort_batch",
-        "row_matches_slice", "run_cohort_job", "run_extractor", "runtime_present",
-        "safe_cohort_id", "sample_cohort_rows", "select_rows_by_cut",
-        "session_chunk_names", "session_metadata", "slice_label", "standout_line",
-        "stream_gemini_chat", "submit_prepared_gemini_batch", "wait_gemini_batch",
-        "write_analysis", "write_analysis_result", "write_cohort", "write_cut",
-        "write_job",
+        "_auto_cohort_label",
+        "_batch_jsonl_path",
+        "_batch_response_text",
+        "_batch_state_name",
+        "_clock",
+        "_cohort_sync_model",
+        "_collect_cohort_batch",
+        "_cut_side_text",
+        "_extract_gate",
+        "_gate_loop",
+        "_gates",
+        "_given_facts",
+        "_is_project_pool",
+        "_mark_prepared_still_running",
+        "_migrate_cohorts_once",
+        "_migrate_lock",
+        "_migrated",
+        "_model_gate",
+        "_parse_json_object",
+        "_read_cohort_file",
+        "_seconds",
+        "_session_attribution",
+        "_session_model_config",
+        "_session_model_parts",
+        "_session_ref",
+        "_undeclared_transitions",
+        "_usable_frames",
     }
 )
 
@@ -247,41 +227,63 @@ class TestThePackageSurfaceIsDeclared(unittest.TestCase):
     up as a confusing AttributeError somewhere downstream; with it, as one diff
     naming exactly what went missing.
 
-    Incidental imports (`json`, `Path`, submodule objects) are excluded — this
-    pins the analysis surface, not the import block.
-
-    Derived from the source rather than from `vars()`, so it does not depend on
-    what has already run: `_extract_gate` and `_model_gate` hold `None` until the
-    first `_gates()` call replaces them with `asyncio.Semaphore`s, and a
-    value-based filter would include them or not depending on test order.
+    The public half is checked against the package's own `__all__` rather than a
+    copy of it -- a second hand-maintained list would just drift from the first.
+    What `__all__` cannot cover is the private hooks the suite reaches, so those
+    are listed above.
     """
 
-    def test_the_exported_surface_matches_the_declared_list(self):
+    def test_every_public_name_resolves(self):
+        """`__all__` promises these; a stale entry is a broken `import *`."""
         from capture import analyze
 
-        # Assigned or defined at module level in the package's own sources.
+        missing = sorted(name for name in analyze.__all__ if not hasattr(analyze, name))
+        self.assertEqual(missing, [], f"__all__ names the package does not have: {missing}")
+
+    def test_all_is_free_of_duplicates(self):
+        from capture import analyze
+
+        duplicated = sorted({n for n in analyze.__all__ if analyze.__all__.count(n) > 1})
+        self.assertEqual(duplicated, [], f"__all__ lists these twice: {duplicated}")
+
+    def test_the_private_hooks_the_suite_reaches_are_present(self):
+        from capture import analyze
+
+        missing = sorted(name for name in EXPECTED_PRIVATE_SURFACE if not hasattr(analyze, name))
+        self.assertEqual(
+            missing,
+            [],
+            f"private names the suite depends on are gone: {missing}. Restore the "
+            "re-export, or drop them from EXPECTED_PRIVATE_SURFACE and from the "
+            "tests that use them.",
+        )
+
+    def test_no_public_definition_is_left_out_of_all(self):
+        """The direction that actually rots: a name added to a submodule, wired
+        into `__init__` and never declared. Read from the AST rather than
+        `vars()` so it does not depend on what has already run -- `_extract_gate`
+        holds None until the first `_gates()` call swaps in a Semaphore.
+        """
+        from capture import analyze
+
         declared = set()
         for source in _package_sources():
-            if source.parent != PACKAGE or source.name == "__init__.py":
-                continue
-            declared |= _module_level_names(source)
-        declared |= _module_level_names(PACKAGE / "__init__.py")
+            if source.parent == PACKAGE:
+                declared |= _module_level_names(source)
 
-        actual = {
+        public = {
             name
             for name, value in vars(analyze).items()
-            if not name.startswith("__")
+            if not name.startswith("_")
             and not isinstance(value, types.ModuleType)
             and name in declared
         }
-        missing = sorted(EXPECTED_SURFACE - actual)
-        added = sorted(actual - EXPECTED_SURFACE)
+        undeclared = sorted(public - set(analyze.__all__))
         self.assertEqual(
-            (missing, added),
-            ([], []),
-            f"package surface changed — gone: {missing}; new: {added}. "
-            "If the change is intended, update EXPECTED_SURFACE; if not, restore "
-            "the re-export.",
+            undeclared,
+            [],
+            f"reachable off the package but not in __all__: {undeclared}. Add them, "
+            "or make them private.",
         )
 
 
