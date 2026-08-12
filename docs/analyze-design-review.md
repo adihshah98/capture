@@ -116,6 +116,13 @@ precondition #1, and replaces a metaclass with an ordinary Python package.
 
 ## 1. Where the package stands
 
+> **Updated 2026-08-11.** The table below is the state this review was written
+> against. `__init__.py` is now **~1,570 lines** across ten submodules: the leaf
+> extractions in §4 all landed, and two more followed them (`storage.py`,
+> `cohort_state.py`) on the corrected criterion recorded there. The package is
+> also under `ruff` and `mypy` as of §6 step 7, so the "excluded from both
+> linters" finding in §2.4 is closed.
+
 `capture/analyze/` is a package with four submodules and a 3,026-line `__init__.py`
 holding all orchestration.
 
@@ -209,6 +216,7 @@ installable package. It works because everything runs from the repo root
 ever reinstated or the package is consumed elsewhere.
 
 **The finding that matters:** `capture/analyze` is *excluded from both linters*.
+*(Closed 2026-08-11 — both exclusions removed; see §6 step 7 for what it surfaced.)*
 
 ```toml
 # capture/analyze is the co-founder's; src/analyze is its Node extractor.
@@ -296,8 +304,10 @@ capture/analyze/
   spec.py            NEW    CohortSpec dataclass                (slices)
   sampling.py        NEW    SQL + candidate filtering           (slices, spec, db)
   store.py        ✅ done   persistence
-  __init__.py               config, gates, storage facade, state machine,
-                            model I/O, orchestration, forwarding
+  storage.py      ✅ done   result/cohort facade over store  (store)   — §4.1
+  cohort_state.py ✅ done   status projection                (storage, labels) — §4.1
+  __init__.py               config, gates, prompts, cut/chat,
+                            model I/O, batch, orchestration
 ```
 
 
@@ -318,6 +328,41 @@ leftover pile.
 config and the storage facade, and they are the exact surface the tests patch.
 Splitting them buys tidier file sizes and pays in forwarding fragility across a paid
 API path. Leave them.
+
+### 4.1 The criterion, corrected — *added 2026-08-11*
+
+The rule above is stated as **"everything extracted is a leaf,"** and the table reads
+it as *pure functions*. That framing is too narrow, and it stopped this document one
+category early. Two more modules came out afterwards on the rule the contract actually
+enforces:
+
+> A module may be extracted iff it **defines no patchable name**, **reads no patchable
+> name**, and **never calls back into orchestration.**
+
+Purity is sufficient but not necessary. `storage.py` (306 lines: the pool/session-path
+translation layer over `store.py`) and `cohort_state.py` (301 lines: the status
+projection and the view/persist split) are both stateful — they open connections, hold
+the migration latch, read results off disk — and both satisfy the rule exactly.
+Verified name by name: no line in either touches `_gates`, a prompt, or a model call.
+`__init__.py` went from 2,128 to ~1,570.
+
+What remains is genuinely inseparable, and for the reason §3 gives: `cut_key` reads
+`CUT_PROMPT`, `_session_model_config` reads `SYSTEM_PROMPT`, `run_cohort_job` calls
+almost everything. A `models.py` and a `pipeline.py` would each need names the other
+owns.
+
+**The asymmetry to know before moving anything else.** The suite reaches package
+privates two different ways, and only one of them survives a move:
+
+| Name | How the suite touches it | Movable |
+| --- | --- | --- |
+| `_gate_loop` | **rebound** — `analyze._gate_loop = None`, nine sites | **No.** `_gates()` reads it via `global` in `__init__`'s namespace. Move `_gates` and the assignment sets an unrelated attribute: the reset silently stops happening and semaphores bound to a dead loop leak into the next test. This is exactly the `_gates` hazard §3 predicted, and it is real. |
+| `_migrated`, `_undeclared_transitions` | **mutated in place** — `.clear()` | **Yes.** A `from .x import y` re-export binds the same object, so `.clear()` still reaches the definition. Assert the identity when you move one. |
+
+So: *rebound names stay put; mutated-in-place and pure names may move.* Neither is
+covered by the AST test — it only knows about `PATCHABLE` — which is why the rule is
+written down here and pinned by
+`test_patch_contract.py::test_the_gate_loop_is_rebindable_from_the_package`.
 
 ### Preconditions
 
@@ -384,8 +429,18 @@ Structural work only; see the other two documents for their own ordering.
    the package can be changed in one step.
 5. `sampling.py` — then the Postgres port inside it.
 6. ~~Public~~ `model_gate()` ~~accessor.~~ **Done.**
-7. **Lift the ruff/mypy exclusion** on `capture/analyze` and fix what it surfaces.
-  The rest of `capture/` is already gated, so this is the last file outside the net.
+7. ~~**Lift the ruff/mypy exclusion**~~ **Done.** Both exclusions are gone from
+  `pyproject.toml` and CI now gates the package with the rest of `capture/`. It
+   surfaced two real defects the suite could not have caught: `chat_context`
+   computed its label, premises and citations and then returned none of them, and
+   `store.connect` declared `data_root: Path = None`. The rest was annotations —
+   most usefully in `cross_tab_cells`, which accumulated counters inside its own
+   mixed-type result dict, so `out["suppressed"] += 1` type-checked against the
+   union of every value in it. `RUF022` is disabled with a reason: `__all__` is
+   grouped by concern, and alphabetising would interleave the groups.
+8. `storage.py`, then `cohort_state.py` — **done**, on the corrected criterion in
+  §4.1. Order matters: the state machine reads results through the facade, so it
+   has to follow rather than lead.
 
 One commit each, full `npm test` between. Do **not** do the
 `extract/models/pipeline/cli` split.

@@ -215,18 +215,22 @@ name and must be updated. Most other tests already route around the default via
 `create_cohort_url` ([test_server.py:884](../tests/test_server.py#L884), *"disables
 production ashwamag/≥5s filters"*) — which is itself the signature of a bad default.
 
-## 9. 🟡 `_batch_jsonl_path` collides
+## 9. 🟡 `_batch_jsonl_path` collides — **fixed**
 
-[:2211](../capture/analyze/__init__.py#L2211):
 `base / f"capture-batch-{int(time.time()*1000)}.jsonl"`. Two cohorts submitting in
 the same millisecond share a path, and the `finally: tmp.unlink()` has one delete the
-other's payload mid-upload. Reachable from the live cohort path
-([:2242](../capture/analyze/__init__.py#L2242)).
+other's payload mid-upload. Reachable from the live cohort path.
 
 The default `Path("/var/tmp")` is also a multi-tenant exposure: the JSONL contains
 session frames and metadata in a world-readable shared directory.
 
-**Fix:** `tempfile.mkstemp` in a configured directory.
+**Fixed** with `tempfile.mkstemp`, and `chmod(0o600)` stated explicitly rather than
+left to `mkstemp`'s default, since the mode is the property being relied on. `mkstemp`
+creates the file where the old name only described one, so the regression test also
+covers the submit path's `open("w")` truncating rather than appending.
+
+Covered by `tests/server/test_batch_tempfile.py` (fast tier — no database). Verified
+against the old implementation: reverting the name turns three of its four red.
 
 ## 10. 🟡 Extractor argument order is undefended
 
@@ -275,7 +279,8 @@ error on either side. The comment acknowledges the coupling; nothing enforces it
 4. **#8** — env var (small, and #1 removes one of its two sites).
 5. **#4 + #6 + #7 + #5** — one project inside `sampling.py`, alongside the Postgres
    port. See [design review §4](analyze-design-review.md).
-6. **#9, #10** — hygiene.
+6. ~~**#9, #10** — hygiene.~~ **#9 done.** #10 remains: it needs a change in
+   `src/analyze/extract.mjs`, which is the Node side and its own review surface.
 
 Verification for each: `npm test` green, prompt hashes unchanged
 (`5637eecc` / `d6416d2b` / `6007448b`), and for #3 specifically, assert both parsers

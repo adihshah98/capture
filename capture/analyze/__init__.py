@@ -1713,6 +1713,28 @@ def cohorts_needing_batch_resume(data_root: Path) -> list:
 #
 # So the rule for anything a test patches is: import the *module* and call
 # `models.call_gemini(...)`, never `from .models import call_gemini`.
-# `tests/test_patch_contract.py` enforces it by walking the AST, which is what
-# a metaclass used to do at runtime -- see docs/deep-dive/07-patch-forwarding.md
-# for why that mechanism existed and why an import-time check replaced it.
+# `tests/server/test_patch_contract.py` enforces it by walking the AST, which is
+# what a metaclass used to do at runtime -- see
+# docs/deep-dive/07-patch-forwarding.md for why that mechanism existed and why an
+# import-time check replaced it.
+#
+# What this permits, and what it forbids
+# --------------------------------------
+# The rule is narrower than "do not split this file". `storage.py` and
+# `cohort_state.py` came out of it precisely because neither defines nor reads a
+# patchable name, and neither calls back into the orchestration here -- so the
+# names above can be imported by value with nothing at risk. What cannot leave is
+# anything on the paid path: `cut_key` reads CUT_PROMPT, `_session_model_config`
+# reads SYSTEM_PROMPT, and `run_cohort_job` calls nearly everything.
+#
+# One hazard the AST test does not cover, because it only knows about PATCHABLE:
+# the suite also reaches privates, and *how* it reaches them decides whether they
+# can move. `_gate_loop` is **rebound** (`analyze._gate_loop = None`, nine sites),
+# so `_gates` must keep reading it from this namespace -- move it and the
+# assignment lands on an unrelated attribute, the semaphore reset silently stops
+# happening, and gates bound to a dead event loop leak between tests.
+# `_migrated` and `_undeclared_transitions` are only **mutated in place**, so a
+# re-export binds the same object and `.clear()` still reaches the definition.
+#
+# Rebound names stay. Mutated-in-place and pure names may move. See
+# docs/analyze-design-review.md §4.1.

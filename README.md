@@ -188,7 +188,7 @@ capture/        all the Python; one FastAPI app, deployed as one unit
   server.py       HTTP: ingest, replay, projects, cohort + cut endpoints
   db.py           Postgres pool; projects.py, sessionstore.py  identity + index
   compat.py       lets analyze's SQLite-era queries run on Postgres (temporary)
-  analyze/        session analysis: prompts/, slices, stats, store
+  analyze/        session analysis: prompts/, slices, stats, storage, store
 src/            all the browser JS
   recorder/       what runs on the brand's site
   analyze/        the headless extractor (node, drives the replay player)
