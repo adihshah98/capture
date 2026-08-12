@@ -40,7 +40,7 @@ from .storage import (
 
 def build_cohort(
     conn: spec.Connection,
-    pool_key: str,
+    project_id: str,
     selection: spec.CohortSpec,
     *,
     label: str | None = None,
@@ -51,8 +51,8 @@ def build_cohort(
     every field of the selection rule, because a cohort is immutable once
     sampled and the rule is the only record of what it represents.
 
-    `pool_key` here is the sampling identity (project UUID) — unchanged from the
-    sampling module; do not confuse with the old filesystem handle.
+    `project_id` is the sampling identity (project UUID); do not confuse with
+    the old filesystem pool handle.
     """
     now = int(time.time() * 1000)
     selection = replace(
@@ -60,7 +60,7 @@ def build_cohort(
         slice_spec=normalize_slice(selection.slice_spec),
         slice_b=normalize_slice(selection.slice_b),
     )
-    result = sample_cohort(conn, pool_key, selection)
+    result = sample_cohort(conn, project_id, selection)
     stamp = time.strftime("%b %-d, %-I:%M %p", time.localtime(now / 1000))
     chosen = clean_cohort_label(label) or _auto_cohort_label(selection, stamp=stamp)
     return {

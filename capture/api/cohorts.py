@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import analysis_port as ap
-from .. import compat, db, jobs, projects, sessionstore
+from .. import db, jobs, projects, sessionstore
 from ..errors import ApiError
 from .deps import readable_project, session_dir
 
@@ -44,6 +44,7 @@ def _resolve_cohort_or_404(project: projects.Project, cohort_id: str | None) -> 
 @router.get("/api/cohorts")
 def list_cohorts(found: projects.Project = Depends(readable_project)):
     """Every cohort in this pool, newest first — membership counts only."""
+    ap.import_legacy_cohorts(found)
     out = []
     for cohort in ap.cohorts(found):
         live = ap.cohort_view(found, cohort)
@@ -131,7 +132,7 @@ def get_pool_facets(
     min_duration_ms: int = Query(ap.MIN_DURATION_MS, ge=0),
 ):
     """Facet values available in the pool — same fields as the Insights cut picker."""
-    with compat.cohort_connection(found.id) as conn:
+    with db.connection(found.id) as conn:
         return ap.pool_facets(conn, found, min_duration_ms=min_duration_ms)
 
 
@@ -142,7 +143,7 @@ def _sample_cohort(found: projects.Project, selection: ap.CohortSpec, label: str
     the sampling query sorts over the candidate window before any of it reaches
     Python.
     """
-    with compat.cohort_connection(found.id) as conn:
+    with db.connection(found.id) as conn:
         return ap.build_cohort(conn, found, selection, label=label or None)
 
 

@@ -24,7 +24,8 @@ class TestCohort(ServerCase):
 
     def seed_analysis(self, sid):
         analyze.write_analysis(
-            self.data_dir / "sessions" / sid,
+            self.project_id,
+            sid,
             {
                 "text": f"write-up for {sid[:8]}",
                 "model": "test",
@@ -423,8 +424,7 @@ class TestCohort(ServerCase):
         sid = "delcoh" + "x" * 26
         cohort_id = self._cohort_of_one(sid)
         analyze_store.write_cut(self.cohort_store(), self.project_id, cohort_id, "some-cut", {"label": "x"})
-        session_dir = self.data_dir / "sessions" / sid
-        self.assertIsNotNone(analyze.read_analysis(session_dir))
+        self.assertIsNotNone(analyze.read_analysis(self.project_id, sid))
 
         status, body = request(f"{self.base}/api/cohorts/{cohort_id}", method="DELETE")
         self.assertEqual(status, 200, body)
@@ -433,7 +433,7 @@ class TestCohort(ServerCase):
         self.assertIsNone(self.stored_cohort(cohort_id))
         self.assertEqual(self.stored_cuts(cohort_id), {})
         # Deleting a cohort must not take the write-ups of its members with it.
-        self.assertIsNotNone(analyze.read_analysis(session_dir))
+        self.assertIsNotNone(analyze.read_analysis(self.project_id, sid))
 
         status, body = request(f"{self.base}/api/cohorts/{cohort_id}", method="DELETE")
         self.assertEqual(status, 404, body)
@@ -476,10 +476,11 @@ class TestCohort(ServerCase):
         cohort_id = self._cohort_of_one(sid)
 
         # Simulate a row that failed during the run: status is re-derived from
-        # disk, so the cached analysis has to go along with the error marker.
-        session = self.data_dir / "sessions" / sid
-        analyze.clear_analysis(session)
-        analyze.write_job(session, "error", error="page reconstruction timed out")
+        # store, so the cached analysis has to go along with the error marker.
+        analyze.clear_analysis(self.project_id, sid)
+        analyze.write_job(
+            self.project_id, sid, "error", error="page reconstruction timed out"
+        )
         saved = self.stored_cohort(cohort_id)
         saved["sessions"][0]["status"] = "error"
         saved["sessions"][0]["error"] = "page reconstruction timed out"
@@ -557,18 +558,22 @@ class TestCohortUnavailable(ServerCase):
         answer standing rather than delete what it cannot replace."""
         from capture import analyze
 
-        pool = self.data_dir / "sessions"
         cohort = analyze.write_cohort(
-            pool,
+            self.project_id,
             {"id": "cohort-keyless", "status": "done", "sessions": []},
         )
         key = analyze.cut_key({"outcome": "purchased"})
-        analyze.write_cut(pool, cohort["id"], key, {"cut": key, "analysis": {"headline": "old"}})
+        analyze.write_cut(
+            self.project_id,
+            cohort["id"],
+            key,
+            {"cut": key, "analysis": {"headline": "old"}},
+        )
         status, _ = request(
             f"{self.base}/api/cohorts/{cohort['id']}/cut?outcome=purchased&refresh=1"
         )
         self.assertEqual(status, 503)
-        still = analyze.read_cut(pool, cohort["id"], key)
+        still = analyze.read_cut(self.project_id, cohort["id"], key)
         self.assertEqual(still["analysis"]["headline"], "old")
 
 

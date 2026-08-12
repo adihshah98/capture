@@ -1,5 +1,4 @@
-"""The compat schema lets analyze.py's unmodified SQLite-era queries run against
-Postgres. These call the real analyze.py functions — no reimplementation."""
+"""Sampling against the public Postgres schema (no compat layer)."""
 
 import json
 import os
@@ -12,12 +11,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pgfixture
 import psycopg
 
-from capture import analyze, compat, db
+from capture import analyze, db
 from capture.analyze.spec import CohortSpec
 
 
 @unittest.skipUnless(pgfixture.available(), pgfixture.UNAVAILABLE)
-class CompatCase(unittest.TestCase):
+class SamplingCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.admin_url, cls.app_url = pgfixture.fresh_database()
@@ -77,9 +76,9 @@ class CompatCase(unittest.TestCase):
             os.environ["CAPTURE_DATABASE_URL"] = cls.prev
 
 
-class TestAnalyzeRunsUnmodified(CompatCase):
-    def test_pool_facets_reads_through_the_view(self):
-        with compat.cohort_connection(self.alpha) as conn:
+class TestAnalyzeOnPublicSchema(SamplingCase):
+    def test_pool_facets_reads_this_project(self):
+        with db.connection(self.alpha) as conn:
             facets = analyze.pool_facets(conn, str(self.alpha))
         self.assertIn("outcome", facets)
         flat = json.dumps(facets)
@@ -87,18 +86,15 @@ class TestAnalyzeRunsUnmodified(CompatCase):
         self.assertNotIn("other.test", flat)
 
     def test_sample_cohort_rows_returns_this_project_only(self):
-        with compat.cohort_connection(self.alpha) as conn:
+        with db.connection(self.alpha) as conn:
             rows = analyze.sample_cohort_rows(
                 conn, str(self.alpha), CohortSpec(any_n=10, url_contains="")
             )
         ids = sorted(r["session_id"] for r in rows)
         self.assertEqual(ids, ["a-bought", "a-browsed"])
 
-    def test_a_purchase_survives_the_json_round_trip(self):
-        """The view casts jsonb back to text because _parse_index_json calls
-        json.loads; a dict would silently degrade to None, and every session
-        would look like it never bought anything."""
-        with compat.cohort_connection(self.alpha) as conn:
+    def test_a_purchase_is_classified_from_orders_timestamps(self):
+        with db.connection(self.alpha) as conn:
             rows = analyze.sample_cohort_rows(
                 conn, str(self.alpha), CohortSpec(any_n=10, url_contains="")
             )
@@ -106,19 +102,8 @@ class TestAnalyzeRunsUnmodified(CompatCase):
         self.assertEqual(classified["a-bought"], "purchased")
         self.assertNotEqual(classified["a-browsed"], "purchased")
 
-    def test_the_view_hands_back_json_as_text_not_dicts(self):
-        with compat.cohort_connection(self.alpha) as conn:
-            order, interactions = conn.execute(
-                'SELECT "order", interactions FROM sessions WHERE session_id = ?',
-                ("a-bought",),
-            ).fetchone()
-        self.assertIsInstance(order, str)
-        self.assertIsInstance(interactions, str)
-        self.assertEqual(json.loads(order)["purchased_at"], 55000)
-        self.assertEqual(json.loads(interactions)["clicks"], 5)
-
     def test_build_cohort_composes_a_group(self):
-        with compat.cohort_connection(self.alpha) as conn:
+        with db.connection(self.alpha) as conn:
             cohort = analyze.build_cohort(
                 conn, str(self.alpha), CohortSpec(any_n=2, url_contains="")
             )
@@ -126,59 +111,45 @@ class TestAnalyzeRunsUnmodified(CompatCase):
         self.assertEqual(ids, ["a-bought", "a-browsed"])
 
     def test_clicks_column_orders_without_json_extract(self):
-        with compat.cohort_connection(self.alpha) as conn:
+        with db.connection(self.alpha) as conn:
             rows = conn.execute(
-                "SELECT session_id FROM sessions WHERE pool = ?"
-                " ORDER BY coalesce(clicks, 0) DESC",
+                "SELECT s.session_id FROM sessions s WHERE s.project_id = %s"
+                " ORDER BY coalesce(s.clicks, 0) DESC",
                 (str(self.alpha),),
             ).fetchall()
         self.assertEqual([r[0] for r in rows], ["a-bought", "a-browsed"])
 
-    def test_json_extract_shim_is_gone(self):
+    def test_compat_schema_is_gone_after_migrate(self):
         with psycopg.connect(self.admin_url) as conn:
             row = conn.execute(
-                "SELECT 1 FROM pg_proc p"
-                " JOIN pg_namespace n ON n.oid = p.pronamespace"
-                " WHERE n.nspname = 'compat' AND p.proname = 'json_extract'"
+                "SELECT 1 FROM pg_namespace WHERE nspname = 'compat'"
             ).fetchone()
         self.assertIsNone(row)
 
+    def test_compat_module_is_gone(self):
+        with self.assertRaises(ImportError):
+            from capture import compat  # noqa: F401
 
-class TestCompatViewKeepsTenantsApart(CompatCase):
-    def test_the_view_cannot_leak_another_project(self):
-        with compat.cohort_connection(self.alpha) as conn:
+
+class TestSamplingKeepsTenantsApart(SamplingCase):
+    def test_connection_cannot_leak_another_project(self):
+        with db.connection(self.alpha) as conn:
             rows = conn.execute("SELECT session_id FROM sessions").fetchall()
         self.assertEqual(sorted(r[0] for r in rows), ["a-bought", "a-browsed"])
 
-    def test_naming_another_project_through_the_view_returns_nothing(self):
-        with compat.cohort_connection(self.alpha) as conn:
+    def test_naming_another_project_returns_nothing(self):
+        with db.connection(self.alpha) as conn:
             rows = conn.execute(
-                "SELECT session_id FROM sessions WHERE pool = ?", (str(self.beta),)
+                "SELECT session_id FROM sessions WHERE project_id = %s", (str(self.beta),)
             ).fetchall()
         self.assertEqual(rows, [])
 
     def test_analyze_cannot_sample_another_project(self):
-        with compat.cohort_connection(self.alpha) as conn:
+        with db.connection(self.alpha) as conn:
             rows = analyze.sample_cohort_rows(
                 conn, str(self.beta), CohortSpec(any_n=10, url_contains="")
             )
         self.assertEqual(rows, [])
-
-
-class TestPlaceholderTranslation(unittest.TestCase):
-    def test_question_marks_become_psycopg_placeholders(self):
-        self.assertEqual(
-            compat.translate("WHERE a = ? AND b = ?", (1, 2)), "WHERE a = %s AND b = %s"
-        )
-
-    def test_literal_percent_is_escaped_before_translation(self):
-        self.assertEqual(
-            compat.translate("WHERE url LIKE '%x%' AND a = ?", (1,)),
-            "WHERE url LIKE '%%x%%' AND a = %s",
-        )
-
-    def test_paramless_sql_is_left_alone(self):
-        self.assertEqual(compat.translate("SELECT 100 % 7", ()), "SELECT 100 % 7")
 
 
 if __name__ == "__main__":

@@ -170,7 +170,7 @@ class TestChatEndpoint(unittest.TestCase):
         cls.admin_url, cls.app_url = pgfixture.fresh_database()
         os.environ["CAPTURE_DATABASE_URL"] = cls.app_url
         os.environ["CAPTURE_PROJECT_CACHE_TTL_S"] = "0"
-        pgfixture.seed_default_project(cls.admin_url)
+        cls.project_id = pgfixture.seed_default_project(cls.admin_url)
         from capture import server
         from capture.api import deps
 
@@ -179,14 +179,14 @@ class TestChatEndpoint(unittest.TestCase):
 
         cls.client = TestClient(server.app)
 
-        # A cohort of two analyzed sessions, written straight to disk.
+        # A cohort of two analyzed sessions.
         cls.pool = deps.resolve_pool(None)
         for sid, text in (("a" * 32, "S-a write-up"), ("b" * 32, "S-b write-up")):
             d = cls.pool / sid
             d.mkdir(parents=True, exist_ok=True)
-            analyze.write_analysis(d, {"status": "done", "text": text})
+            analyze.write_analysis(cls.project_id, sid, {"status": "done", "text": text})
         cls.cohort = analyze.write_cohort(
-            cls.pool,
+            cls.project_id,
             {
                 "id": "cohort-chat-test",
                 "status": "done",

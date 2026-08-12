@@ -25,7 +25,8 @@ class TestCutEndpoint(ServerCase):
         if purchased:
             self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
         analyze.write_analysis(
-            self.data_dir / "sessions" / sid,
+            self.project_id,
+            sid,
             {"text": f"write-up for {sid[:6]}", "model": "test", "warnings": []},
         )
 
@@ -71,7 +72,7 @@ class TestCutEndpoint(ServerCase):
         cohort_id = self.a_cohort()
         key = analyze.cut_key({"outcome": "purchased"})
         analyze.write_cut(
-            self.data_dir / "sessions",
+            self.project_id,
             cohort_id,
             key,
             {
@@ -108,7 +109,7 @@ class TestCutEndpoint(ServerCase):
             separators=(",", ":"),
         )
         analyze.write_cut(
-            self.data_dir / "sessions",
+            self.project_id,
             cohort_id,
             stale_key,
             {"cut": stale_key, "analysis": {"headline": "answer from the old prompt"}},
@@ -133,7 +134,8 @@ class TestCutEndpoint(ServerCase):
 
         cohort_id = self.a_cohort()
         key = analyze.cut_key({"outcome": "purchased"})
-        analyze.write_cut(self.data_dir / "sessions", cohort_id, key, {"cut": key, "analysis": {}})
+        analyze.write_cut(
+            self.project_id, cohort_id, key, {"cut": key, "analysis": {}})
         # A different filter is a different key, so it is still a miss.
         status, _ = request(f"{self.base}/api/cohorts/{cohort_id}/cut?utm_source=google")
         self.assertEqual(status, 404)
@@ -148,7 +150,7 @@ class TestCutEndpoint(ServerCase):
 
         key = analyze.cut_key({"outcome": "purchased"})
         analyze.write_cut(
-            self.data_dir / "sessions",
+            self.project_id,
             cohort_id,
             key,
             {"cut": key, "label": "purchased", "n": 1, "analysis": {"headline": "old"}},
@@ -167,7 +169,7 @@ class TestCutEndpoint(ServerCase):
         self.assertEqual(json.loads(body)["status"], "running")
         # The stale answer is gone, so nothing can serve it while the run is in
         # flight — the point of the refresh.
-        self.assertIsNone(analyze.read_cut(self.data_dir / "sessions", cohort_id, key))
+        self.assertIsNone(analyze.read_cut(self.project_id, cohort_id, key))
 
     def test_refresh_on_a_cut_that_was_never_cached_just_runs(self):
         cohort_id = self.a_cohort()
@@ -211,7 +213,8 @@ class TestCutSlices(ServerCase):
             elif outcome == "checkout":
                 self.assertEqual(self.order(sid, {"event": "checkout_started"}), 200)
             analyze.write_analysis(
-                self.data_dir / "sessions" / sid,
+                self.project_id,
+                sid,
                 {"text": f"write-up {outcome}", "model": "test", "warnings": []},
             )
         qs = urllib.parse.urlencode(

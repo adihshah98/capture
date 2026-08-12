@@ -3,28 +3,21 @@
 The one part of the package that talks SQL. Everything here takes a connection
 and reads the session index; nothing writes.
 
-Two things are worth knowing before editing.
+**Real Postgres.** Placeholders are `%s` (psycopg). Queries hit `public.sessions`
+left-joined to `public.orders` — the normalised schema, not a compat view.
+Row-level security on those tables (via `db.connection(project_id)`) is what
+keeps a caller from reading another tenant's rows; the `project_id` predicate
+is still required so the planner can use the tenant indexes.
 
-**The connection is not SQLite.** The SQL uses `?` placeholders because this
-code predates the move to Postgres. What actually arrives is a
-`compat.SqliteStyleConnection` wrapping psycopg, reading a `compat.sessions`
-view that flattens the normalised schema back into the old shape. See
-migrations/0002_compat.sql -- and note that the view's `security_invoker`
-clause is what keeps row-level security applied, so a caller-supplied `pool`
-cannot read another tenant's rows. Activity tie-breaks sort on the plain
-`clicks` column the view exposes (0005); they no longer go through a
-SQLite-shaped `json_extract` shim.
+The signatures say `spec.Connection`, a Protocol naming the one method these
+functions call.
 
-The signatures used to say `sqlite3.Connection`, which was true only on the
-deleted CLI path. They now say `spec.Connection`, a Protocol naming the one
-method these functions call.
-
-**Selective predicates run last.** The SQL applies the cheap filters -- pool,
-duration, URL substring, time bounds -- then `ORDER BY` and `LIMIT`; the slice
-itself (outcome, device, page, utm_*) is evaluated in Python afterwards, by
-`row_matches_slice`. A rare slice can therefore need several pages of
-candidates before it fills. Sampling paginates up to `CANDIDATE_CAP` and
-records `{requested, matched, scanned, capped}` so a short cohort is never
+**Selective predicates run last.** The SQL applies the cheap filters --
+project, duration, URL substring, time bounds -- then `ORDER BY` and `LIMIT`;
+the slice itself (outcome, device, page, utm_*) is evaluated in Python
+afterwards, by `row_matches_slice`. A rare slice can therefore need several
+pages of candidates before it fills. Sampling paginates up to `CANDIDATE_CAP`
+and records `{requested, matched, scanned, capped}` so a short cohort is never
 presented as if the request was met. `capped` is true only when the scan hit
 the hard cap while still short -- that is the case that scanning harder (or
 pushing the slice into SQL) could still fix.
@@ -78,15 +71,18 @@ class SampleResult:
 
 
 def _parse_index_json(raw) -> dict | None:
-    """A JSON-text index column as a dict, or None when it is not one.
+    """An index JSON column as a dict, or None when it is not one.
 
-    `except Exception` is deliberately wide -- the column is text and a malformed
-    row must not fail a whole cohort -- but note what that costs: this function
-    turns *any* error into "no data", so a caller whose rows all come back
-    unclassified has a bug here, not an empty database. Extracting this module
-    without carrying `import json` did exactly that, and every session read as a
-    non-purchase with no device until the tests caught it.
+    Accepts already-decoded `dict` values (psycopg jsonb) as well as JSON text.
+    `except Exception` is deliberately wide -- a malformed row must not fail a
+    whole cohort -- but note what that costs: this function turns *any* error
+    into "no data", so a caller whose rows all come back unclassified has a bug
+    here, not an empty database.
     """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
     if not raw:
         return None
     try:
@@ -94,6 +90,18 @@ def _parse_index_json(raw) -> dict | None:
     except (TypeError, ValueError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _order_from_timestamps(checkout_started_at, purchased_at) -> dict | None:
+    """Order facts for outcome_class — None when the session has no order row."""
+    if checkout_started_at is None and purchased_at is None:
+        return None
+    order: dict = {}
+    if checkout_started_at is not None:
+        order["checkout_started_at"] = checkout_started_at
+    if purchased_at is not None:
+        order["purchased_at"] = purchased_at
+    return order
 
 
 def index_row_facts(
@@ -163,35 +171,43 @@ def facets_from_rows(rows: list) -> dict:
 
 def pool_facets(
     conn: Connection,
-    pool: str,
+    project_id: str,
     *,
     min_duration_ms: int = 0,
 ) -> dict:
-    """Facet values present in the pool index (for the New cohort dialog).
+    """Facet values present in the project index (for the New cohort dialog).
 
     Scans at most `CANDIDATE_CAP` newest rows under the duration gate — the same
     window sampling uses — then classifies in Python. An unbounded fetchall of
     every session (three json.loads each) grew with project size; pushing the
     classifiers into SQL would fork device/page semantics from the sampler.
     """
-    where_sql, params = _cohort_where(pool, min_duration_ms=min_duration_ms, url_contains="")
+    where_sql, params = _cohort_where(
+        project_id, min_duration_ms=min_duration_ms, url_contains=""
+    )
     order_sql = _cohort_order_sql(cohort_spec.ORDER_LATEST)
     rows = conn.execute(
         f"""
-        SELECT url, "order", device, attribution
-        FROM sessions
+        SELECT s.url, s.device, s.attribution,
+               o.checkout_started_at, o.purchased_at
+        FROM sessions s
+        LEFT JOIN orders o
+          ON o.project_id = s.project_id AND o.session_id = s.session_id
         WHERE {where_sql}
         ORDER BY {order_sql}
-        LIMIT ?
+        LIMIT %s
         """,
         (*params, cohort_spec.CANDIDATE_CAP),
     ).fetchall()
-    facts = [index_row_facts(url, order, device, attr) for url, order, device, attr in rows]
+    facts = [
+        index_row_facts(url, _order_from_timestamps(checkout, purchased), device, attr)
+        for url, device, attr, checkout, purchased in rows
+    ]
     return facets_from_rows(facts)
 
 
 def _cohort_where(
-    pool: str,
+    project_id: str,
     *,
     min_duration_ms: int,
     url_contains: str,
@@ -209,37 +225,34 @@ def _cohort_where(
     after LIMIT made B's effective window smaller by `|A|`.
     """
     where = [
-        "pool = ?",
-        "chunk_count > 0",
-        "(last_seen - first_seen) >= ?",
+        "s.project_id = %s",
+        "s.chunk_count > 0",
+        "(s.last_seen - s.first_seen) >= %s",
     ]
-    params: list = [pool, int(min_duration_ms)]
+    params: list = [project_id, int(min_duration_ms)]
     needle = (url_contains or "").strip()
     if needle:
-        where.append("url LIKE ?")
+        where.append("s.url LIKE %s")
         params.append(f"%{needle}%")
     if start_ms is not None:
-        where.append("last_seen >= ?")
+        where.append("s.last_seen >= %s")
         params.append(int(start_ms))
     if end_ms is not None:
-        where.append("last_seen <= ?")
+        where.append("s.last_seen <= %s")
         params.append(int(end_ms))
     excluded = [sid for sid in (exclude_ids or set()) if sid]
     if excluded:
-        placeholders = ", ".join("?" for _ in excluded)
-        where.append(f"session_id NOT IN ({placeholders})")
+        placeholders = ", ".join("%s" for _ in excluded)
+        where.append(f"s.session_id NOT IN ({placeholders})")
         params.extend(excluded)
     return " AND ".join(where), params
 
 
 def _cohort_order_sql(order: str) -> str:
-    # Plain integer on compat.sessions / the real table — not
-    # json_extract(interactions, '$.clicks'), which needed a SQLite-shaped
-    # shim and defeated any index on sessions.clicks.
-    activity = "coalesce(clicks, 0)"
+    activity = "coalesce(s.clicks, 0)"
     if order == cohort_spec.ORDER_EARLIEST:
-        return f"last_seen ASC, {activity} DESC, session_id ASC"
-    return f"last_seen DESC, {activity} DESC, session_id DESC"
+        return f"s.last_seen ASC, {activity} DESC, s.session_id ASC"
+    return f"s.last_seen DESC, {activity} DESC, s.session_id DESC"
 
 
 def _page_size(n: int) -> int:
@@ -252,7 +265,7 @@ def _page_size(n: int) -> int:
 
 def _sample_candidates(
     conn: Connection,
-    pool: str,
+    project_id: str,
     *,
     min_duration_ms: int,
     url_contains: str,
@@ -265,7 +278,7 @@ def _sample_candidates(
 ) -> list:
     """Index rows (with slice facts) that clear the base duration/path/time gates."""
     where_sql, base_params = _cohort_where(
-        pool,
+        project_id,
         min_duration_ms=min_duration_ms,
         url_contains=url_contains,
         start_ms=start_ms,
@@ -277,18 +290,21 @@ def _sample_candidates(
     )
     rows = conn.execute(
         f"""
-        SELECT session_id, url, "order", device, attribution
-        FROM sessions
+        SELECT s.session_id, s.url, s.device, s.attribution,
+               o.checkout_started_at, o.purchased_at
+        FROM sessions s
+        LEFT JOIN orders o
+          ON o.project_id = s.project_id AND o.session_id = s.session_id
         WHERE {where_sql}
         ORDER BY {order_sql}
-        LIMIT ?
-        OFFSET ?
+        LIMIT %s
+        OFFSET %s
         """,
         (*base_params, max(0, int(limit)), max(0, int(offset))),
     ).fetchall()
     out = []
-    for sid, url, order_raw, device, attr in rows:
-        fact = index_row_facts(url, order_raw, device, attr)
+    for sid, url, device, attr, checkout, purchased in rows:
+        fact = index_row_facts(url, _order_from_timestamps(checkout, purchased), device, attr)
         fact["session_id"] = sid
         out.append(fact)
     return out
@@ -308,7 +324,7 @@ def _combine_stats(*parts: SampleStats) -> SampleStats:
 
 def _sample_matching_rows(
     conn: Connection,
-    pool: str,
+    project_id: str,
     n: int,
     *,
     min_duration_ms: int,
@@ -338,7 +354,7 @@ def _sample_matching_rows(
         batch = min(page, cohort_spec.CANDIDATE_CAP - scanned)
         candidates = _sample_candidates(
             conn,
-            pool,
+            project_id,
             min_duration_ms=min_duration_ms,
             url_contains=path_needle,
             limit=batch,
@@ -371,7 +387,7 @@ def _sample_matching_rows(
     )
 
 
-def sample_cohort(conn: Connection, pool: str, spec: CohortSpec) -> SampleResult:
+def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> SampleResult:
     """Sessions matching a selection rule, plus how the request resolved.
 
     `spec.order` is latest (default) or earliest by `last_seen`; `start_ms` /
@@ -390,11 +406,13 @@ def sample_cohort(conn: Connection, pool: str, spec: CohortSpec) -> SampleResult
     }
 
     if spec.uses_groups:
-        a = _sample_matching_rows(conn, pool, spec.a_n, slice_spec=spec.slice_spec, tag="a", **base)
+        a = _sample_matching_rows(
+            conn, project_id, spec.a_n, slice_spec=spec.slice_spec, tag="a", **base
+        )
         if spec.b_n > 0:
             b = _sample_matching_rows(
                 conn,
-                pool,
+                project_id,
                 spec.b_n,
                 # An unset B slice means "same filter as A", not "no filter".
                 slice_spec=spec.slice_b or spec.slice_spec,
@@ -435,7 +453,7 @@ def sample_cohort(conn: Connection, pool: str, spec: CohortSpec) -> SampleResult
         batch = min(page, cohort_spec.CANDIDATE_CAP - scanned)
         candidates = _sample_candidates(
             conn,
-            pool,
+            project_id,
             min_duration_ms=spec.min_duration_ms,
             url_contains=path_needle,
             limit=batch,
@@ -487,11 +505,10 @@ def sample_cohort(conn: Connection, pool: str, spec: CohortSpec) -> SampleResult
     )
 
 
-def sample_cohort_rows(conn: Connection, pool: str, spec: CohortSpec) -> list:
+def sample_cohort_rows(conn: Connection, project_id: str, spec: CohortSpec) -> list:
     """Sessions matching a selection rule, in the mode the spec asks for.
 
     Prefer `sample_cohort` when the caller needs to know whether the request
-    was filled; this keeps the list-shaped surface used by tests and the
-    compat checks.
+    was filled; this keeps the list-shaped surface used by tests.
     """
-    return sample_cohort(conn, pool, spec).sessions
+    return sample_cohort(conn, project_id, spec).sessions

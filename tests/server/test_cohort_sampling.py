@@ -8,45 +8,111 @@ from unittest import mock
 from capture.analyze.spec import CohortSpec
 
 
+class _PsycopgStyleSqlite:
+    """sqlite3 accepts `?`; production SQL uses `%s`. Translate at execute time."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def execute(self, sql: str, params=()):
+        return self._conn.execute(sql.replace("%s", "?"), params)
+
+    def executemany(self, sql: str, params_seq):
+        return self._conn.executemany(sql.replace("%s", "?"), params_seq)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 class TestCohortSampling(unittest.TestCase):
     def _insert(self, conn, rows):
-        # Fixtures still pass the pre-clicks 12-tuple; derive clicks from the
-        # interactions JSON when present so ORDER BY coalesce(clicks, 0) matches
-        # what those rows used to express via json_extract.
-        normalized = []
+        # Fixtures still pass the pre-normalised 12-tuple:
+        # (project_id, session_id, first_seen, last_seen, chunk_count, bytes,
+        #  visitor_id, url, order_json, interactions_json, device, attribution)
+        # Optionally a 13th clicks column. Order JSON becomes an orders row;
+        # clicks come from the interactions JSON when not supplied explicitly.
         for row in rows:
             row = list(row)
-            if len(row) == 12:
+            project_id = row[0]
+            session_id = row[1]
+            first_seen = row[2]
+            last_seen = row[3]
+            chunk_count = row[4]
+            nbytes = row[5]
+            visitor_id = row[6]
+            url = row[7]
+            order_raw = row[8]
+            interactions_raw = row[9]
+            device = row[10]
+            attribution = row[11]
+            if len(row) >= 13:
+                clicks = int(row[12] or 0)
+            else:
                 clicks = 0
-                raw = row[9]
-                if raw:
+                if interactions_raw:
                     try:
-                        data = json.loads(raw)
+                        data = json.loads(interactions_raw)
                     except (TypeError, ValueError):
                         data = None
                     if isinstance(data, dict):
                         clicks = int(data.get("clicks") or 0)
-                row.append(clicks)
-            normalized.append(tuple(row))
-        conn.executemany(
-            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            normalized,
-        )
+            conn.execute(
+                "INSERT INTO sessions (project_id, session_id, first_seen, last_seen,"
+                " chunk_count, bytes, visitor_id, url, device, attribution, clicks)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    project_id,
+                    session_id,
+                    first_seen,
+                    last_seen,
+                    chunk_count,
+                    nbytes,
+                    visitor_id,
+                    url,
+                    device,
+                    attribution,
+                    clicks,
+                ),
+            )
+            checkout = purchased = None
+            if order_raw:
+                try:
+                    order = json.loads(order_raw) if isinstance(order_raw, str) else order_raw
+                except (TypeError, ValueError):
+                    order = None
+                if isinstance(order, dict):
+                    checkout = order.get("checkout_started_at")
+                    purchased = order.get("purchased_at")
+            if checkout is not None or purchased is not None:
+                conn.execute(
+                    "INSERT INTO orders (project_id, session_id,"
+                    " checkout_started_at, purchased_at)"
+                    " VALUES (%s, %s, %s, %s)",
+                    (project_id, session_id, checkout, purchased),
+                )
 
     def _conn(self, rows):
         from capture import analyze
 
-        conn = sqlite3.connect(":memory:")
-        conn.execute(
+        raw = sqlite3.connect(":memory:")
+        raw.execute(
             """
             CREATE TABLE sessions (
-                pool TEXT, session_id TEXT, first_seen INTEGER, last_seen INTEGER,
+                project_id TEXT, session_id TEXT, first_seen INTEGER, last_seen INTEGER,
                 chunk_count INTEGER, bytes INTEGER, visitor_id TEXT, url TEXT,
-                "order" TEXT, interactions TEXT, device TEXT, attribution TEXT,
-                clicks INTEGER NOT NULL DEFAULT 0
+                device TEXT, attribution TEXT, clicks INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+        raw.execute(
+            """
+            CREATE TABLE orders (
+                project_id TEXT, session_id TEXT,
+                checkout_started_at INTEGER, purchased_at INTEGER
+            )
+            """
+        )
+        conn = _PsycopgStyleSqlite(raw)
         if rows:
             self._insert(conn, rows)
         return analyze, conn

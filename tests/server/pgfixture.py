@@ -139,8 +139,8 @@ def fresh_database() -> tuple:
 
     admin_url = _swap_database(root, name)
 
-    # The role has to exist before migrating: on PostgreSQL 14 the compat view
-    # is kept inside RLS by being owned by it.
+    # The role has to exist before migrating: older migrations create objects
+    # owned by CAPTURE_DB_APP_ROLE when that setting is present.
     with psycopg.connect(admin_url, autocommit=True) as conn:
         exists = conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (APP_ROLE,)).fetchone()
         if not exists:
@@ -153,12 +153,11 @@ def fresh_database() -> tuple:
 
     with psycopg.connect(admin_url, autocommit=True) as conn:
         conn.execute(f'GRANT CONNECT ON DATABASE "{name}" TO {APP_ROLE}')
-        for schema in ("public", "compat"):
-            conn.execute(f"GRANT USAGE ON SCHEMA {schema} TO {APP_ROLE}")
-            conn.execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA"
-                f" {schema} TO {APP_ROLE}"
-            )
+        conn.execute(f"GRANT USAGE ON SCHEMA public TO {APP_ROLE}")
+        conn.execute(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA"
+            f" public TO {APP_ROLE}"
+        )
         conn.execute(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {APP_ROLE}")
 
     return admin_url, _with_role(admin_url, APP_ROLE, APP_PASSWORD)
@@ -225,9 +224,8 @@ def seed_readonly_role(admin_url: str) -> str:
             )
         db_name = admin_url.partition("?")[0].rsplit("/", 1)[1]
         conn.execute(f'GRANT CONNECT ON DATABASE "{db_name}" TO {READONLY_ROLE}')
-        for schema in ("public", "compat"):
-            conn.execute(f"GRANT USAGE ON SCHEMA {schema} TO {READONLY_ROLE}")
-            conn.execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {READONLY_ROLE}")
+        conn.execute(f"GRANT USAGE ON SCHEMA public TO {READONLY_ROLE}")
+        conn.execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO {READONLY_ROLE}")
     return _with_role(admin_url, READONLY_ROLE, READONLY_ROLE)
 
 

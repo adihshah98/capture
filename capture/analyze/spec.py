@@ -22,15 +22,9 @@ from typing import Any, Protocol
 class Connection(Protocol):
     """What the sampling functions actually require of a connection.
 
-    They were annotated `sqlite3.Connection`, which was true only on the CLI
-    path that read the stale `data/index.db`. What production passes is
-    `compat.SqliteStyleConnection`, a psycopg wrapper that translates `?`
-    placeholders -- structurally unrelated to `sqlite3.Connection`, so the
-    annotation was false everywhere it mattered.
-
-    `execute` is the entire surface these functions use, and both types have
-    it. Stating that keeps the annotation honest through the Postgres port,
-    which removes the wrapper but not the method.
+    Production passes a psycopg connection from `db.connection(project_id)`.
+    Tests may pass a thin sqlite stub that accepts the same `%s` SQL.
+    `execute` is the entire surface these functions use.
     """
 
     def execute(self, sql: str, params: Any = ..., /) -> Any: ...

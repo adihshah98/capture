@@ -19,9 +19,10 @@ class TestAnalysisStatus(ServerCase):
     def test_get_returns_cached_analysis(self):
         sid = "a" * 32
         self.assertEqual(self.ingest(sid), 200)
-        session = self.data_dir / "sessions" / sid
         analyze.write_analysis(
-            session, {"text": "hello", "model": "test", "frame_count": 1, "warnings": []}
+            self.project_id,
+            sid,
+            {"text": "hello", "model": "test", "frame_count": 1, "warnings": []},
         )
         status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
         self.assertEqual(status, 200)
@@ -32,8 +33,7 @@ class TestAnalysisStatus(ServerCase):
     def test_get_returns_running_job(self):
         sid = "b" * 32
         self.assertEqual(self.ingest(sid), 200)
-        session = self.data_dir / "sessions" / sid
-        analyze.write_job(session, "running")
+        analyze.write_job(self.project_id, sid, "running")
         status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["status"], "running")

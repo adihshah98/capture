@@ -168,12 +168,6 @@ class TestReadOnlyRole(unittest.TestCase):
             rows = conn.execute("SELECT session_id FROM sessions").fetchall()
         self.assertEqual(rows, [("live-one",)])
 
-    def test_it_can_read_through_the_compat_view(self):
-        with self.scoped() as conn:
-            conn.execute("SET search_path = compat, public")
-            rows = conn.execute("SELECT session_id FROM sessions").fetchall()
-        self.assertEqual(rows, [("live-one",)])
-
     def test_it_cannot_insert(self):
         with self.assertRaises(psycopg.errors.InsufficientPrivilege):
             with self.scoped() as conn:
