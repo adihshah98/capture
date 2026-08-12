@@ -1,27 +1,25 @@
 """The patching contract, checked statically.
 
 Every expensive edge of the analysis pipeline -- the headless Chromium, the paid
-Gemini API -- is swapped in tests by assignment onto the package
-(`analyze.call_gemini = fake`) and then the *real* pipeline is driven. That only
-works while the call site resolves the name at call time, through a namespace the
-assignment reaches.
+Gemini API -- is swapped in tests so CI never bills and never boots browsers,
+then the *real* pipeline is driven.
 
-`from .models import call_gemini` breaks it. The value is copied into the importing
-module's globals at import, so a later `analyze.call_gemini = fake` rebinds the copy
-while the pipeline keeps calling the real one. Nothing fails: the assertions are
-about cohort state, and a real Gemini response satisfies them exactly as well as a
-fake one does. The symptom is a green suite that makes billed API calls against live
+Gemini sync/batch I/O lives in `capture.analyze.gemini`. Tests patch that module
+with `unittest.mock.patch` (or `patch.object`). Remaining edges still rebound on
+the package by assignment (`analyze.run_extractor = fake`) must resolve at call
+time through a namespace the assignment reaches.
+
+`from .x import call_gemini_cut` (etc.) breaks package-assignment patches: the
+value is copied into the importing module's globals at import, so a later
+`analyze.call_gemini_cut = fake` rebinds the copy while the pipeline keeps
+calling the real one. Nothing fails: the assertions are about cohort state, and
+a real Gemini response satisfies them exactly as well as a fake one does. The
+symptom is a green suite that makes billed API calls against live
 infrastructure.
 
-This was previously enforced at runtime by `_ForwardingModule`, which replaced the
-package's `__class__` so assignment fanned out into whichever submodule owned the
-name. That mechanism was invisible to type checkers, fired on every module-global
-write, and sat at the bottom of a 3,000-line module where an import-time exception
-would disable it silently. The rule it protected is real; the machinery was not the
-only way to protect it.
-
-So the rule is checked here instead: no module in the package may bind a patchable
-name via `from . import X`. Import the module, call through it.
+So the rule for names still in PATCHABLE is checked here: no module in the
+package may bind one via `from . import X`. Import the module, call through it.
+Names migrated to definition-site mock.patch are dropped from PATCHABLE.
 """
 
 import ast
@@ -31,31 +29,25 @@ import pkgutil
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PACKAGE = Path(__file__).resolve().parent.parent.parent / "capture" / "analyze"
 
-# Names the suite rebinds on the package, or that a submodule could plausibly
-# rebind later. A `from .x import <one of these>` is the bug this file exists to
-# catch; anything else is an ordinary import.
+# Names the suite still rebinds on the package (or that a submodule could
+# plausibly rebind later via assignment). A `from .x import <one of these>` is
+# the bug this file exists to catch for that style.
 #
-# Derived from the actual patch sites (grep for `analyze.<name> =` in tests/) plus
-# the prompt constants, which tests reassign to check cache invalidation.
+# Gemini I/O (`call_gemini`, batch submit/wait/parse/cancel) moved to gemini.py;
+# tests patch `capture.analyze.gemini` rather than the package namespace.
+# ANALYSIS_ENABLED / ANALYZE_BATCH live on runtime.py for the same reason.
 PATCHABLE = frozenset(
     {
         "run_extractor",
-        "call_gemini",
         "call_gemini_cut",
         "stream_gemini_chat",
-        "wait_gemini_batch",
-        "submit_prepared_gemini_batch",
-        "parse_batch_results",
-        "cancel_gemini_batch",
         "_cohort_sync_model",
-        "SYSTEM_PROMPT",
         "CUT_PROMPT",
         "CHAT_PROMPT",
-        # ANALYSIS_ENABLED / ANALYZE_BATCH moved to runtime.py; tests patch
-        # capture.analyze.runtime rather than the package namespace.
     }
 )
 
@@ -161,16 +153,29 @@ class TestPatchingReachesTheCallSite(unittest.TestCase):
     def test_rebinding_redirects_the_pipeline(self):
         from capture import analyze
 
-        original = analyze.call_gemini
+        original = analyze.run_extractor
         try:
-            analyze.call_gemini = lambda *a, **k: "fake"
+            analyze.run_extractor = lambda *a, **k: "fake"
             # Resolve the way the pipeline does: through the module's globals at
             # call time. A `from` binding elsewhere would not see this.
-            self.assertEqual(analyze.call_gemini(), "fake")
-            self.assertIs(vars(analyze)["call_gemini"], analyze.call_gemini)
+            self.assertEqual(analyze.run_extractor(), "fake")
+            self.assertIs(vars(analyze)["run_extractor"], analyze.run_extractor)
         finally:
-            analyze.call_gemini = original
-        self.assertIs(analyze.call_gemini, original)
+            analyze.run_extractor = original
+        self.assertIs(analyze.run_extractor, original)
+
+    def test_gemini_patches_reach_orchestration_via_the_owner_module(self):
+        """Definition-site patch: orchestrators call gemini.call_gemini through
+        the module object, so mock.patch on that path redirects the pipeline."""
+        from capture import analyze
+
+        async def fake(*a, **k):
+            return "fake"
+
+        with patch.object(analyze.gemini, "call_gemini", fake):
+            self.assertIs(analyze.gemini.call_gemini, fake)
+            # Package re-export tracks the owner module.
+            self.assertIs(analyze.call_gemini, fake)
 
     def test_submodules_do_not_shadow_the_package_namespace(self):
         """No submodule may hold a patchable name in its own globals.

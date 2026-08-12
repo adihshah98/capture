@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -36,7 +37,6 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
         self._saved = {
             "ANALYSIS_ENABLED": analyze.runtime.ANALYSIS_ENABLED,
             "run_extractor": analyze.run_extractor,
-            "call_gemini": analyze.call_gemini,
             "extract": analyze.runtime.ANALYZE_EXTRACT_CONCURRENCY,
             "model": analyze.runtime.ANALYZE_MODEL_CONCURRENCY,
         }
@@ -48,7 +48,6 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
     def restore(self):
         analyze.runtime.ANALYSIS_ENABLED = self._saved["ANALYSIS_ENABLED"]
         analyze.run_extractor = self._saved["run_extractor"]
-        analyze.call_gemini = self._saved["call_gemini"]
         analyze.runtime.ANALYZE_EXTRACT_CONCURRENCY = self._saved["extract"]
         analyze.runtime.ANALYZE_MODEL_CONCURRENCY = self._saved["model"]
         analyze.runtime._gate_loop = None
@@ -73,7 +72,6 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
             return "## What stands out\n- something"
 
         analyze.run_extractor = fake_extract
-        analyze.call_gemini = fake_gemini
 
         dirs = []
         for i in range(n):
@@ -86,7 +84,8 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
                 *(analyze.analyze_session(d, ["chunk.json"], force=True) for d in dirs)
             )
 
-        asyncio.run(main())
+        with patch.object(analyze.gemini, "call_gemini", fake_gemini):
+            asyncio.run(main())
         return extract_probe, model_probe, dirs
 
     def test_extraction_stays_serialized_while_model_calls_overlap(self):

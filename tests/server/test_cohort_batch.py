@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -25,10 +26,6 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
             "ANALYSIS_ENABLED": analyze.runtime.ANALYSIS_ENABLED,
             "ANALYZE_BATCH": analyze.runtime.ANALYZE_BATCH,
             "run_extractor": analyze.run_extractor,
-            "submit_prepared_gemini_batch": analyze.submit_prepared_gemini_batch,
-            "wait_gemini_batch": analyze.wait_gemini_batch,
-            "parse_batch_results": analyze.parse_batch_results,
-            "call_gemini": analyze.call_gemini,
         }
         analyze.runtime.ANALYSIS_ENABLED = True
         analyze.runtime.ANALYZE_BATCH = True
@@ -48,9 +45,8 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
         )
 
     def restore(self):
-        runtime_keys = {"ANALYSIS_ENABLED", "ANALYZE_BATCH"}
         for key, value in self._saved.items():
-            target = analyze.runtime if key in runtime_keys else analyze
+            target = analyze.runtime if key in {"ANALYSIS_ENABLED", "ANALYZE_BATCH"} else analyze
             setattr(target, key, value)
         analyze.runtime._gate_loop = None
         self.tmp.cleanup()
@@ -110,15 +106,10 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
                 b.name: {"text": "## What stands out\n- b"},
             }
 
-        analyze.run_extractor = fake_extract
-        analyze.submit_prepared_gemini_batch = fake_submit
-        analyze.wait_gemini_batch = fake_wait
-        analyze.parse_batch_results = fake_parse
-
         async def boom(*_a, **_k):
             raise AssertionError("sync Gemini must not run when batch succeeds")
 
-        analyze.call_gemini = boom
+        analyze.run_extractor = fake_extract
 
         cohort = {
             "id": "cohort-new",
@@ -130,7 +121,13 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
             ],
         }
         analyze.write_cohort(self.pool, cohort)
-        final = asyncio.run(analyze.run_cohort_job(self.pool, cohort, force=True))
+        with (
+            patch.object(analyze.gemini, "submit_prepared_gemini_batch", fake_submit),
+            patch.object(analyze.gemini, "wait_gemini_batch", fake_wait),
+            patch.object(analyze.gemini, "parse_batch_results", fake_parse),
+            patch.object(analyze.gemini, "call_gemini", boom),
+        ):
+            final = asyncio.run(analyze.run_cohort_job(self.pool, cohort, force=True))
 
         self.assertEqual(final["status"], "done")
         self.assertEqual(final["progress"]["done"], 2)
@@ -179,8 +176,6 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             "ANALYSIS_ENABLED": analyze.runtime.ANALYSIS_ENABLED,
             "ANALYZE_BATCH": analyze.runtime.ANALYZE_BATCH,
             "run_extractor": analyze.run_extractor,
-            "submit_prepared_gemini_batch": analyze.submit_prepared_gemini_batch,
-            "wait_gemini_batch": analyze.wait_gemini_batch,
             "_cohort_sync_model": analyze._cohort_sync_model,
         }
         analyze.runtime.ANALYSIS_ENABLED = True
@@ -206,9 +201,8 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         self.addCleanup(self.restore)
 
     def restore(self):
-        runtime_keys = {"ANALYSIS_ENABLED", "ANALYZE_BATCH"}
         for key, value in self._saved.items():
-            target = analyze.runtime if key in runtime_keys else analyze
+            target = analyze.runtime if key in {"ANALYSIS_ENABLED", "ANALYZE_BATCH"} else analyze
             setattr(target, key, value)
         analyze.runtime._gate_loop = None
         self.tmp.cleanup()
@@ -234,18 +228,19 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         async def fake_submit(prepared, *, display_name, work_dir=None, pool=None):
             return job_name
 
-        analyze.submit_prepared_gemini_batch = fake_submit
+        return patch.object(analyze.gemini, "submit_prepared_gemini_batch", fake_submit)
 
     def test_a_batch_left_in_flight_is_resumed_not_rerun(self):
         # The expensive mistake: the job was created and is still running, so
         # re-sending the sessions interactively pays for the same work twice.
-        self.submits_as()
-
         async def never_finishes(name, *, poll_s=None, max_wait_s=None):
             raise analyze.BatchStillRunning("deadline")
 
-        analyze.wait_gemini_batch = never_finishes
-        asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort())))
+        with (
+            self.submits_as(),
+            patch.object(analyze.gemini, "wait_gemini_batch", never_finishes),
+        ):
+            asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort())))
 
         saved = analyze.read_cohort(self.pool, "cohort-1")
         self.assertEqual(self.sync_calls, 0, "must not re-run a live batch")
@@ -259,13 +254,14 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
     def test_a_failure_reading_results_also_keeps_the_job(self):
         # Same reasoning for a crash in parse/write: the job is fine, only our
         # collection of it failed.
-        self.submits_as()
-
         async def explodes(name, *, poll_s=None, max_wait_s=None):
             raise RuntimeError("SDK blew up parsing the response")
 
-        analyze.wait_gemini_batch = explodes
-        asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort())))
+        with (
+            self.submits_as(),
+            patch.object(analyze.gemini, "wait_gemini_batch", explodes),
+        ):
+            asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort())))
 
         saved = analyze.read_cohort(self.pool, "cohort-1")
         self.assertEqual(self.sync_calls, 0)
@@ -277,23 +273,24 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         async def bad_submit(prepared, *, display_name, work_dir=None, pool=None):
             raise RuntimeError("batch API unavailable")
 
-        analyze.submit_prepared_gemini_batch = bad_submit
-        asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort())))
+        with patch.object(analyze.gemini, "submit_prepared_gemini_batch", bad_submit):
+            asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort())))
 
         saved = analyze.read_cohort(self.pool, "cohort-1")
         self.assertEqual(self.sync_calls, 1)
         self.assertIsNone(saved.get("batch"))
 
     def test_a_genuinely_failed_batch_still_errors_its_sessions(self):
-        self.submits_as()
-
         async def failed(name, *, poll_s=None, max_wait_s=None):
             return SimpleNamespace(
                 state=SimpleNamespace(name="JOB_STATE_FAILED"), error=None, dest=None
             )
 
-        analyze.wait_gemini_batch = failed
-        asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort(n=1))))
+        with (
+            self.submits_as(),
+            patch.object(analyze.gemini, "wait_gemini_batch", failed),
+        ):
+            asyncio.run(analyze.run_cohort_job(self.pool, dict(self.cohort(n=1))))
 
         saved = analyze.read_cohort(self.pool, "cohort-1")
         self.assertEqual(self.sync_calls, 0)
@@ -319,10 +316,10 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         async def never_finishes(name, *, poll_s=None, max_wait_s=None):
             raise analyze.BatchStillRunning("deadline")
 
-        analyze.wait_gemini_batch = never_finishes
-        asyncio.run(
-            analyze.resume_cohort_batch(self.pool, analyze.read_cohort(self.pool, "cohort-1"))
-        )
+        with patch.object(analyze.gemini, "wait_gemini_batch", never_finishes):
+            asyncio.run(
+                analyze.resume_cohort_batch(self.pool, analyze.read_cohort(self.pool, "cohort-1"))
+            )
 
         saved = analyze.read_cohort(self.pool, "cohort-1")
         self.assertEqual((saved.get("batch") or {}).get("name"), "batches/JOB1")
