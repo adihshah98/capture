@@ -6,22 +6,13 @@ then the *real* pipeline is driven.
 
 Gemini sync/batch I/O lives in `capture.analyze.gemini`. The extractor and
 single-session path live in `capture.analyze.session`. Cut and chat live in
-`capture.analyze.cuts`. Tests patch those modules with `unittest.mock.patch`
-(or `patch.object`). Remaining edges still rebound on the package by assignment
-(`analyze._cohort_sync_model = fake`) must resolve at call time through a
-namespace the assignment reaches.
+`capture.analyze.cuts`. Cohort lifecycle + `run_cohort_job` live in
+`capture.analyze.cohorts`. Tests patch those modules with `unittest.mock.patch`
+(or `patch.object`) at the definition site.
 
-`from .x import _cohort_sync_model` (etc.) breaks package-assignment patches: the
-value is copied into the importing module's globals at import, so a later
-`analyze._cohort_sync_model = fake` rebinds the copy while the pipeline keeps
-calling the real one. Nothing fails: the assertions are about cohort state, and
-a real Gemini response satisfies them exactly as well as a fake one does. The
-symptom is a green suite that makes billed API calls against live
-infrastructure.
-
-So the rule for names still in PATCHABLE is checked here: no module in the
-package may bind one via `from . import X`. Import the module, call through it.
-Names migrated to definition-site mock.patch are dropped from PATCHABLE.
+Nothing in the suite still rebinds pipeline edges by assignment on the package
+namespace. PATCHABLE is empty; the AST check below stays so a regression that
+reintroduces package-assignment patching is caught when the name is listed again.
 """
 
 import ast
@@ -39,14 +30,11 @@ PACKAGE = Path(__file__).resolve().parent.parent.parent / "capture" / "analyze"
 # plausibly rebind later via assignment). A `from .x import <one of these>` is
 # the bug this file exists to catch for that style.
 #
-# Gemini I/O, session extraction, and cut/chat moved to owner modules; tests
-# patch `capture.analyze.gemini` / `session` / `cuts` rather than the package.
-# ANALYSIS_ENABLED / ANALYZE_BATCH live on runtime.py for the same reason.
-PATCHABLE = frozenset(
-    {
-        "_cohort_sync_model",
-    }
-)
+# Gemini I/O, session extraction, cut/chat, and cohort orchestration moved to
+# owner modules; tests patch `capture.analyze.gemini` / `session` / `cuts` /
+# `cohorts` rather than the package. ANALYSIS_ENABLED / ANALYZE_BATCH live on
+# runtime.py for the same reason.
+PATCHABLE = frozenset()
 
 
 # The private hooks the suite reaches that `__all__` deliberately does not list.
@@ -183,6 +171,18 @@ class TestPatchingReachesTheCallSite(unittest.TestCase):
         with patch.object(analyze.cuts, "call_gemini_cut", fake):
             self.assertIs(analyze.cuts.call_gemini_cut, fake)
             self.assertIs(analyze.call_gemini_cut, fake)
+
+    def test_cohorts_patches_reach_job_via_the_owner_module(self):
+        """Definition-site patch: run_cohort_job looks up _cohort_sync_model
+        in cohorts.py, so mock.patch there redirects the sync fallback."""
+        from capture import analyze
+
+        async def fake(*a, **k):
+            return None
+
+        with patch.object(analyze.cohorts, "_cohort_sync_model", fake):
+            self.assertIs(analyze.cohorts._cohort_sync_model, fake)
+            self.assertIs(analyze._cohort_sync_model, fake)
 
     def test_submodules_do_not_shadow_the_package_namespace(self):
         """No submodule may hold a patchable name in its own globals.

@@ -172,7 +172,6 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         self._saved = {
             "ANALYSIS_ENABLED": analyze.runtime.ANALYSIS_ENABLED,
             "ANALYZE_BATCH": analyze.runtime.ANALYZE_BATCH,
-            "_cohort_sync_model": analyze._cohort_sync_model,
         }
         analyze.runtime.ANALYSIS_ENABLED = True
         analyze.runtime.ANALYZE_BATCH = True
@@ -193,13 +192,14 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
                 entry["status"] = "done"
 
         self._fake_extract = fake_extract
-        analyze._cohort_sync_model = count_sync
+        self._sync_patcher = patch.object(analyze.cohorts, "_cohort_sync_model", count_sync)
+        self._sync_patcher.start()
+        self.addCleanup(self._sync_patcher.stop)
         self.addCleanup(self.restore)
 
     def restore(self):
         for key, value in self._saved.items():
-            target = analyze.runtime if key in {"ANALYSIS_ENABLED", "ANALYZE_BATCH"} else analyze
-            setattr(target, key, value)
+            setattr(analyze.runtime, key, value)
         analyze.runtime._gate_loop = None
         self.tmp.cleanup()
 
