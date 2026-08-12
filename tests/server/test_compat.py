@@ -47,17 +47,35 @@ class SamplingCase(unittest.TestCase):
 
     @staticmethod
     def seed(conn, project, sid, *, url, clicks=0, purchased=False, width=None):
+        from capture import classify
+
+        device = {"width": width, "height": 800} if width else None
+        attribution = {"utm_source": "meta"} if "utm_source" in url else None
+        classes = classify.session_classes(url=url, device=device, attribution=attribution)
+        outcome = "purchased" if purchased else "rest"
         conn.execute(
             "INSERT INTO sessions (project_id, session_id, first_seen, last_seen,"
-            " chunk_count, clicks, url, device, attribution)"
-            " VALUES (%s, %s, 1000, 60000, 2, %s, %s, %s, %s)",
+            " chunk_count, clicks, url, device, attribution,"
+            " outcome, device_class, page, utm_source, utm_medium, utm_campaign,"
+            " utm_content, has_fbclid, is_meta)"
+            " VALUES (%s, %s, 1000, 60000, 2, %s, %s, %s, %s,"
+            " %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 project,
                 sid,
                 clicks,
                 url,
-                json.dumps({"width": width, "height": 800}) if width else None,
-                json.dumps({"utm_source": "meta"}) if "utm_source" in url else None,
+                json.dumps(device) if device else None,
+                json.dumps(attribution) if attribution else None,
+                outcome,
+                classes["device_class"],
+                classes["page"],
+                classes["utm_source"],
+                classes["utm_medium"],
+                classes["utm_campaign"],
+                classes["utm_content"],
+                classes["has_fbclid"],
+                classes["is_meta"],
             ),
         )
         if purchased:
@@ -93,7 +111,7 @@ class TestAnalyzeOnPublicSchema(SamplingCase):
         ids = sorted(r["session_id"] for r in rows)
         self.assertEqual(ids, ["a-bought", "a-browsed"])
 
-    def test_a_purchase_is_classified_from_orders_timestamps(self):
+    def test_a_purchase_is_classified_from_sessions_outcome(self):
         with db.connection(self.alpha) as conn:
             rows = analyze.sample_cohort_rows(
                 conn, str(self.alpha), CohortSpec(any_n=10, url_contains="")

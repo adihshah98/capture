@@ -280,11 +280,14 @@ def classify(device: dict | None, order: dict | None, url: str | None) -> dict:
 
     One call rather than three exported classifiers: the only caller wants all
     three together, and the shape of a cut row belongs on this side of the seam.
+    Ingest writes the same labels via `capture.classify` onto sessions columns.
     """
+    from . import classify as session_classify
+
     return {
-        "device": analyze.device_class(device),
-        "outcome": analyze.outcome_class(order),
-        "page": analyze.page_path(url),
+        "device": session_classify.device_class(device),
+        "outcome": session_classify.outcome_class(order),
+        "page": session_classify.page_path(url),
     }
 
 

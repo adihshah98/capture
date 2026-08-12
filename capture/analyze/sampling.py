@@ -4,28 +4,24 @@ The one part of the package that talks SQL. Everything here takes a connection
 and reads the session index; nothing writes.
 
 **Real Postgres.** Placeholders are `%s` (psycopg). Queries hit `public.sessions`
-left-joined to `public.orders` — the normalised schema, not a compat view.
-Row-level security on those tables (via `db.connection(project_id)`) is what
-keeps a caller from reading another tenant's rows; the `project_id` predicate
-is still required so the planner can use the tenant indexes.
+(with an orders join only when a caller still wants timestamps). Row-level
+security on those tables (via `db.connection(project_id)`) keeps a caller from
+reading another tenant's rows; the `project_id` predicate is still required so
+the planner can use the tenant indexes.
+
+**Slice filters are SQL.** `outcome`, `device_class`, `page`, and campaign
+columns are materialised at ingest (`capture.classify` via `sessionstore`).
+Sampling pushes a normalised slice into `WHERE`, then `ORDER BY` + `LIMIT n`.
+A short cohort means the pool under those predicates is genuinely short —
+`{requested, matched, scanned, capped}` still records that; `capped` stays for
+facet scans that deliberately stop at `CANDIDATE_CAP`, not for membership.
 
 The signatures say `spec.Connection`, a Protocol naming the one method these
 functions call.
-
-**Selective predicates run last.** The SQL applies the cheap filters --
-project, duration, URL substring, time bounds -- then `ORDER BY` and `LIMIT`;
-the slice itself (outcome, device, page, utm_*) is evaluated in Python
-afterwards, by `row_matches_slice`. A rare slice can therefore need several
-pages of candidates before it fills. Sampling paginates up to `CANDIDATE_CAP`
-and records `{requested, matched, scanned, capped}` so a short cohort is never
-presented as if the request was met. `capped` is true only when the scan hit
-the hard cap while still short -- that is the case that scanning harder (or
-pushing the slice into SQL) could still fix.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -34,23 +30,19 @@ from .slices import (
     DEVICE_VALUES,
     OUTCOME_LABELS,
     OUTCOME_VALUES,
-    device_class,
     normalize_slice,
-    outcome_class,
-    page_path,
-    row_matches_slice,
 )
 from .spec import CohortSpec, Connection
 
 
 @dataclass(frozen=True)
 class SampleStats:
-    """How a sample request resolved against the candidate window.
+    """How a sample request resolved.
 
-    `matched < requested` is a shortfall. `capped` distinguishes "the pool
-    genuinely holds this many" (`capped=False`, we exhausted the index under
-    the base gates) from "we stopped at CANDIDATE_CAP" (`capped=True`) -- only
-    the second is fixable by scanning harder.
+    `matched < requested` is a shortfall. For membership sampling the filter is
+    fully in SQL, so a shortfall means the pool does not hold enough matches
+    (`capped=False`). `capped=True` is reserved for bounded scans (facets) that
+    stop at `CANDIDATE_CAP` before exhausting the index.
     """
 
     requested: int
@@ -70,56 +62,51 @@ class SampleResult:
     sample: SampleStats
 
 
-def _parse_index_json(raw) -> dict | None:
-    """An index JSON column as a dict, or None when it is not one.
-
-    Accepts already-decoded `dict` values (psycopg jsonb) as well as JSON text.
-    `except Exception` is deliberately wide -- a malformed row must not fail a
-    whole cohort -- but note what that costs: this function turns *any* error
-    into "no data", so a caller whose rows all come back unclassified has a bug
-    here, not an empty database.
-    """
-    if raw is None:
-        return None
-    if isinstance(raw, dict):
-        return raw
-    if not raw:
-        return None
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _order_from_timestamps(checkout_started_at, purchased_at) -> dict | None:
-    """Order facts for outcome_class — None when the session has no order row."""
-    if checkout_started_at is None and purchased_at is None:
-        return None
-    order: dict = {}
-    if checkout_started_at is not None:
-        order["checkout_started_at"] = checkout_started_at
-    if purchased_at is not None:
-        order["purchased_at"] = purchased_at
-    return order
-
-
-def index_row_facts(
-    url,
-    order_raw,
-    device_raw,
-    attribution_raw,
+def _attribution_from_columns(
+    utm_source,
+    utm_medium,
+    utm_campaign,
+    utm_content,
+    has_fbclid,
 ) -> dict:
-    """Slice fields for one index row — same vocabulary as cut matching."""
-    order = _parse_index_json(order_raw)
-    device = _parse_index_json(device_raw)
-    attribution = _parse_index_json(attribution_raw) or {}
+    """Rebuild the attribution dict cuts/labels expect from denormalised columns."""
+    attrs: dict = {}
+    if utm_source:
+        attrs["utm_source"] = utm_source
+    if utm_medium:
+        attrs["utm_medium"] = utm_medium
+    if utm_campaign:
+        attrs["utm_campaign"] = utm_campaign
+    if utm_content:
+        attrs["utm_content"] = utm_content
+    if has_fbclid:
+        attrs["fbclid"] = True
+    return attrs
+
+
+def classified_row(
+    session_id: str,
+    *,
+    outcome: str | None,
+    device_class: str | None,
+    page: str | None,
+    utm_source=None,
+    utm_medium=None,
+    utm_campaign=None,
+    utm_content=None,
+    has_fbclid: bool = False,
+) -> dict:
+    """Slice-shaped row from materialised columns (same keys as cut matching)."""
+    outcome_value = outcome or "rest"
     return {
-        "outcome": outcome_class(order),
-        "device": device_class(device),
-        "page": page_path(url),
-        "attribution": attribution,
-        "bought": bool(order and order.get("purchased_at")),
+        "session_id": session_id,
+        "outcome": outcome_value,
+        "device": device_class,
+        "page": page,
+        "attribution": _attribution_from_columns(
+            utm_source, utm_medium, utm_campaign, utm_content, has_fbclid
+        ),
+        "bought": outcome_value == "purchased",
     }
 
 
@@ -169,6 +156,61 @@ def facets_from_rows(rows: list) -> dict:
     }
 
 
+def _slice_where(slice_spec: dict | None) -> tuple[str, list]:
+    """SQL predicates for a normalised cut-style slice on materialised columns.
+
+    Mirrors `row_matches_slice`: AND across keys, OR within multi-value keys;
+    unknown `device_class` / `page` (NULL) never satisfy those constraints.
+    """
+    spec = normalize_slice(slice_spec)
+    if not spec:
+        return "", []
+
+    where: list[str] = []
+    params: list = []
+
+    want_outcome = spec.get("outcome")
+    if want_outcome:
+        placeholders = ", ".join("%s" for _ in want_outcome)
+        where.append(f"s.outcome IN ({placeholders})")
+        params.extend(want_outcome)
+
+    want_device = spec.get("device")
+    if want_device:
+        placeholders = ", ".join("%s" for _ in want_device)
+        where.append(f"s.device_class IN ({placeholders})")
+        params.extend(want_device)
+
+    want_page = spec.get("page")
+    if want_page:
+        where.append("s.page = %s")
+        params.append(want_page)
+
+    if "fbclid" in spec:
+        where.append("s.has_fbclid" if spec["fbclid"] else "NOT s.has_fbclid")
+
+    for key, column in (
+        ("utm_medium", "s.utm_medium"),
+        ("utm_campaign", "s.utm_campaign"),
+        ("utm_content", "s.utm_content"),
+    ):
+        want = spec.get(key)
+        if want:
+            where.append(f"{column} = %s")
+            params.append(want)
+
+    want_source = spec.get("utm_source")
+    if want_source == "meta":
+        where.append("s.is_meta")
+    elif want_source == "non_meta":
+        where.append("NOT s.is_meta")
+    elif want_source:
+        where.append("s.utm_source = %s")
+        params.append(want_source)
+
+    return (" AND ".join(where), params) if where else ("", [])
+
+
 def pool_facets(
     conn: Connection,
     project_id: str,
@@ -178,9 +220,7 @@ def pool_facets(
     """Facet values present in the project index (for the New cohort dialog).
 
     Scans at most `CANDIDATE_CAP` newest rows under the duration gate — the same
-    window sampling uses — then classifies in Python. An unbounded fetchall of
-    every session (three json.loads each) grew with project size; pushing the
-    classifiers into SQL would fork device/page semantics from the sampler.
+    recency window sampling uses — reading materialised class columns.
     """
     where_sql, params = _cohort_where(
         project_id, min_duration_ms=min_duration_ms, url_contains=""
@@ -188,11 +228,9 @@ def pool_facets(
     order_sql = _cohort_order_sql(cohort_spec.ORDER_LATEST)
     rows = conn.execute(
         f"""
-        SELECT s.url, s.device, s.attribution,
-               o.checkout_started_at, o.purchased_at
+        SELECT s.session_id, s.outcome, s.device_class, s.page,
+               s.utm_source, s.utm_medium, s.utm_campaign, s.utm_content, s.has_fbclid
         FROM sessions s
-        LEFT JOIN orders o
-          ON o.project_id = s.project_id AND o.session_id = s.session_id
         WHERE {where_sql}
         ORDER BY {order_sql}
         LIMIT %s
@@ -200,8 +238,18 @@ def pool_facets(
         (*params, cohort_spec.CANDIDATE_CAP),
     ).fetchall()
     facts = [
-        index_row_facts(url, _order_from_timestamps(checkout, purchased), device, attr)
-        for url, device, attr, checkout, purchased in rows
+        classified_row(
+            sid,
+            outcome=outcome,
+            device_class=device,
+            page=page,
+            utm_source=utm_source,
+            utm_medium=utm_medium,
+            utm_campaign=utm_campaign,
+            utm_content=utm_content,
+            has_fbclid=bool(has_fbclid),
+        )
+        for sid, outcome, device, page, utm_source, utm_medium, utm_campaign, utm_content, has_fbclid in rows
     ]
     return facets_from_rows(facts)
 
@@ -214,6 +262,7 @@ def _cohort_where(
     start_ms: int | None = None,
     end_ms: int | None = None,
     exclude_ids: set | None = None,
+    slice_spec: dict | None = None,
 ) -> tuple[str, list]:
     """Shared WHERE clause for cohort sampling.
 
@@ -221,8 +270,7 @@ def _cohort_where(
     (or finished) in this period,” matching the recency sort key.
 
     `exclude_ids` is pushed into SQL (`NOT IN`) so group B does not re-read the
-    rows A already took from the same ordered window — filtering them in Python
-    after LIMIT made B's effective window smaller by `|A|`.
+    rows A already took. Slice predicates ride on materialised class columns.
     """
     where = [
         "s.project_id = %s",
@@ -245,6 +293,10 @@ def _cohort_where(
         placeholders = ", ".join("%s" for _ in excluded)
         where.append(f"s.session_id NOT IN ({placeholders})")
         params.extend(excluded)
+    slice_sql, slice_params = _slice_where(slice_spec)
+    if slice_sql:
+        where.append(slice_sql)
+        params.extend(slice_params)
     return " AND ".join(where), params
 
 
@@ -255,59 +307,59 @@ def _cohort_order_sql(order: str) -> str:
     return f"s.last_seen DESC, {activity} DESC, s.session_id DESC"
 
 
-def _page_size(n: int) -> int:
-    """How many index rows to pull per scan page before the hard cap."""
-    return min(
-        cohort_spec.CANDIDATE_CAP,
-        max(n * 20, n + 200, 500),
-    )
-
-
-def _sample_candidates(
+def _sample_rows(
     conn: Connection,
     project_id: str,
     *,
+    n: int,
     min_duration_ms: int,
     url_contains: str,
-    limit: int,
-    offset: int = 0,
+    slice_spec: dict | None = None,
+    exclude_ids: set | None = None,
     start_ms: int | None = None,
     end_ms: int | None = None,
     order: str = cohort_spec.ORDER_LATEST,
-    exclude_ids: set | None = None,
-) -> list:
-    """Index rows (with slice facts) that clear the base duration/path/time gates."""
-    where_sql, base_params = _cohort_where(
+) -> list[dict]:
+    """Up to `n` classified rows matching base gates + slice, already ordered."""
+    if n <= 0:
+        return []
+    where_sql, params = _cohort_where(
         project_id,
         min_duration_ms=min_duration_ms,
         url_contains=url_contains,
         start_ms=start_ms,
         end_ms=end_ms,
         exclude_ids=exclude_ids,
+        slice_spec=slice_spec,
     )
     order_sql = _cohort_order_sql(
         order if order in cohort_spec.ORDERS else cohort_spec.ORDER_LATEST
     )
     rows = conn.execute(
         f"""
-        SELECT s.session_id, s.url, s.device, s.attribution,
-               o.checkout_started_at, o.purchased_at
+        SELECT s.session_id, s.outcome, s.device_class, s.page,
+               s.utm_source, s.utm_medium, s.utm_campaign, s.utm_content, s.has_fbclid
         FROM sessions s
-        LEFT JOIN orders o
-          ON o.project_id = s.project_id AND o.session_id = s.session_id
         WHERE {where_sql}
         ORDER BY {order_sql}
         LIMIT %s
-        OFFSET %s
         """,
-        (*base_params, max(0, int(limit)), max(0, int(offset))),
+        (*params, max(0, int(n))),
     ).fetchall()
-    out = []
-    for sid, url, device, attr, checkout, purchased in rows:
-        fact = index_row_facts(url, _order_from_timestamps(checkout, purchased), device, attr)
-        fact["session_id"] = sid
-        out.append(fact)
-    return out
+    return [
+        classified_row(
+            sid,
+            outcome=outcome,
+            device_class=device,
+            page=page,
+            utm_source=utm_source,
+            utm_medium=utm_medium,
+            utm_campaign=utm_campaign,
+            utm_content=utm_content,
+            has_fbclid=bool(has_fbclid),
+        )
+        for sid, outcome, device, page, utm_source, utm_medium, utm_campaign, utm_content, has_fbclid in rows
+    ]
 
 
 def _empty_stats(requested: int = 0) -> SampleStats:
@@ -338,52 +390,29 @@ def _sample_matching_rows(
 ) -> SampleResult:
     """Sessions matching a cut-style slice, tagged for the sample arm.
 
-    Pages through the ordered index until `n` matches, the pool under the base
-    gates is exhausted, or `CANDIDATE_CAP` rows have been scanned.
+    One SQL query: slice predicates are columns, so `LIMIT n` is exact.
     """
     if n <= 0:
         return SampleResult(sessions=[], sample=_empty_stats(0))
     spec = normalize_slice(slice_spec)
-    exclude = exclude_ids or set()
     path_needle = "" if spec.get("page") else url_contains
-    page = _page_size(n)
-    out: list = []
-    scanned = 0
-    offset = 0
-    while len(out) < n and scanned < cohort_spec.CANDIDATE_CAP:
-        batch = min(page, cohort_spec.CANDIDATE_CAP - scanned)
-        candidates = _sample_candidates(
-            conn,
-            project_id,
-            min_duration_ms=min_duration_ms,
-            url_contains=path_needle,
-            limit=batch,
-            offset=offset,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            order=order,
-            # Drop A's members in SQL so B's LIMIT/OFFSET window is not spent
-            # re-reading rows it must discard (bug #6).
-            exclude_ids=exclude,
-        )
-        if not candidates:
-            break
-        scanned += len(candidates)
-        offset += len(candidates)
-        for row in candidates:
-            sid = row["session_id"]
-            if not row_matches_slice(row, spec):
-                continue
-            out.append({"session_id": sid, "filter": tag, "status": "queued"})
-            if len(out) >= n:
-                break
-        if len(candidates) < batch:
-            break
-    matched = len(out)
-    capped = matched < n and scanned >= cohort_spec.CANDIDATE_CAP
+    rows = _sample_rows(
+        conn,
+        project_id,
+        n=n,
+        min_duration_ms=min_duration_ms,
+        url_contains=path_needle,
+        slice_spec=spec,
+        exclude_ids=exclude_ids,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        order=order,
+    )
+    sessions = [{"session_id": row["session_id"], "filter": tag, "status": "queued"} for row in rows]
+    matched = len(sessions)
     return SampleResult(
-        sessions=out,
-        sample=SampleStats(requested=n, matched=matched, scanned=scanned, capped=capped),
+        sessions=sessions,
+        sample=SampleStats(requested=n, matched=matched, scanned=matched, capped=False),
     )
 
 
@@ -394,9 +423,6 @@ def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> Sample
     `end_ms` bound that same clock. Sessions with more clicks win a tie.
     """
     spec = spec.normalised()
-    # Annotated: these are splatted into _sample_matching_rows, and an
-    # unannotated literal infers dict[str, object], which loses every parameter
-    # type at the call site.
     base: dict[str, Any] = {
         "min_duration_ms": spec.min_duration_ms,
         "url_contains": spec.url_contains,
@@ -437,43 +463,6 @@ def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> Sample
         return SampleResult(sessions=[], sample=_empty_stats(0))
 
     path_needle = "" if filter_spec.get("page") else spec.url_contains
-    page = _page_size(needed)
-    matched_rows: list[dict] = []
-    scanned = 0
-    offset = 0
-
-    def _full() -> bool:
-        if spec.any_n > 0:
-            return len(matched_rows) >= spec.any_n
-        bought = sum(1 for row in matched_rows if row.get("bought"))
-        rest = len(matched_rows) - bought
-        return bought >= spec.purchased_n and rest >= spec.all_n
-
-    while not _full() and scanned < cohort_spec.CANDIDATE_CAP:
-        batch = min(page, cohort_spec.CANDIDATE_CAP - scanned)
-        candidates = _sample_candidates(
-            conn,
-            project_id,
-            min_duration_ms=spec.min_duration_ms,
-            url_contains=path_needle,
-            limit=batch,
-            offset=offset,
-            start_ms=spec.start_ms,
-            end_ms=spec.end_ms,
-            order=spec.order,
-        )
-        if not candidates:
-            break
-        scanned += len(candidates)
-        offset += len(candidates)
-        for row in candidates:
-            if not row_matches_slice(row, filter_spec):
-                continue
-            matched_rows.append(row)
-            if _full():
-                break
-        if len(candidates) < batch:
-            break
 
     def _entry(row: dict) -> dict:
         return {
@@ -483,25 +472,57 @@ def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> Sample
         }
 
     if spec.any_n > 0:
-        sessions = [_entry(row) for row in matched_rows[: spec.any_n]]
-    else:
-        purchased: list[dict] = []
-        non_purchase: list[dict] = []
-        for row in matched_rows:
-            if row.get("bought"):
-                if len(purchased) < spec.purchased_n:
-                    purchased.append(_entry(row))
-            elif len(non_purchase) < spec.all_n:
-                non_purchase.append(_entry(row))
-            if len(purchased) >= spec.purchased_n and len(non_purchase) >= spec.all_n:
-                break
-        sessions = purchased + non_purchase
+        rows = _sample_rows(
+            conn,
+            project_id,
+            n=spec.any_n,
+            min_duration_ms=spec.min_duration_ms,
+            url_contains=path_needle,
+            slice_spec=filter_spec,
+            start_ms=spec.start_ms,
+            end_ms=spec.end_ms,
+            order=spec.order,
+        )
+        sessions = [_entry(row) for row in rows]
+        matched = len(sessions)
+        return SampleResult(
+            sessions=sessions,
+            sample=SampleStats(
+                requested=needed, matched=matched, scanned=matched, capped=False
+            ),
+        )
 
+    # purchased/all: two top-N queries with the same order ≡ interleaved
+    # bucket-fill over the merged stream, without scanning non-matches.
+    purchased_rows = _sample_rows(
+        conn,
+        project_id,
+        n=spec.purchased_n,
+        min_duration_ms=spec.min_duration_ms,
+        url_contains=path_needle,
+        slice_spec={**filter_spec, "outcome": ["purchased"]},
+        start_ms=spec.start_ms,
+        end_ms=spec.end_ms,
+        order=spec.order,
+    )
+    non_rows = _sample_rows(
+        conn,
+        project_id,
+        n=spec.all_n,
+        min_duration_ms=spec.min_duration_ms,
+        url_contains=path_needle,
+        slice_spec={**filter_spec, "outcome": ["checkout", "rest"]},
+        exclude_ids={row["session_id"] for row in purchased_rows},
+        start_ms=spec.start_ms,
+        end_ms=spec.end_ms,
+        order=spec.order,
+    )
+    sessions = [_entry(row) for row in purchased_rows] + [_entry(row) for row in non_rows]
     matched = len(sessions)
-    capped = matched < needed and scanned >= cohort_spec.CANDIDATE_CAP
+    scanned = len(purchased_rows) + len(non_rows)
     return SampleResult(
         sessions=sessions,
-        sample=SampleStats(requested=needed, matched=matched, scanned=scanned, capped=capped),
+        sample=SampleStats(requested=needed, matched=matched, scanned=scanned, capped=False),
     )
 
 

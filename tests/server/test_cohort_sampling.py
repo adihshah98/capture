@@ -31,6 +31,9 @@ class TestCohortSampling(unittest.TestCase):
         #  visitor_id, url, order_json, interactions_json, device, attribution)
         # Optionally a 13th clicks column. Order JSON becomes an orders row;
         # clicks come from the interactions JSON when not supplied explicitly.
+        # Class columns are derived the same way ingest does (capture.classify).
+        from capture import classify
+
         for row in rows:
             row = list(row)
             project_id = row[0]
@@ -43,8 +46,8 @@ class TestCohortSampling(unittest.TestCase):
             url = row[7]
             order_raw = row[8]
             interactions_raw = row[9]
-            device = row[10]
-            attribution = row[11]
+            device_raw = row[10]
+            attribution_raw = row[11]
             if len(row) >= 13:
                 clicks = int(row[12] or 0)
             else:
@@ -56,24 +59,24 @@ class TestCohortSampling(unittest.TestCase):
                         data = None
                     if isinstance(data, dict):
                         clicks = int(data.get("clicks") or 0)
-            conn.execute(
-                "INSERT INTO sessions (project_id, session_id, first_seen, last_seen,"
-                " chunk_count, bytes, visitor_id, url, device, attribution, clicks)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    project_id,
-                    session_id,
-                    first_seen,
-                    last_seen,
-                    chunk_count,
-                    nbytes,
-                    visitor_id,
-                    url,
-                    device,
-                    attribution,
-                    clicks,
-                ),
-            )
+
+            device = None
+            if device_raw:
+                try:
+                    device = json.loads(device_raw) if isinstance(device_raw, str) else device_raw
+                except (TypeError, ValueError):
+                    device = None
+            attribution = None
+            if attribution_raw:
+                try:
+                    attribution = (
+                        json.loads(attribution_raw)
+                        if isinstance(attribution_raw, str)
+                        else attribution_raw
+                    )
+                except (TypeError, ValueError):
+                    attribution = None
+
             checkout = purchased = None
             if order_raw:
                 try:
@@ -83,6 +86,45 @@ class TestCohortSampling(unittest.TestCase):
                 if isinstance(order, dict):
                     checkout = order.get("checkout_started_at")
                     purchased = order.get("purchased_at")
+            outcome = classify.outcome_class(
+                {"checkout_started_at": checkout, "purchased_at": purchased}
+                if checkout is not None or purchased is not None
+                else None
+            )
+            classes = classify.session_classes(
+                url=url, device=device if isinstance(device, dict) else None, attribution=attribution
+            )
+
+            conn.execute(
+                "INSERT INTO sessions (project_id, session_id, first_seen, last_seen,"
+                " chunk_count, bytes, visitor_id, url, device, attribution, clicks,"
+                " outcome, device_class, page, utm_source, utm_medium, utm_campaign,"
+                " utm_content, has_fbclid, is_meta)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+                " %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    project_id,
+                    session_id,
+                    first_seen,
+                    last_seen,
+                    chunk_count,
+                    nbytes,
+                    visitor_id,
+                    url,
+                    device_raw,
+                    attribution_raw,
+                    clicks,
+                    outcome,
+                    classes["device_class"],
+                    classes["page"],
+                    classes["utm_source"],
+                    classes["utm_medium"],
+                    classes["utm_campaign"],
+                    classes["utm_content"],
+                    classes["has_fbclid"],
+                    classes["is_meta"],
+                ),
+            )
             if checkout is not None or purchased is not None:
                 conn.execute(
                     "INSERT INTO orders (project_id, session_id,"
@@ -100,7 +142,16 @@ class TestCohortSampling(unittest.TestCase):
             CREATE TABLE sessions (
                 project_id TEXT, session_id TEXT, first_seen INTEGER, last_seen INTEGER,
                 chunk_count INTEGER, bytes INTEGER, visitor_id TEXT, url TEXT,
-                device TEXT, attribution TEXT, clicks INTEGER NOT NULL DEFAULT 0
+                device TEXT, attribution TEXT, clicks INTEGER NOT NULL DEFAULT 0,
+                outcome TEXT NOT NULL DEFAULT 'rest',
+                device_class TEXT,
+                page TEXT,
+                utm_source TEXT,
+                utm_medium TEXT,
+                utm_campaign TEXT,
+                utm_content TEXT,
+                has_fbclid INTEGER NOT NULL DEFAULT 0,
+                is_meta INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -551,13 +602,7 @@ class TestCohortSampling(unittest.TestCase):
         )
 
     def test_group_b_does_not_burn_its_window_on_a(self):
-        """A's members used to fill B's SQL LIMIT and get discarded in Python.
-
-        With a tight candidate cap equal to |A|, that left B empty even when
-        matching B rows sat just behind A in the same ordered index.
-        """
-        from capture.analyze import spec as cohort_spec
-
+        """A's members must not occupy B's LIMIT — exclude_ids is pushed into SQL."""
         analyze, conn = self._conn([])
         rows = []
         # Newest three: purchased (A). Older three: non-purchase (B).
@@ -596,19 +641,17 @@ class TestCohortSampling(unittest.TestCase):
                 )
             )
         self._insert(conn, rows)
-        with mock.patch.object(cohort_spec, "CANDIDATE_CAP", 3):
-            with mock.patch("capture.analyze.sampling._page_size", return_value=3):
-                result = analyze.sample_cohort(
-                    conn,
-                    "",
-                    CohortSpec(
-                        a_n=3,
-                        b_n=3,
-                        url_contains="",
-                        slice_spec={"outcome": ["purchased"]},
-                        slice_b={"outcome": ["checkout", "rest"]},
-                    ),
-                )
+        result = analyze.sample_cohort(
+            conn,
+            "",
+            CohortSpec(
+                a_n=3,
+                b_n=3,
+                url_contains="",
+                slice_spec={"outcome": ["purchased"]},
+                slice_b={"outcome": ["checkout", "rest"]},
+            ),
+        )
         by_arm = {
             "a": [s["session_id"] for s in result.sessions if s["filter"] == "a"],
             "b": [s["session_id"] for s in result.sessions if s["filter"] == "b"],
@@ -617,8 +660,7 @@ class TestCohortSampling(unittest.TestCase):
         self.assertEqual(len(by_arm["b"]), 3)
         self.assertEqual(result.sample.matched, 6)
         self.assertFalse(result.sample.capped)
-        # A and B each scanned three live candidates — not six for B with three
-        # discarded after the fact.
+        # Each arm is its own LIMIT 3 — B does not re-read A's purchased rows.
         self.assertEqual(result.sample.scanned, 6)
 
     def test_sample_time_window_and_earliest_order(self):
@@ -716,12 +758,9 @@ class TestCohortSampling(unittest.TestCase):
             {"requested": 5, "matched": 1, "scanned": 1, "capped": False},
         )
 
-    def test_sample_pages_past_a_thin_first_window(self):
-        """A rare slice past the first page used to return empty with no signal."""
-        from capture.analyze import spec as cohort_spec
-
+    def test_sample_sql_finds_a_rare_slice_without_scanning_misses(self):
+        """Slice predicates are columns: LIMIT 1 never walks past non-matches."""
         analyze, conn = self._conn([])
-        # Newest rows miss the slice; the match sits just past a tiny page.
         rows = []
         for i in range(12):
             rows.append(
@@ -757,26 +796,23 @@ class TestCohortSampling(unittest.TestCase):
             )
         )
         self._insert(conn, rows)
-        with mock.patch.object(cohort_spec, "CANDIDATE_CAP", 20):
-            with mock.patch("capture.analyze.sampling._page_size", return_value=5):
-                result = analyze.sample_cohort(
-                    conn,
-                    "",
-                    CohortSpec(
-                        any_n=1,
-                        url_contains="",
-                        slice_spec={"device": ["mobile"], "page": "/pages/ashwamag-01"},
-                    ),
-                )
+        result = analyze.sample_cohort(
+            conn,
+            "",
+            CohortSpec(
+                any_n=1,
+                url_contains="",
+                slice_spec={"device": ["mobile"], "page": "/pages/ashwamag-01"},
+            ),
+        )
         self.assertEqual([s["session_id"] for s in result.sessions], ["hit" + "x" * 29])
-        self.assertEqual(result.sample.requested, 1)
-        self.assertEqual(result.sample.matched, 1)
-        self.assertGreater(result.sample.scanned, 5)
-        self.assertFalse(result.sample.capped)
+        self.assertEqual(
+            result.sample.as_dict(),
+            {"requested": 1, "matched": 1, "scanned": 1, "capped": False},
+        )
 
-    def test_sample_marks_capped_when_the_hard_scan_limit_bites(self):
-        from capture.analyze import spec as cohort_spec
-
+    def test_sample_empty_slice_is_a_pool_shortfall_not_a_scan_cap(self):
+        """No matching rows → matched=0; SQL does not invent a scan-cap shortfall."""
         analyze, conn = self._conn([])
         rows = [
             (
@@ -796,21 +832,19 @@ class TestCohortSampling(unittest.TestCase):
             for i in range(8)
         ]
         self._insert(conn, rows)
-        with mock.patch.object(cohort_spec, "CANDIDATE_CAP", 3):
-            with mock.patch("capture.analyze.sampling._page_size", return_value=3):
-                result = analyze.sample_cohort(
-                    conn,
-                    "",
-                    CohortSpec(
-                        any_n=2,
-                        url_contains="",
-                        slice_spec={"device": ["mobile"]},
-                    ),
-                )
+        result = analyze.sample_cohort(
+            conn,
+            "",
+            CohortSpec(
+                any_n=2,
+                url_contains="",
+                slice_spec={"device": ["mobile"]},
+            ),
+        )
         self.assertEqual(result.sessions, [])
         self.assertEqual(
             result.sample.as_dict(),
-            {"requested": 2, "matched": 0, "scanned": 3, "capped": True},
+            {"requested": 2, "matched": 0, "scanned": 0, "capped": False},
         )
 
     def test_build_cohort_persists_sample_stats(self):

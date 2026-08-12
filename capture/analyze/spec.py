@@ -2,7 +2,7 @@
 
 These constants were threaded through the sampler as bare keyword arguments --
 `build_cohort` took fifteen of them, `sample_cohort_rows` fourteen, and the same
-twelve values were re-typed at every layer down to `_sample_candidates`. The web
+twelve values were re-typed at every layer down to the sampler. The web
 layer declared them a third time as FastAPI `Query()` objects. Adding one
 sampling dimension meant touching seven signatures.
 

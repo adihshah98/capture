@@ -1,126 +1,50 @@
 """The slice language: the {outcome, device, page, utm_*} filter over sessions.
 
 One vocabulary shared by three callers that must agree exactly -- the cohort
-sampler picks rows with it, the cut cache keys on its normal form, and the UI
-labels chips from it. When they disagree the symptom is silent: a cut whose
-label says one thing and whose evidence is another.
+sampler picks rows with it (via SQL on columns materialised at ingest), the cut
+cache keys on its normal form, and the UI labels chips from it. When they
+disagree the symptom is silent: a cut whose label says one thing and whose
+evidence is another.
 
 So normalisation is the contract, not a convenience. `normalize_slice` maps
 every accepted spelling onto one canonical form, which is what makes
 `cut_key` stable across value order and letter case, and what lets
-`row_matches_slice` be a plain predicate over an already-canonical spec.
+`row_matches_slice` / `_slice_where` be plain predicates over an
+already-canonical spec.
 
-Pure functions over dicts: no I/O, no database, no module state. That is what
-makes the sampler's predicates testable without a pool and, eventually,
-translatable into SQL (see the sampling-shortfall note in the refactor doc).
+Classifiers live in `capture.classify` so ingest can write the same labels
+without importing the analyze package. This module re-exports them and owns
+the match/normalize/label surface.
 """
 
-import re
-import urllib.parse
 from typing import Any
 
-META_SOURCES = frozenset({"facebook", "meta", "fb", "instagram", "ig"})
+from capture.classify import (
+    DEVICE_VALUES,
+    META_SOURCES,
+    MOBILE_MAX_WIDTH,
+    OUTCOME_VALUES,
+    device_class,
+    is_meta_attribution,
+    outcome_class,
+    page_path,
+)
 
-# Same threshold the session detail panel uses, so one session is never called
-# mobile in one place and desktop in another.
-MOBILE_MAX_WIDTH = 768
-DEVICE_VALUES = ("mobile", "desktop")
-
-# purchased ⊃ checkout: a purchase implies checkout was reached, so "checkout"
-# here means reached checkout and did NOT purchase — the three are disjoint.
-OUTCOME_VALUES = ("purchased", "checkout", "rest")
-
-
-def device_class(device: dict | None) -> str | None:
-    """mobile/desktop from the indexed viewport, or None when unknown."""
-    if not isinstance(device, dict):
-        return None
-    width = device.get("width")
-    if not isinstance(width, int) or width <= 0:
-        return None
-    return "mobile" if width < MOBILE_MAX_WIDTH else "desktop"
-
-
-def outcome_class(order: dict | None) -> str:
-    """purchased | checkout (reached, did not buy) | rest."""
-    if not isinstance(order, dict):
-        return "rest"
-    if order.get("purchased_at"):
-        return "purchased"
-    if order.get("checkout_started_at"):
-        return "checkout"
-    return "rest"
-
-
-def is_meta_attribution(attribution: dict | None) -> bool:
-    attrs = attribution if isinstance(attribution, dict) else {}
-    if attrs.get("fbclid"):
-        return True
-    source = str(attrs.get("utm_source") or "").strip().lower()
-    return source in META_SOURCES
-
-
-# A hostname we would accept on an entry URL that arrived without a scheme.
-# Deliberately strict: urlparse will read a host out of almost anything, and
-# whatever is not a host is not a landing page.
-_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?::\d{1,5})?$")
-
-
-def _unquote_segments(path: str) -> str:
-    """Percent-decode each segment, keeping encoded separators encoded.
-
-    Decoding the whole path turns %2F into a separator, so `/a%2Fb` — one
-    segment containing a slash — would read as the two-segment `/a/b` and merge
-    two distinct pages into one facet. Decoding per segment is not enough on
-    its own either, since the decoded text can reintroduce the separator, so a
-    slash produced by decoding is put back as %2F. The path is only ever used
-    as an identity key (facet value, filter match, display label), so keeping
-    it unambiguous matters more than showing the prettiest spelling.
-    """
-    return "/".join(urllib.parse.unquote(part).replace("/", "%2F") for part in path.split("/"))
-
-
-def page_path(url: str | None) -> str | None:
-    """Landing-page path from an entry URL, or None when there is not one.
-
-    Pathname only: no query or hash. Trailing slashes are stripped (except `/`)
-    so `/p` and `/p/` share a facet. Query strings stay on attribution — putting
-    them here would explode the picker with one option per UTM combo.
-
-    None means unknown, and every consumer already handles it: row_matches_slice
-    refuses it against a page constraint, cross-tabs leave it out, and the facet
-    picker skips it. So anything unreadable as an http(s) page — junk, "null",
-    about:blank, a data: URI — is None rather than a guess. Guessing lands it on
-    `/`, where it is indistinguishable from a real homepage visit and gets
-    offered to the user as a filter, counted in a measured split, and stated to
-    the model as fact.
-    """
-    raw = str(url or "").strip()
-    if not raw:
-        return None
-    try:
-        if raw.startswith("/") and "://" not in raw:
-            # Already a path, so there is no host to check.
-            path = _unquote_segments(raw.split("?", 1)[0].split("#", 1)[0])
-        else:
-            bare = "://" not in raw
-            parsed = urllib.parse.urlparse(f"https://{raw}" if bare else raw)
-            if parsed.scheme not in ("http", "https"):
-                return None
-            if not parsed.hostname or not _HOSTNAME_RE.match(parsed.netloc):
-                return None
-            if bare and "." not in parsed.hostname and not parsed.path:
-                # A scheme-less single word with no path ("null", "undefined").
-                # A real bare host reaching here carries either a dot or a
-                # path; "localhost" alone is not an entry URL we can place.
-                return None
-            # A real host with an empty path is the homepage.
-            path = _unquote_segments(parsed.path) or "/"
-    except Exception:
-        return None
-    if path != "/" and path.endswith("/"):
-        path = path.rstrip("/")
-    return path or None
+__all__ = [
+    "DEVICE_VALUES",
+    "META_SOURCES",
+    "MOBILE_MAX_WIDTH",
+    "OUTCOME_LABELS",
+    "OUTCOME_VALUES",
+    "device_class",
+    "is_meta_attribution",
+    "normalize_slice",
+    "outcome_class",
+    "page_path",
+    "row_matches_slice",
+    "slice_is_empty",
+    "slice_label",
+]
 
 
 def normalize_slice(spec: dict | None) -> dict:
@@ -193,6 +117,11 @@ def slice_is_empty(spec: dict) -> bool:
 
 
 def row_matches_slice(row: dict, spec: dict) -> bool:
+    """Python predicate over already-classified row facts.
+
+    Sampling filters in SQL on the same columns; this stays for cuts, tests,
+    and any caller holding in-memory rows.
+    """
     if not spec:
         return True
     want_outcome = spec.get("outcome")

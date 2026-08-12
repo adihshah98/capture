@@ -3,12 +3,15 @@
 Replaces the SQLite index.db. Every function opens a connection bound to one
 project, so a missing WHERE clause returns nothing rather than another
 customer's recordings.
+
+Class columns (`outcome`, `device_class`, `page`, utm_*, `is_meta`, …) are
+written here via `capture.classify` so sampling can filter in SQL without
+re-deriving labels.
 """
 
 import json
 
-from . import db
-
+from . import classify, db
 SESSION_COLUMNS = """
     s.session_id, s.first_seen, s.last_seen, s.last_active, s.duration, s.windows,
     s.chunk_count, s.bytes, s.clicks, s.rage, s.visitor_id, s.url, s.device, s.attribution,
@@ -138,14 +141,23 @@ def record_chunk(
     state,
 ) -> None:
     """One ingested batch. Counters accumulate in SQL, so concurrent batches for
-    the same session cannot lose an increment the way a read-modify-write file could."""
+    the same session cannot lose an increment the way a read-modify-write file could.
+
+    Class columns follow the same first-write-wins coalesce as url/device/
+    attribution — the entry batch freezes how the session is sliced forever.
+    """
+    url = meta.get("url")
+    classes = classify.session_classes(url=url, device=device, attribution=attribution)
     with db.connection(project_id) as conn:
         conn.execute(
             """
             INSERT INTO sessions
                 (project_id, session_id, first_seen, last_seen, last_active,
-                 windows, chunk_count, bytes, clicks, rage, visitor_id, url, device, attribution)
-            VALUES (%s, %s, %s, %s, %s, 1, 1, %s, %s, %s, %s, %s, %s, %s)
+                 windows, chunk_count, bytes, clicks, rage, visitor_id, url, device, attribution,
+                 device_class, page, utm_source, utm_medium, utm_campaign, utm_content,
+                 has_fbclid, is_meta)
+            VALUES (%s, %s, %s, %s, %s, 1, 1, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (project_id, session_id) DO UPDATE SET
                 first_seen  = least(sessions.first_seen, excluded.first_seen),
                 last_seen   = greatest(sessions.last_seen, excluded.last_seen),
@@ -157,7 +169,23 @@ def record_chunk(
                 visitor_id  = coalesce(sessions.visitor_id, excluded.visitor_id),
                 url         = coalesce(sessions.url, excluded.url),
                 device      = coalesce(sessions.device, excluded.device),
-                attribution = coalesce(sessions.attribution, excluded.attribution)
+                attribution = coalesce(sessions.attribution, excluded.attribution),
+                device_class = coalesce(sessions.device_class, excluded.device_class),
+                page         = coalesce(sessions.page, excluded.page),
+                utm_source   = coalesce(sessions.utm_source, excluded.utm_source),
+                utm_medium   = coalesce(sessions.utm_medium, excluded.utm_medium),
+                utm_campaign = coalesce(sessions.utm_campaign, excluded.utm_campaign),
+                utm_content  = coalesce(sessions.utm_content, excluded.utm_content),
+                -- Booleans cannot coalesce like nullable text: freeze with the
+                -- first attribution write (NULL attribution leaves the door open).
+                has_fbclid   = CASE
+                    WHEN sessions.attribution IS NOT NULL THEN sessions.has_fbclid
+                    ELSE excluded.has_fbclid
+                END,
+                is_meta      = CASE
+                    WHEN sessions.attribution IS NOT NULL THEN sessions.is_meta
+                    ELSE excluded.is_meta
+                END
             """,
             (
                 project_id,
@@ -169,9 +197,17 @@ def record_chunk(
                 clicks,
                 rage,
                 meta.get("visitor_id"),
-                meta.get("url"),
+                url,
                 json.dumps(device) if device else None,
                 json.dumps(attribution) if attribution else None,
+                classes["device_class"],
+                classes["page"],
+                classes["utm_source"],
+                classes["utm_medium"],
+                classes["utm_campaign"],
+                classes["utm_content"],
+                classes["has_fbclid"],
+                classes["is_meta"],
             ),
         )
         conn.execute(
@@ -215,7 +251,11 @@ def record_chunk(
 
 
 def record_order(project_id, session_id, event: str, payload: dict, now: int) -> dict | None:
-    """Returns the order as stored, or None when the session is unknown."""
+    """Returns the order as stored, or None when the session is unknown.
+
+    Also refreshes `sessions.outcome` from the stored timestamps so sampling
+    can filter purchases without joining orders at query time.
+    """
     with db.connection(project_id) as conn:
         known = conn.execute(
             "SELECT 1 FROM sessions WHERE session_id = %s", (session_id,)
@@ -260,7 +300,12 @@ def record_order(project_id, session_id, event: str, payload: dict, now: int) ->
             " FROM orders WHERE session_id = %s",
             (session_id,),
         ).fetchone()
-    return _order(row) if row else None
+        order = _order(row) if row else None
+        conn.execute(
+            "UPDATE sessions SET outcome = %s WHERE session_id = %s",
+            (classify.outcome_class(order), session_id),
+        )
+    return order
 
 
 def get(project_id, session_id: str) -> dict | None:

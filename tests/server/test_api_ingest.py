@@ -282,6 +282,46 @@ class TestAttribution(ServerCase):
                 "fbclid": True,
             },
         )
+        # Class columns are frozen at ingest for SQL sampling.
+        from capture import db
+
+        with db.connection(self.project_id) as conn:
+            row = conn.execute(
+                "SELECT page, device_class, utm_source, is_meta, has_fbclid, outcome"
+                " FROM sessions WHERE session_id = %s",
+                (sid,),
+            ).fetchone()
+        self.assertEqual(
+            row,
+            ("/landing", None, "facebook", True, True, "rest"),
+        )
+
+    def test_device_and_page_classes_are_written_at_ingest(self):
+        sid = "cls" + "x" * 29
+        self.assertEqual(
+            self.ingest(
+                sid,
+                {
+                    "events": [{"type": 4, "data": {"width": 390, "height": 844}}],
+                    "url": "https://brand.example/products/serum/",
+                },
+            ),
+            200,
+        )
+        from capture import db
+
+        with db.connection(self.project_id) as conn:
+            row = conn.execute(
+                "SELECT page, device_class, outcome FROM sessions WHERE session_id = %s",
+                (sid,),
+            ).fetchone()
+        self.assertEqual(row, ("/products/serum", "mobile", "rest"))
+        self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
+        with db.connection(self.project_id) as conn:
+            outcome = conn.execute(
+                "SELECT outcome FROM sessions WHERE session_id = %s", (sid,)
+            ).fetchone()[0]
+        self.assertEqual(outcome, "purchased")
 
     def test_plain_url_has_no_attribution(self):
         sid = "plain" + "x" * 27
