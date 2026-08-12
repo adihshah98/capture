@@ -391,6 +391,80 @@ class TestCohortSampling(unittest.TestCase):
             [("buy" + "x" * 29, "a"), ("rest" + "x" * 28, "b")],
         )
 
+    def test_group_b_does_not_burn_its_window_on_a(self):
+        """A's members used to fill B's SQL LIMIT and get discarded in Python.
+
+        With a tight candidate cap equal to |A|, that left B empty even when
+        matching B rows sat just behind A in the same ordered index.
+        """
+        from capture.analyze import spec as cohort_spec
+
+        analyze, conn = self._conn([])
+        rows = []
+        # Newest three: purchased (A). Older three: non-purchase (B).
+        for i in range(3):
+            rows.append(
+                (
+                    "",
+                    f"buy{i}" + "x" * 28,
+                    0,
+                    90_000 - i,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    json.dumps({"purchased_at": 1}),
+                    None,
+                    None,
+                    None,
+                )
+            )
+        for i in range(3):
+            rows.append(
+                (
+                    "",
+                    f"rest{i}" + "x" * 27,
+                    0,
+                    50_000 - i,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            )
+        conn.executemany(
+            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        with mock.patch.object(cohort_spec, "CANDIDATE_CAP", 3):
+            with mock.patch("capture.analyze.sampling._page_size", return_value=3):
+                result = analyze.sample_cohort(
+                    conn,
+                    "",
+                    CohortSpec(
+                        a_n=3,
+                        b_n=3,
+                        url_contains="",
+                        slice_spec={"outcome": ["purchased"]},
+                        slice_b={"outcome": ["checkout", "rest"]},
+                    ),
+                )
+        by_arm = {
+            "a": [s["session_id"] for s in result.sessions if s["filter"] == "a"],
+            "b": [s["session_id"] for s in result.sessions if s["filter"] == "b"],
+        }
+        self.assertEqual(len(by_arm["a"]), 3)
+        self.assertEqual(len(by_arm["b"]), 3)
+        self.assertEqual(result.sample.matched, 6)
+        self.assertFalse(result.sample.capped)
+        # A and B each scanned three live candidates — not six for B with three
+        # discarded after the fact.
+        self.assertEqual(result.sample.scanned, 6)
+
     def test_sample_time_window_and_earliest_order(self):
         analyze, conn = self._conn(
             [

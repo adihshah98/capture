@@ -25,7 +25,7 @@ where it applies.
 | 3 | 🔴 | Attribution parsers diverged | old bug 8, understated |
 | 4 | 🟠 | ~~Sampling shortfall is silent~~ — **fixed** | old bug 3 |
 | 5 | 🟠 | `_cohort_order_sql` depends on a compat shim | **new** |
-| 6 | 🟠 | Group B is structurally short-sampled | **new** |
+| 6 | 🟠 | ~~Group B is structurally short-sampled~~ — **fixed** | **new** |
 | 7 | 🟠 | `pool_facets` unbounded `fetchall` | old bug 4 |
 | 8 | 🟡 | `COHORT_URL_CONTAINS` hardcodes one customer | old bug 9 |
 | 9 | 🟡 | `_batch_jsonl_path` collides | old bug 2 |
@@ -176,20 +176,21 @@ comparison — defeating any index.
 Deleting `0002_compat.sql` without rewriting this ORDER BY takes down cohort sampling
 entirely. It is invisible from the Python side.
 
-## 6. 🟠 Group B is structurally short-sampled
+## 6. 🟠 ~~Group B is structurally short-sampled~~ — **fixed**
 
-[`sample_cohort_rows:1565`](../capture/analyze/__init__.py#L1565) samples A first with
+[`sample_cohort`](../capture/analyze/sampling.py) samples A first with
 no exclusions, then re-runs the **same deterministically ordered** query for B with
-`exclude_ids = A`. B's window therefore re-reads exactly the rows A consumed and
-discards them at [:1520](../capture/analyze/__init__.py#L1520).
+`exclude_ids = A`. B's window used to re-read exactly the rows A consumed and
+discard them in Python after `LIMIT`.
 
-B's effective window is smaller than A's by `|A|`. The `n + len(exclude) + 200` term
-partially compensates but is capped by `COHORT_CANDIDATE_CAP` and does not apply when
-`n * 20` dominates. So in an A/B cohort the B arm comes up short first — a sampling
-bias that reads as a finding about the population.
+B's effective window was smaller than A's by `|A|`. The `n + len(exclude) + 200` term
+partially compensated but was capped by `COHORT_CANDIDATE_CAP` and did not apply when
+`n * 20` dominated. So in an A/B cohort the B arm came up short first — a sampling
+bias that read as a finding about the population.
 
-**Fix:** same surface as #4; either push the exclusion into SQL (`NOT IN`) or offset
-B's window by `|A|`.
+**Fix (landed):** push `exclude_ids` into SQL as `session_id NOT IN (...)`, so B's
+`LIMIT`/`OFFSET` window never spends slots on A's members. B's scan budget matches
+A's.
 
 ## 7. 🟠 `pool_facets` is an unbounded `fetchall`
 

@@ -186,11 +186,16 @@ def _cohort_where(
     url_contains: str,
     start_ms: int | None = None,
     end_ms: int | None = None,
+    exclude_ids: set | None = None,
 ) -> tuple[str, list]:
     """Shared WHERE clause for cohort sampling.
 
     Time bounds use `last_seen` so a window means “sessions that were active
     (or finished) in this period,” matching the recency sort key.
+
+    `exclude_ids` is pushed into SQL (`NOT IN`) so group B does not re-read the
+    rows A already took from the same ordered window — filtering them in Python
+    after LIMIT made B's effective window smaller by `|A|`.
     """
     where = [
         "pool = ?",
@@ -208,6 +213,11 @@ def _cohort_where(
     if end_ms is not None:
         where.append("last_seen <= ?")
         params.append(int(end_ms))
+    excluded = [sid for sid in (exclude_ids or set()) if sid]
+    if excluded:
+        placeholders = ", ".join("?" for _ in excluded)
+        where.append(f"session_id NOT IN ({placeholders})")
+        params.extend(excluded)
     return " AND ".join(where), params
 
 
@@ -218,11 +228,11 @@ def _cohort_order_sql(order: str) -> str:
     return f"last_seen DESC, {activity} DESC, session_id DESC"
 
 
-def _page_size(n: int, exclude_count: int = 0) -> int:
+def _page_size(n: int) -> int:
     """How many index rows to pull per scan page before the hard cap."""
     return min(
         cohort_spec.CANDIDATE_CAP,
-        max(n * 20, n + exclude_count + 200, 500),
+        max(n * 20, n + 200, 500),
     )
 
 
@@ -237,6 +247,7 @@ def _sample_candidates(
     start_ms: int | None = None,
     end_ms: int | None = None,
     order: str = cohort_spec.ORDER_LATEST,
+    exclude_ids: set | None = None,
 ) -> list:
     """Index rows (with slice facts) that clear the base duration/path/time gates."""
     where_sql, base_params = _cohort_where(
@@ -245,6 +256,7 @@ def _sample_candidates(
         url_contains=url_contains,
         start_ms=start_ms,
         end_ms=end_ms,
+        exclude_ids=exclude_ids,
     )
     order_sql = _cohort_order_sql(
         order if order in cohort_spec.ORDERS else cohort_spec.ORDER_LATEST
@@ -304,7 +316,7 @@ def _sample_matching_rows(
     spec = normalize_slice(slice_spec)
     exclude = exclude_ids or set()
     path_needle = "" if spec.get("page") else url_contains
-    page = _page_size(n, len(exclude))
+    page = _page_size(n)
     out: list = []
     scanned = 0
     offset = 0
@@ -320,6 +332,9 @@ def _sample_matching_rows(
             start_ms=start_ms,
             end_ms=end_ms,
             order=order,
+            # Drop A's members in SQL so B's LIMIT/OFFSET window is not spent
+            # re-reading rows it must discard (bug #6).
+            exclude_ids=exclude,
         )
         if not candidates:
             break
@@ -327,8 +342,6 @@ def _sample_matching_rows(
         offset += len(candidates)
         for row in candidates:
             sid = row["session_id"]
-            if sid in exclude:
-                continue
             if not row_matches_slice(row, spec):
                 continue
             out.append({"session_id": sid, "filter": tag, "status": "queued"})
