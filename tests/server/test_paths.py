@@ -11,14 +11,29 @@ Every other test monkeypatches DATA_DIR, which is exactly why none of them saw i
 """
 
 import unittest
+from pathlib import Path
 
 from capture import paths
 
 
 class TestDataRoot(unittest.TestCase):
     def test_the_default_root_is_the_repo_not_the_package(self):
-        self.assertEqual(paths.BASE_DIR.name, "capture")
-        self.assertTrue((paths.BASE_DIR / "capture" / "__init__.py").is_file())
+        """What matters is that BASE_DIR is the directory *containing* the
+        package, not the package itself — that one level is the bug this whole
+        module exists to prevent.
+
+        Deliberately not asserting the directory is named "capture": a clone into
+        any other name, or a git worktree, would fail on something that is not
+        the property under test.
+        """
+        import capture
+
+        package_dir = Path(capture.__file__).resolve().parent
+        # The exact off-by-one that broke storage.py: BASE_DIR must be the
+        # package's parent, never the package itself.
+        self.assertEqual(package_dir.parent, paths.BASE_DIR)
+        self.assertNotEqual(package_dir, paths.BASE_DIR)
+        self.assertTrue((paths.BASE_DIR / "pyproject.toml").is_file())
         self.assertEqual(paths.DATA_ROOT.parent, paths.BASE_DIR)
 
     def test_no_module_keeps_a_data_root_that_disagrees(self):
