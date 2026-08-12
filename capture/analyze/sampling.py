@@ -20,13 +20,18 @@ method these functions call.
 **Selective predicates run last.** The SQL applies the cheap filters -- pool,
 duration, URL substring, time bounds -- then `ORDER BY` and `LIMIT`; the slice
 itself (outcome, device, page, utm_*) is evaluated in Python afterwards, by
-`row_matches_slice`. A rare slice can therefore fall outside the candidate
-window and return fewer sessions than asked for, with no signal. That shortfall
-is a known defect, tracked in docs/analyze-bug-review.md, and this module is
-where it will be fixed.
+`row_matches_slice`. A rare slice can therefore need several pages of
+candidates before it fills. Sampling paginates up to `CANDIDATE_CAP` and
+records `{requested, matched, scanned, capped}` so a short cohort is never
+presented as if the request was met. `capped` is true only when the scan hit
+the hard cap while still short -- that is the case that scanning harder (or
+pushing the slice into SQL) could still fix.
 """
 
+from __future__ import annotations
+
 import json
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from . import spec as cohort_spec
@@ -41,6 +46,33 @@ from .slices import (
     row_matches_slice,
 )
 from .spec import CohortSpec, Connection
+
+
+@dataclass(frozen=True)
+class SampleStats:
+    """How a sample request resolved against the candidate window.
+
+    `matched < requested` is a shortfall. `capped` distinguishes "the pool
+    genuinely holds this many" (`capped=False`, we exhausted the index under
+    the base gates) from "we stopped at CANDIDATE_CAP" (`capped=True`) -- only
+    the second is fixable by scanning harder.
+    """
+
+    requested: int
+    matched: int
+    scanned: int
+    capped: bool
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SampleResult:
+    """Sessions chosen for a cohort, plus how the request resolved."""
+
+    sessions: list
+    sample: SampleStats
 
 
 def _parse_index_json(raw) -> dict | None:
@@ -186,6 +218,14 @@ def _cohort_order_sql(order: str) -> str:
     return f"last_seen DESC, {activity} DESC, session_id DESC"
 
 
+def _page_size(n: int, exclude_count: int = 0) -> int:
+    """How many index rows to pull per scan page before the hard cap."""
+    return min(
+        cohort_spec.CANDIDATE_CAP,
+        max(n * 20, n + exclude_count + 200, 500),
+    )
+
+
 def _sample_candidates(
     conn: Connection,
     pool: str,
@@ -193,6 +233,7 @@ def _sample_candidates(
     min_duration_ms: int,
     url_contains: str,
     limit: int,
+    offset: int = 0,
     start_ms: int | None = None,
     end_ms: int | None = None,
     order: str = cohort_spec.ORDER_LATEST,
@@ -215,8 +256,9 @@ def _sample_candidates(
         WHERE {where_sql}
         ORDER BY {order_sql}
         LIMIT ?
+        OFFSET ?
         """,
-        (*base_params, max(0, int(limit))),
+        (*base_params, max(0, int(limit)), max(0, int(offset))),
     ).fetchall()
     out = []
     for sid, url, order_raw, device, attr in rows:
@@ -224,6 +266,18 @@ def _sample_candidates(
         fact["session_id"] = sid
         out.append(fact)
     return out
+
+
+def _empty_stats(requested: int = 0) -> SampleStats:
+    return SampleStats(requested=requested, matched=0, scanned=0, capped=False)
+
+
+def _combine_stats(*parts: SampleStats) -> SampleStats:
+    requested = sum(p.requested for p in parts)
+    matched = sum(p.matched for p in parts)
+    scanned = sum(p.scanned for p in parts)
+    capped = any(p.capped for p in parts)
+    return SampleStats(requested=requested, matched=matched, scanned=scanned, capped=capped)
 
 
 def _sample_matching_rows(
@@ -239,42 +293,59 @@ def _sample_matching_rows(
     start_ms: int | None = None,
     end_ms: int | None = None,
     order: str = cohort_spec.ORDER_LATEST,
-) -> list:
-    """Sessions matching a cut-style slice, tagged for the sample arm."""
+) -> SampleResult:
+    """Sessions matching a cut-style slice, tagged for the sample arm.
+
+    Pages through the ordered index until `n` matches, the pool under the base
+    gates is exhausted, or `CANDIDATE_CAP` rows have been scanned.
+    """
     if n <= 0:
-        return []
+        return SampleResult(sessions=[], sample=_empty_stats(0))
     spec = normalize_slice(slice_spec)
     exclude = exclude_ids or set()
-    candidate_limit = min(
-        cohort_spec.CANDIDATE_CAP,
-        max(n * 20, n + len(exclude) + 200, 500),
-    )
     path_needle = "" if spec.get("page") else url_contains
-    candidates = _sample_candidates(
-        conn,
-        pool,
-        min_duration_ms=min_duration_ms,
-        url_contains=path_needle,
-        limit=candidate_limit,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        order=order,
-    )
-    out = []
-    for row in candidates:
-        sid = row["session_id"]
-        if sid in exclude:
-            continue
-        if not row_matches_slice(row, spec):
-            continue
-        out.append({"session_id": sid, "filter": tag, "status": "queued"})
-        if len(out) >= n:
+    page = _page_size(n, len(exclude))
+    out: list = []
+    scanned = 0
+    offset = 0
+    while len(out) < n and scanned < cohort_spec.CANDIDATE_CAP:
+        batch = min(page, cohort_spec.CANDIDATE_CAP - scanned)
+        candidates = _sample_candidates(
+            conn,
+            pool,
+            min_duration_ms=min_duration_ms,
+            url_contains=path_needle,
+            limit=batch,
+            offset=offset,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            order=order,
+        )
+        if not candidates:
             break
-    return out
+        scanned += len(candidates)
+        offset += len(candidates)
+        for row in candidates:
+            sid = row["session_id"]
+            if sid in exclude:
+                continue
+            if not row_matches_slice(row, spec):
+                continue
+            out.append({"session_id": sid, "filter": tag, "status": "queued"})
+            if len(out) >= n:
+                break
+        if len(candidates) < batch:
+            break
+    matched = len(out)
+    capped = matched < n and scanned >= cohort_spec.CANDIDATE_CAP
+    return SampleResult(
+        sessions=out,
+        sample=SampleStats(requested=n, matched=matched, scanned=scanned, capped=capped),
+    )
 
 
-def sample_cohort_rows(conn: Connection, pool: str, spec: CohortSpec) -> list:
-    """Sessions matching a selection rule, in the mode the spec asks for.
+def sample_cohort(conn: Connection, pool: str, spec: CohortSpec) -> SampleResult:
+    """Sessions matching a selection rule, plus how the request resolved.
 
     `spec.order` is latest (default) or earliest by `last_seen`; `start_ms` /
     `end_ms` bound that same clock. Sessions with more clicks win a tie.
@@ -292,23 +363,23 @@ def sample_cohort_rows(conn: Connection, pool: str, spec: CohortSpec) -> list:
     }
 
     if spec.uses_groups:
-        sessions = _sample_matching_rows(
-            conn, pool, spec.a_n, slice_spec=spec.slice_spec, tag="a", **base
-        )
+        a = _sample_matching_rows(conn, pool, spec.a_n, slice_spec=spec.slice_spec, tag="a", **base)
         if spec.b_n > 0:
-            sessions.extend(
-                _sample_matching_rows(
-                    conn,
-                    pool,
-                    spec.b_n,
-                    # An unset B slice means "same filter as A", not "no filter".
-                    slice_spec=spec.slice_b or spec.slice_spec,
-                    exclude_ids={s["session_id"] for s in sessions},
-                    tag="b",
-                    **base,
-                )
+            b = _sample_matching_rows(
+                conn,
+                pool,
+                spec.b_n,
+                # An unset B slice means "same filter as A", not "no filter".
+                slice_spec=spec.slice_b or spec.slice_spec,
+                exclude_ids={s["session_id"] for s in a.sessions},
+                tag="b",
+                **base,
             )
-        return sessions
+            return SampleResult(
+                sessions=a.sessions + b.sessions,
+                sample=_combine_stats(a.sample, b.sample),
+            )
+        return a
 
     filter_spec = dict(normalize_slice(spec.slice_spec))
     if spec.any_n <= 0:
@@ -317,22 +388,47 @@ def sample_cohort_rows(conn: Connection, pool: str, spec: CohortSpec) -> list:
         filter_spec.pop("outcome", None)
 
     needed = spec.total
-    candidate_limit = min(
-        cohort_spec.CANDIDATE_CAP,
-        max(needed * 20, needed + 200, 500),
-    )
-    candidates = _sample_candidates(
-        conn,
-        pool,
-        min_duration_ms=spec.min_duration_ms,
-        # An explicit page filter supersedes the URL substring.
-        url_contains="" if filter_spec.get("page") else spec.url_contains,
-        limit=candidate_limit,
-        start_ms=spec.start_ms,
-        end_ms=spec.end_ms,
-        order=spec.order,
-    )
-    matched = [row for row in candidates if row_matches_slice(row, filter_spec)]
+    if needed <= 0:
+        return SampleResult(sessions=[], sample=_empty_stats(0))
+
+    path_needle = "" if filter_spec.get("page") else spec.url_contains
+    page = _page_size(needed)
+    matched_rows: list[dict] = []
+    scanned = 0
+    offset = 0
+
+    def _full() -> bool:
+        if spec.any_n > 0:
+            return len(matched_rows) >= spec.any_n
+        bought = sum(1 for row in matched_rows if row.get("bought"))
+        rest = len(matched_rows) - bought
+        return bought >= spec.purchased_n and rest >= spec.all_n
+
+    while not _full() and scanned < cohort_spec.CANDIDATE_CAP:
+        batch = min(page, cohort_spec.CANDIDATE_CAP - scanned)
+        candidates = _sample_candidates(
+            conn,
+            pool,
+            min_duration_ms=spec.min_duration_ms,
+            url_contains=path_needle,
+            limit=batch,
+            offset=offset,
+            start_ms=spec.start_ms,
+            end_ms=spec.end_ms,
+            order=spec.order,
+        )
+        if not candidates:
+            break
+        scanned += len(candidates)
+        offset += len(candidates)
+        for row in candidates:
+            if not row_matches_slice(row, filter_spec):
+                continue
+            matched_rows.append(row)
+            if _full():
+                break
+        if len(candidates) < batch:
+            break
 
     def _entry(row: dict) -> dict:
         return {
@@ -342,16 +438,33 @@ def sample_cohort_rows(conn: Connection, pool: str, spec: CohortSpec) -> list:
         }
 
     if spec.any_n > 0:
-        return [_entry(row) for row in matched[: spec.any_n]]
+        sessions = [_entry(row) for row in matched_rows[: spec.any_n]]
+    else:
+        purchased: list[dict] = []
+        non_purchase: list[dict] = []
+        for row in matched_rows:
+            if row.get("bought"):
+                if len(purchased) < spec.purchased_n:
+                    purchased.append(_entry(row))
+            elif len(non_purchase) < spec.all_n:
+                non_purchase.append(_entry(row))
+            if len(purchased) >= spec.purchased_n and len(non_purchase) >= spec.all_n:
+                break
+        sessions = purchased + non_purchase
 
-    purchased: list[dict] = []
-    non_purchase: list[dict] = []
-    for row in matched:
-        if row.get("bought"):
-            if len(purchased) < spec.purchased_n:
-                purchased.append(_entry(row))
-        elif len(non_purchase) < spec.all_n:
-            non_purchase.append(_entry(row))
-        if len(purchased) >= spec.purchased_n and len(non_purchase) >= spec.all_n:
-            break
-    return purchased + non_purchase
+    matched = len(sessions)
+    capped = matched < needed and scanned >= cohort_spec.CANDIDATE_CAP
+    return SampleResult(
+        sessions=sessions,
+        sample=SampleStats(requested=needed, matched=matched, scanned=scanned, capped=capped),
+    )
+
+
+def sample_cohort_rows(conn: Connection, pool: str, spec: CohortSpec) -> list:
+    """Sessions matching a selection rule, in the mode the spec asks for.
+
+    Prefer `sample_cohort` when the caller needs to know whether the request
+    was filled; this keeps the list-shaped surface used by tests and the
+    compat checks.
+    """
+    return sample_cohort(conn, pool, spec).sessions

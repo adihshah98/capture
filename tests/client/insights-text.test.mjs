@@ -72,6 +72,23 @@ test('progressText describes a cohort without throwing on a partial one', () => 
   assert.equal(typeof progressText({}), 'string');
 });
 
+test('progressText surfaces a sampling shortfall', () => {
+  const text = progressText({
+    status: 'idle',
+    progress: { done: 0, total: 3, running: 0, queued: 3 },
+    sample: { requested: 50, matched: 3, scanned: 5000, capped: true },
+  });
+  assert.match(text, /sampled 3 of 50 \(scan hit candidate cap\)/);
+});
+
+test('progressText distinguishes a thin pool from a capped scan', () => {
+  const text = progressText({
+    progress: { done: 1, total: 1, running: 0, queued: 0 },
+    sample: { requested: 10, matched: 1, scanned: 1, capped: false },
+  });
+  assert.match(text, /sampled 1 of 10 \(pool had fewer matches\)/);
+});
+
 test('chat markdown renders bullets as a list and prose as paragraphs', () => {
   assert.equal(chatMarkdown('- one\n- two'), '<ul><li>one</li><li>two</li></ul>');
   assert.equal(chatMarkdown('hello'), '<p>hello</p>');

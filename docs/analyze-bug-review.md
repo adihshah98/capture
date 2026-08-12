@@ -23,7 +23,7 @@ where it applies.
 | 1 | 🔴 | ~~CLI samples cohorts from a stale SQLite file~~ — **fixed** | **new** |
 | 2 | 🔴 | `create_cohort` blocks the event loop | **new** |
 | 3 | 🔴 | Attribution parsers diverged | old bug 8, understated |
-| 4 | 🟠 | Sampling shortfall is silent | old bug 3 |
+| 4 | 🟠 | ~~Sampling shortfall is silent~~ — **fixed** | old bug 3 |
 | 5 | 🟠 | `_cohort_order_sql` depends on a compat shim | **new** |
 | 6 | 🟠 | Group B is structurally short-sampled | **new** |
 | 7 | 🟠 | `pool_facets` unbounded `fetchall` | old bug 4 |
@@ -130,9 +130,9 @@ the shared function.
 stored attribution. A backfill re-reading `sessions.url` and rewriting the column is
 required, and is a separate task — `capture/backfill.py` is the natural home.
 
-## 4. 🟠 Sampling shortfall is silent
+## 4. 🟠 ~~Sampling shortfall is silent~~ — **fixed**
 
-[`_sample_matching_rows`](../capture/analyze/__init__.py#L1483) filters in Python
+[`_sample_matching_rows`](../capture/analyze/sampling.py) filters in Python
 after SQL has already truncated:
 
 ```python
@@ -147,16 +147,18 @@ for row in candidates:
 Two independent shortfalls. **(a)** `n * 20` assumes the slice matches ≥5% of rows;
 a rare campaign or landing page falls outside the window and the `LIMIT` cuts it off.
 **(b)** the loop breaks at `n` and never refills — no second query, no pagination.
-`sample_cohort_rows:1609` has the same shape.
+`sample_cohort_rows` had the same shape.
 
-Neither is reported. A cohort asked for 50 and given 3 is **presented as 50**, while
+Neither was reported. A cohort asked for 50 and given 3 was **presented as 50**, while
 `_given_facts` tells the model "this group contains exactly 3 session(s)". The user
-reads a confident analysis of a population that does not exist. `build_cohort` never
-checks whether the requested total was reached.
+read a confident analysis of a population that does not exist. `build_cohort` never
+checked whether the requested total was reached.
 
-**Fix:** return `{requested, matched, scanned, capped}` and surface it on the cohort.
-`capped` must distinguish "the pool genuinely holds 3" from "we stopped scanning at
-`COHORT_CANDIDATE_CAP`" — only the second is fixable by scanning harder.
+**Fix (landed):** sampling paginates up to `CANDIDATE_CAP`, and every cohort stores
+`sample: {requested, matched, scanned, capped}`. `capped` is true only when the
+scan hit the hard cap while still short — that is the case still fixable by
+scanning harder or pushing the slice into SQL. The Insights progress line and
+cohort settings view surface the shortfall.
 
 ## 5. 🟠 `_cohort_order_sql` depends on a compat shim
 

@@ -19,7 +19,7 @@ from . import gemini, runtime, session, spec
 from . import store as analyze_store
 from .cohort_state import enrich_cohort_status, persistable_cohort
 from .labels import _auto_cohort_label, clean_cohort_label, cohort_selection_text
-from .sampling import sample_cohort_rows
+from .sampling import sample_cohort
 from .slices import normalize_slice
 from .storage import (
     ANALYSIS_FILE,
@@ -58,7 +58,7 @@ def build_cohort(
         slice_spec=normalize_slice(selection.slice_spec),
         slice_b=normalize_slice(selection.slice_b),
     )
-    sessions = sample_cohort_rows(conn, pool_key, selection)
+    result = sample_cohort(conn, pool_key, selection)
     stamp = time.strftime("%b %-d, %-I:%M %p", time.localtime(now / 1000))
     chosen = clean_cohort_label(label) or _auto_cohort_label(selection, stamp=stamp)
     return {
@@ -88,7 +88,11 @@ def build_cohort(
         "order": selection.order,
         "slice": selection.slice_spec,
         "slice_b": selection.slice_b if selection.b_n > 0 else {},
-        "sessions": sessions,
+        # How the request resolved against the candidate window. `matched` can
+        # be below `requested` when the pool is thin or the scan hit
+        # CANDIDATE_CAP; see sampling.SampleStats.
+        "sample": result.sample.as_dict(),
+        "sessions": result.sessions,
     }
 
 

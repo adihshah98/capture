@@ -620,6 +620,21 @@ function viewSettingRows(body) {
     push('Non-purchase', String(allN));
   }
 
+  const sample =
+    body.sample && typeof body.sample === 'object' ? body.sample : null;
+  if (sample) {
+    const requested = Number(sample.requested || 0);
+    const matched = Number(sample.matched || 0);
+    if (requested > 0 && matched < requested) {
+      push(
+        'Sampled',
+        sample.capped
+          ? `${matched} of ${requested} (scan hit candidate cap)`
+          : `${matched} of ${requested} (pool had fewer matches)`
+      );
+    }
+  }
+
   push('Min duration', `≥${minS}s`);
   push('Choose from', order);
 

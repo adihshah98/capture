@@ -52,10 +52,23 @@ from .cutfmt import CUT_SECTIONS, empty_cut_analysis, normalize_cut_analysis
 
 # How a cohort describes itself: the selection sentence under it in the UI, and
 # the auto-generated display name. Pure string generation over a normalised slice.
-from .labels import _auto_cohort_label, clean_cohort_label, cohort_selection_text
+from .labels import (
+    _auto_cohort_label as _auto_cohort_label,
+)
+from .labels import (
+    clean_cohort_label,
+    cohort_selection_text,
+)
 
 # Cohort membership and the facet picker: the only SQL in the package.
-from .sampling import facets_from_rows, pool_facets, sample_cohort_rows
+from .sampling import (
+    SampleResult,
+    SampleStats,
+    facets_from_rows,
+    pool_facets,
+    sample_cohort,
+    sample_cohort_rows,
+)
 
 # The slice language: pure predicates over dicts, shared by the sampler, the cut
 # cache key and the UI labels.
@@ -259,6 +272,9 @@ __all__ = [
     "facets_from_rows",
     "pool_facets",
     "rename_cohort",
+    "SampleResult",
+    "SampleStats",
+    "sample_cohort",
     "sample_cohort_rows",
     # Extraction and the session write-up.
     "analyze_session",

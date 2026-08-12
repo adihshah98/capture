@@ -51,12 +51,22 @@ export function progressText(body) {
       : body.status === 'paused'
         ? 'Paused · '
         : '';
+  const sample = body.sample && typeof body.sample === 'object' ? body.sample : null;
+  const requested = sample ? Number(sample.requested || 0) : 0;
+  const matched = sample ? Number(sample.matched || 0) : 0;
+  const shortfall =
+    requested > 0 && matched < requested
+      ? sample.capped
+        ? ` · sampled ${matched} of ${requested} (scan hit candidate cap)`
+        : ` · sampled ${matched} of ${requested} (pool had fewer matches)`
+      : '';
   return (
     phase +
     `${prog.done || 0} / ${prog.total || 0} done · ${prog.running || 0} running · ` +
     `${prog.queued || 0} queued` +
     (prog.error ? ` · ${prog.error} failed` : '') +
     (prog.stale ? ` · ${prog.stale} missing a write-up` : '') +
+    shortfall +
     batch
   );
 }
