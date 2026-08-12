@@ -24,7 +24,7 @@ where it applies.
 | 2 | 🔴 | `create_cohort` blocks the event loop | **new** |
 | 3 | 🔴 | Attribution parsers diverged | old bug 8, understated |
 | 4 | 🟠 | ~~Sampling shortfall is silent~~ — **fixed** | old bug 3 |
-| 5 | 🟠 | `_cohort_order_sql` depends on a compat shim | **new** |
+| 5 | 🟠 | ~~`_cohort_order_sql` depends on a compat shim~~ — **fixed** | **new** |
 | 6 | 🟠 | ~~Group B is structurally short-sampled~~ — **fixed** | **new** |
 | 7 | 🟠 | `pool_facets` unbounded `fetchall` | old bug 4 |
 | 8 | 🟡 | `COHORT_URL_CONTAINS` hardcodes one customer | old bug 9 |
@@ -160,21 +160,19 @@ scan hit the hard cap while still short — that is the case still fixable by
 scanning harder or pushing the slice into SQL. The Insights progress line and
 cohort settings view surface the shortfall.
 
-## 5. 🟠 `_cohort_order_sql` depends on a compat shim
+## 5. 🟠 ~~`_cohort_order_sql` depends on a compat shim~~ — **fixed**
 
-[:1439](../capture/analyze/__init__.py#L1439) emits
-`coalesce(json_extract(interactions, '$.clicks'), 0)`. `json_extract` is **SQLite**.
-It works on Postgres only because
-[0002_compat.sql:66](../migrations/0002_compat.sql#L66) defines
+Sampling used to emit `coalesce(json_extract(interactions, '$.clicks'), 0)`.
+`json_extract` is **SQLite**. It worked on Postgres only because
+[0002_compat.sql](../migrations/0002_compat.sql) defined
 `compat.json_extract(text, text) RETURNS numeric`.
 
-The sort key round-trips a plain integer column (`sessions.clicks`) out to JSON text
+The sort key round-tripped a plain integer column (`sessions.clicks`) out to JSON text
 through the view and back through a regex-stripped path expression — per row, per
 comparison — defeating any index.
 
-**Consequence:** this is a **sixth** function the "port the five" task must handle.
-Deleting `0002_compat.sql` without rewriting this ORDER BY takes down cohort sampling
-entirely. It is invisible from the Python side.
+**Fix (landed):** expose `clicks` (and `rage`) on `compat.sessions`, order by
+`coalesce(clicks, 0)`, and drop `compat.json_extract` (`0005_compat_clicks.sql`).
 
 ## 6. 🟠 ~~Group B is structurally short-sampled~~ — **fixed**
 

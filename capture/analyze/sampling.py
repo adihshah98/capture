@@ -5,13 +5,15 @@ and reads the session index; nothing writes.
 
 Two things are worth knowing before editing.
 
-**The connection is not SQLite.** The SQL uses `?` placeholders and
-`json_extract` because this code predates the move to Postgres. What actually
-arrives is a `compat.SqliteStyleConnection` wrapping psycopg, reading a
-`compat.sessions` view that flattens the normalised schema back into the old
-shape. See migrations/0002_compat.sql -- and note that the view's
-`security_invoker` clause is what keeps row-level security applied, so a
-caller-supplied `pool` cannot read another tenant's rows.
+**The connection is not SQLite.** The SQL uses `?` placeholders because this
+code predates the move to Postgres. What actually arrives is a
+`compat.SqliteStyleConnection` wrapping psycopg, reading a `compat.sessions`
+view that flattens the normalised schema back into the old shape. See
+migrations/0002_compat.sql -- and note that the view's `security_invoker`
+clause is what keeps row-level security applied, so a caller-supplied `pool`
+cannot read another tenant's rows. Activity tie-breaks sort on the plain
+`clicks` column the view exposes (0005); they no longer go through a
+SQLite-shaped `json_extract` shim.
 
 The signatures used to say `sqlite3.Connection`, which was true only on the
 deleted CLI path. They now say `spec.Connection`, a Protocol naming the one
@@ -222,7 +224,10 @@ def _cohort_where(
 
 
 def _cohort_order_sql(order: str) -> str:
-    activity = "coalesce(json_extract(interactions, '$.clicks'), 0)"
+    # Plain integer on compat.sessions / the real table — not
+    # json_extract(interactions, '$.clicks'), which needed a SQLite-shaped
+    # shim and defeated any index on sessions.clicks.
+    activity = "coalesce(clicks, 0)"
     if order == cohort_spec.ORDER_EARLIEST:
         return f"last_seen ASC, {activity} DESC, session_id ASC"
     return f"last_seen DESC, {activity} DESC, session_id DESC"

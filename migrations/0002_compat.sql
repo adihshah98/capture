@@ -1,8 +1,11 @@
 -- analyze.py is owned by someone else and its cohort/facet queries are written
--- against the pre-Postgres SQLite index: a flat `sessions` table with `pool`,
--- JSON-text `order`/`interactions`, and SQLite's json_extract. Rather than
--- reshape their file, put a schema in front that still looks like that. The
--- connection handed to those functions runs with search_path = compat, public.
+-- against the pre-Postgres SQLite index: a flat `sessions` table with `pool`
+-- and JSON-text `order`/`interactions`. Rather than reshape their file, put a
+-- schema in front that still looks like that. The connection handed to those
+-- functions runs with search_path = compat, public.
+--
+-- `clicks` / `rage` are exposed as plain columns (see also 0005) so ORDER BY
+-- can use the integer without round-tripping through the interactions JSON.
 --
 -- Delete this whole migration once those five functions are ported.
 
@@ -39,6 +42,8 @@ BEGIN
             s.windows,
             s.chunk_count,
             s.bytes,
+            s.clicks,
+            s.rage,
             s.visitor_id,
             s.url,
             CASE WHEN o.session_id IS NULL THEN NULL ELSE
@@ -60,10 +65,3 @@ BEGIN
         EXECUTE format('ALTER VIEW compat.sessions OWNER TO %I', app_role);
     END IF;
 END $$;
-
--- Only ever called as json_extract(interactions, '$.clicks') in an ORDER BY,
--- coalesced against 0, so numeric is the useful return type.
-CREATE FUNCTION compat.json_extract(doc text, path text) RETURNS numeric
-LANGUAGE sql IMMUTABLE AS $$
-    SELECT nullif(doc::jsonb ->> regexp_replace(path, '^\$\.', ''), '')::numeric
-$$;

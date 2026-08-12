@@ -94,23 +94,20 @@ tenant's pool id** returns `[]`
 interpolates a caller-supplied `pool` into `WHERE pool = ?`, RLS makes it
 unexploitable. Any replacement for this view must reproduce that property.
 
-### `compat.json_extract` — the shim nobody expects
+### `compat.json_extract` — removed
 
-[`_cohort_order_sql`](../../capture/analyze/__init__.py#L1438) emits:
+Sampling used to emit:
 
 ```python
 activity = "coalesce(json_extract(interactions, '$.clicks'), 0)"
 ```
 
-`json_extract` is a **SQLite** function. It works on Postgres only because
-[0002_compat.sql:66](../../migrations/0002_compat.sql#L66) defines
-`compat.json_extract(text, text) RETURNS numeric`.
+`json_extract` is a **SQLite** function. It worked on Postgres only because a
+compat shim parsed the interactions JSON text back into a number — round-tripping
+the plain integer `sessions.clicks` column and defeating any index on it.
 
-So the sort key round-trips a plain integer column (`sessions.clicks`) into JSON text
-via the view, then back out through a regex-stripped path expression, **per row, per
-comparison** — and defeats any index on it. This is a sixth function the "port the
-five" task must handle; deleting the migration without rewriting this ORDER BY takes
-down cohort sampling.
+**Fixed:** `compat.sessions` exposes `clicks` / `rage`, `_cohort_order_sql` sorts
+on `coalesce(clicks, 0)`, and `0005_compat_clicks.sql` drops the shim.
 
 ---
 
@@ -201,8 +198,9 @@ review); removing it makes these annotations honestly fixable.
 2. **Do not replace the view without reproducing `security_invoker`** or an
    RLS-subject owner. This is a cross-tenant data leak, and the sampler's
    caller-supplied `pool` is what RLS is defending.
-3. **Do not delete `0002_compat.sql` before rewriting `_cohort_order_sql`** — the
-   `json_extract` shim is invisible from the Python side.
+3. **Do not delete `0002_compat.sql` before the sampler stops reading the view** —
+   the view still supplies the SQLite-shaped `pool` / JSON-text columns. The
+   `json_extract` shim itself is gone as of `0005_compat_clicks.sql`.
 4. **Do not push `device_class` or `page_path` into SQL** as part of a port.
    Reimplementing them in SQL forks the semantics, which is the attribution-twins
    failure at higher stakes — and `page_path` returning `/` instead of `None` was

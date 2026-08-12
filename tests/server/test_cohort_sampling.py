@@ -9,6 +9,30 @@ from capture.analyze.spec import CohortSpec
 
 
 class TestCohortSampling(unittest.TestCase):
+    def _insert(self, conn, rows):
+        # Fixtures still pass the pre-clicks 12-tuple; derive clicks from the
+        # interactions JSON when present so ORDER BY coalesce(clicks, 0) matches
+        # what those rows used to express via json_extract.
+        normalized = []
+        for row in rows:
+            row = list(row)
+            if len(row) == 12:
+                clicks = 0
+                raw = row[9]
+                if raw:
+                    try:
+                        data = json.loads(raw)
+                    except (TypeError, ValueError):
+                        data = None
+                    if isinstance(data, dict):
+                        clicks = int(data.get("clicks") or 0)
+                row.append(clicks)
+            normalized.append(tuple(row))
+        conn.executemany(
+            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            normalized,
+        )
+
     def _conn(self, rows):
         from capture import analyze
 
@@ -18,14 +42,13 @@ class TestCohortSampling(unittest.TestCase):
             CREATE TABLE sessions (
                 pool TEXT, session_id TEXT, first_seen INTEGER, last_seen INTEGER,
                 chunk_count INTEGER, bytes INTEGER, visitor_id TEXT, url TEXT,
-                "order" TEXT, interactions TEXT, device TEXT, attribution TEXT
+                "order" TEXT, interactions TEXT, device TEXT, attribution TEXT,
+                clicks INTEGER NOT NULL DEFAULT 0
             )
             """
         )
-        conn.executemany(
-            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            rows,
-        )
+        if rows:
+            self._insert(conn, rows)
         return analyze, conn
 
     def test_sample_prefers_newest_and_splits_filters(self):
@@ -109,6 +132,45 @@ class TestCohortSampling(unittest.TestCase):
         self.assertEqual(
             [(s["session_id"], s["filter"]) for s in sampled],
             [("newbuy" + "x" * 26, "purchased"), ("newall" + "x" * 26, "all")],
+        )
+
+    def test_clicks_break_last_seen_ties(self):
+        analyze, conn = self._conn(
+            [
+                (
+                    "",
+                    "quiet" + "x" * 27,
+                    0,
+                    50_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    json.dumps({"clicks": 1}),
+                    None,
+                    None,
+                ),
+                (
+                    "",
+                    "busy" + "x" * 28,
+                    0,
+                    50_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/pages/ashwamag-01",
+                    None,
+                    json.dumps({"clicks": 9}),
+                    None,
+                    None,
+                ),
+            ]
+        )
+        sampled = analyze.sample_cohort_rows(conn, "", CohortSpec(any_n=2, url_contains=""))
+        self.assertEqual(
+            [s["session_id"] for s in sampled],
+            ["busy" + "x" * 28, "quiet" + "x" * 27],
         )
 
     def test_sample_honours_the_url_filter_and_min_duration(self):
@@ -436,10 +498,7 @@ class TestCohortSampling(unittest.TestCase):
                     None,
                 )
             )
-        conn.executemany(
-            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            rows,
-        )
+        self._insert(conn, rows)
         with mock.patch.object(cohort_spec, "CANDIDATE_CAP", 3):
             with mock.patch("capture.analyze.sampling._page_size", return_value=3):
                 result = analyze.sample_cohort(
@@ -600,10 +659,7 @@ class TestCohortSampling(unittest.TestCase):
                 None,
             )
         )
-        conn.executemany(
-            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            rows,
-        )
+        self._insert(conn, rows)
         with mock.patch.object(cohort_spec, "CANDIDATE_CAP", 20):
             with mock.patch("capture.analyze.sampling._page_size", return_value=5):
                 result = analyze.sample_cohort(
@@ -642,10 +698,7 @@ class TestCohortSampling(unittest.TestCase):
             )
             for i in range(8)
         ]
-        conn.executemany(
-            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            rows,
-        )
+        self._insert(conn, rows)
         with mock.patch.object(cohort_spec, "CANDIDATE_CAP", 3):
             with mock.patch("capture.analyze.sampling._page_size", return_value=3):
                 result = analyze.sample_cohort(

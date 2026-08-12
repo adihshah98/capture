@@ -125,14 +125,23 @@ class TestAnalyzeRunsUnmodified(CompatCase):
         ids = sorted(s["session_id"] for s in cohort["sessions"])
         self.assertEqual(ids, ["a-bought", "a-browsed"])
 
-    def test_json_extract_ordering_still_works(self):
+    def test_clicks_column_orders_without_json_extract(self):
         with compat.cohort_connection(self.alpha) as conn:
             rows = conn.execute(
                 "SELECT session_id FROM sessions WHERE pool = ?"
-                " ORDER BY coalesce(json_extract(interactions, '$.clicks'), 0) DESC",
+                " ORDER BY coalesce(clicks, 0) DESC",
                 (str(self.alpha),),
             ).fetchall()
         self.assertEqual([r[0] for r in rows], ["a-bought", "a-browsed"])
+
+    def test_json_extract_shim_is_gone(self):
+        with psycopg.connect(self.admin_url) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM pg_proc p"
+                " JOIN pg_namespace n ON n.oid = p.pronamespace"
+                " WHERE n.nspname = 'compat' AND p.proname = 'json_extract'"
+            ).fetchone()
+        self.assertIsNone(row)
 
 
 class TestCompatViewKeepsTenantsApart(CompatCase):
