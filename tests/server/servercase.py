@@ -86,8 +86,6 @@ class ServerCase(unittest.TestCase):
         _projects.invalidate()
         if cls.default_project:
             cls.project_id = pgfixture.seed_default_project(cls.admin_url)
-        cls.port = free_port()
-        cls.base = f"http://127.0.0.1:{cls.port}"
         cls.run_env = {
             **os.environ,
             "CAPTURE_DATA_DIR": str(cls.data_dir),
@@ -105,6 +103,34 @@ class ServerCase(unittest.TestCase):
 
     @classmethod
     def start_server(cls):
+        """Boot uvicorn on a port nothing else is using.
+
+        free_port() only reports a port that was free a moment ago, so between
+        the probe and uvicorn's bind anything on the box — another copy of this
+        suite, most of all — can take it. Two things go wrong then: uvicorn dies
+        with EADDRINUSE, or worse, the /config probe is answered by whoever won
+        the port and the class runs happily against a stranger's server. So a
+        dead process means a new port and another go, and a probe only counts
+        once ours is confirmed still alive.
+        """
+        for attempt in range(5):
+            cls.port = free_port()
+            cls.base = f"http://127.0.0.1:{cls.port}"
+            outcome = cls._boot_once()
+            if outcome == "ok":
+                return
+            if outcome == "timeout":
+                break
+            print(
+                f"server exited during startup on port {cls.port} "
+                f"({cls.proc.returncode}); retrying on a new port "
+                f"(attempt {attempt + 1})"
+            )
+        cls.tearDownClass()
+        raise RuntimeError("server did not start")
+
+    @classmethod
+    def _boot_once(cls) -> str:
         # Captured rather than discarded so tests can assert on what the server
         # reported — cohort_transition logs undeclared status moves instead of
         # raising, and out here that log is the only way to see one.
@@ -121,15 +147,18 @@ class ServerCase(unittest.TestCase):
         # straight after a test that saturates the box.
         for _ in range(300):
             if cls.proc.poll() is not None:
-                raise RuntimeError(f"server exited during startup ({cls.proc.returncode})")
+                cls.log_file.close()
+                return "died"
             try:
-                if request(f"{cls.base}/config")[0] == 200:
-                    return
+                # poll() again after the answer: a 200 from a port our own
+                # process never managed to bind came from someone else.
+                if request(f"{cls.base}/config")[0] == 200 and cls.proc.poll() is None:
+                    return "ok"
             except Exception:
                 pass
             time.sleep(0.1)
-        cls.tearDownClass()
-        raise RuntimeError("server did not start")
+        cls.log_file.close()
+        return "timeout"
 
     @classmethod
     def tearDownClass(cls):

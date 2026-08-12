@@ -86,7 +86,14 @@ class TestUnreadableRegistryFailsClosed(ServerCase):
     same: if it cannot be read, refuse rather than fall back to a shared pool."""
 
     default_project = False
-    env = {"CAPTURE_DATABASE_URL": "postgresql://nobody@127.0.0.1:1/nope?connect_timeout=1"}
+    env = {
+        "CAPTURE_DATABASE_URL": "postgresql://nobody@127.0.0.1:1/nope?connect_timeout=1",
+        # Every request here waits out the pool before it can answer, so the
+        # default 5s left each one within ~50ms of request()'s 10s ceiling once
+        # the startup retention sweep was waiting too. Shortened so the answer,
+        # not the clock, is what this class measures.
+        "CAPTURE_DB_WAIT_S": "1",
+    }
 
     def test_healthz_reports_degraded(self):
         status, body = request(f"{self.base}/healthz")

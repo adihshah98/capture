@@ -25,6 +25,7 @@ CACHE_TTL_S = float(os.environ.get("CAPTURE_PROJECT_CACHE_TTL_S", "5"))
 _lock = threading.Lock()
 _cache: list | None = None
 _cache_at = 0.0
+_generation = 0
 
 
 class ProjectsUnavailable(Exception):
@@ -85,23 +86,37 @@ def _load() -> list:
 
 
 def all_projects(fresh: bool = False) -> list:
+    """The registry, cached for CACHE_TTL_S.
+
+    The query runs outside _lock, which only guards the cache fields. Holding it
+    across the round trip made callers queue behind each other's pool wait, so
+    during an outage the second caller waited 2x CAPTURE_DB_WAIT_S, the third 3x,
+    and so on — exactly the pile-up the pool's short timeout exists to prevent.
+    The cost is that a few callers can reload at once when the cache expires.
+    """
     global _cache, _cache_at
     with _lock:
-        stale = _cache is None or (time.monotonic() - _cache_at) > CACHE_TTL_S
-        if fresh or stale:
-            try:
-                _cache = _load()
-            except Exception as exc:
-                raise ProjectsUnavailable(str(exc)) from exc
-            _cache_at = time.monotonic()
-        return list(_cache or ())
+        if not fresh and _cache is not None and (time.monotonic() - _cache_at) <= CACHE_TTL_S:
+            return list(_cache)
+        started = _generation
+    try:
+        loaded = _load()
+    except Exception as exc:
+        raise ProjectsUnavailable(str(exc)) from exc
+    with _lock:
+        # An invalidate() that landed mid-query must not be undone by this
+        # result, which was already stale by the time it arrived.
+        if _generation == started:
+            _cache, _cache_at = loaded, time.monotonic()
+    return list(loaded)
 
 
 def invalidate() -> None:
-    global _cache, _cache_at
+    global _cache, _cache_at, _generation
     with _lock:
         _cache = None
         _cache_at = 0.0
+        _generation += 1
 
 
 def by_token(token: str | None) -> Project | None:

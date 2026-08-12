@@ -11,6 +11,7 @@ import gzip
 import json
 import os
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -94,11 +95,42 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
         )
 
     def test_concurrent_ingests_overlap_instead_of_queueing(self):
+        """Every write must be in flight at once.
+
+        This used to time the batch and require it to beat 60% of the serialised
+        cost, which asks the machine to be fast as well as the handler to be
+        correct: on a loaded box the run came in at 0.30-0.35s against a 0.288s
+        ceiling while still overlapping perfectly. A barrier asks the question
+        directly instead. If put_chunk ran on the event loop the first call would
+        hold it and the other seven would never arrive, so the barrier would
+        break; its timeout only bounds how long a genuine failure takes to
+        report, and never decides a passing run.
+        """
+        import concurrent.futures
+
         import httpx
 
         payload = self.body()
+        barrier = threading.Barrier(CONCURRENCY)
+        overlapped = []
+
+        def barrier_put(*args, **kwargs):
+            try:
+                barrier.wait(timeout=60)
+                overlapped.append(True)
+            except threading.BrokenBarrierError:
+                pass
+            return self.real_put(*args, **kwargs)
+
+        self.storage.put_chunk = barrier_put
 
         async def main():
+            # Sized here rather than inherited: asyncio's default executor is
+            # min(32, cpu_count + 4) threads, which is fewer than CONCURRENCY on
+            # a small box and would break the barrier for want of workers.
+            asyncio.get_running_loop().set_default_executor(
+                concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENCY)
+            )
             transport = httpx.ASGITransport(app=self.server.app)
             async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
 
@@ -109,19 +141,16 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
                         headers={"Content-Type": "application/octet-stream"},
                     )
 
-                started = time.perf_counter()
                 results = await asyncio.gather(*(one(n) for n in range(CONCURRENCY)))
-                return time.perf_counter() - started, [r.status_code for r in results]
+                return [r.status_code for r in results]
 
-        elapsed, codes = asyncio.run(main())
+        codes = asyncio.run(main())
         self.assertEqual(codes, [200] * CONCURRENCY)
-
-        serial = WRITE_DELAY_S * CONCURRENCY
-        self.assertLess(
-            elapsed,
-            serial * 0.6,
-            f"{CONCURRENCY} ingests took {elapsed:.2f}s; serialised would be "
-            f"{serial:.2f}s — the write is blocking the event loop",
+        self.assertEqual(
+            len(overlapped),
+            CONCURRENCY,
+            f"only {len(overlapped)} of {CONCURRENCY} writes were in flight together "
+            "— the write is blocking the event loop",
         )
 
     def test_every_chunk_still_lands(self):
