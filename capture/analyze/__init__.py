@@ -27,11 +27,18 @@ import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Optional
 
 from .. import attribution
 from ..paths import SAFE_CHUNK
-from . import cohort_state, prompts, slices, spec, stats, storage
+
+# Submodules kept reachable as `analyze.<name>` for callers that navigate to
+# them that way. `as` rather than a bare import because these are re-exports,
+# not uses: this file calls through the names below, not through the modules.
+from . import cohort_state as cohort_state
+from . import prompts, spec
+from . import slices as slices
+from . import stats as stats
+from . import storage as storage
 from . import store as analyze_store
 
 # A cohort's status, projected from its session rows rather than read back. The
@@ -46,7 +53,6 @@ from .cohort_state import (
     COHORT_VIEW_ONLY_SESSION_FIELDS,
     SESSION_STALE,
     CohortState,
-    _undeclared_transitions,
     attach_cohort_insights,
     cohort_transition,
     enrich_cohort_status,
@@ -54,6 +60,39 @@ from .cohort_state import (
     project_cohort_status,
     standout_line,
 )
+from .cohort_state import (
+    _undeclared_transitions as _undeclared_transitions,
+)
+
+# The model's cut reply, coerced into the documented shape — including the guard
+# that drops a share whose denominator is not this group's size.
+from .cutfmt import CUT_SECTIONS, empty_cut_analysis, normalize_cut_analysis
+
+# How a cohort describes itself: the selection sentence under it in the UI, and
+# the auto-generated display name. Pure string generation over a normalised slice.
+from .labels import _auto_cohort_label, clean_cohort_label, cohort_selection_text
+
+# Cohort membership and the facet picker: the only SQL in the package.
+from .sampling import facets_from_rows, pool_facets, sample_cohort_rows
+
+# The slice language: pure predicates over dicts, shared by the sampler, the cut
+# cache key and the UI labels.
+from .slices import (
+    DEVICE_VALUES,
+    OUTCOME_LABELS,
+    OUTCOME_VALUES,
+    device_class,
+    normalize_slice,
+    outcome_class,
+    page_path,
+    row_matches_slice,
+    slice_label,
+)
+
+# Measured splits: the model invents shares when asked to count, so the numbers
+# in the cut prompt are computed in Python and handed over as exact. The gates
+# and the cell builder are stats.py's own business, and tests reach them there.
+from .stats import cross_tab_block
 
 # Result and cohort persistence, addressed by pool path and session directory.
 # Re-exported rather than re-implemented: `capture/analysis_port.py` and the
@@ -68,11 +107,6 @@ from .storage import (
     CUTS_SUFFIX,
     PROJECTS_DIR,
     SAFE_COHORT_ID,
-    _is_project_pool,
-    _migrate_cohorts_once,
-    _migrate_lock,
-    _migrated,
-    _read_cohort_file,
     _session_ref,
     analysis_paths,
     clear_analysis,
@@ -102,6 +136,82 @@ from .storage import (
     write_cut,
     write_job,
 )
+from .storage import (
+    _is_project_pool as _is_project_pool,
+)
+from .storage import (
+    _migrate_cohorts_once as _migrate_cohorts_once,
+)
+from .storage import (
+    _migrate_lock as _migrate_lock,
+)
+from .storage import (
+    _migrated as _migrated,
+)
+from .storage import (
+    _read_cohort_file as _read_cohort_file,
+)
+
+# What the package exports. Declared because most of the names above are
+# re-exports this file never calls itself -- `capture/analysis_port.py` and the
+# suite reach them off the package -- and without a declaration a linter reads
+# every one of them as an unused import and offers to delete the package's map
+# of itself.
+#
+# Not an access control: `analyze.<anything>` still resolves, which is what the
+# patching contract at the foot of this file depends on. It states intent, and
+# `tests/server/test_patch_contract.py` is what actually holds the surface still.
+__all__ = [
+    # Configuration and runtime.
+    "ANALYSIS_ENABLED", "ANALYZE_BATCH", "ANALYZE_BATCH_MAX_WAIT_S",
+    "ANALYZE_BATCH_POLL_MAX_ERRORS", "ANALYZE_BATCH_POLL_S",
+    "ANALYZE_EXTRACT_CONCURRENCY", "ANALYZE_FPS", "ANALYZE_MAX_FRAMES",
+    "ANALYZE_MODEL_CONCURRENCY", "ANALYZE_TIMEOUT_S", "BASE_DIR", "EXTRACTOR",
+    "GEMINI_API_KEY", "GEMINI_MODEL", "REPLAYER_BUNDLE", "runtime_present",
+    # Sampling vocabulary, aliased from spec.py under the older names.
+    "COHORT_CANDIDATE_CAP", "COHORT_DEFAULT_ALL_N", "COHORT_DEFAULT_PURCHASED_N",
+    "COHORT_MAX_SESSIONS", "COHORT_MIN_DURATION_MS", "COHORT_ORDERS",
+    "COHORT_ORDER_EARLIEST", "COHORT_ORDER_LATEST", "COHORT_URL_CONTAINS",
+    # Prompts.
+    "CHAT_PROMPT", "CUT_PROMPT", "SYSTEM_PROMPT", "prompt_version",
+    # Persistence (storage.py).
+    "ANALYSIS_DIR", "ANALYSIS_FILE", "COHORTS_DIR", "COHORT_FILE", "CUTS_SUFFIX",
+    "PROJECTS_DIR", "SAFE_COHORT_ID", "analysis_paths", "clear_analysis",
+    "clear_cut", "clear_job", "cohort_path", "cohort_store", "cohorts_dir",
+    "cuts_path", "data_root_for", "forget_analyses", "forget_pool_cohorts",
+    "forget_session", "latest_cohort", "list_cohorts", "mark_cohort_session",
+    "migrate_legacy_cohort", "pool_key", "read_analysis", "read_cohort",
+    "read_cut", "read_cuts", "read_job", "safe_cohort_id", "write_analysis",
+    "write_cohort", "write_cut", "write_job",
+    # Cohort status (cohort_state.py).
+    "COHORT_STATES", "COHORT_TRANSITIONS", "COHORT_VIEW_ONLY_FIELDS",
+    "COHORT_VIEW_ONLY_SESSION_FIELDS", "CohortState", "SESSION_STALE",
+    "attach_cohort_insights", "cohort_transition", "enrich_cohort_status",
+    "persistable_cohort", "project_cohort_status", "standout_line",
+    # The slice language (slices.py) and the measured splits (stats.py).
+    "DEVICE_VALUES", "OUTCOME_LABELS", "OUTCOME_VALUES", "cross_tab_block",
+    "device_class", "normalize_slice", "outcome_class", "page_path",
+    "row_matches_slice", "slice_label",
+    # Cuts and chat.
+    "CHAT_MAX_MESSAGE_CHARS", "CHAT_MAX_TURNS", "CUT_SECTIONS",
+    "build_cut_analysis", "call_gemini_cut", "chat_context", "clean_chat_messages",
+    "cut_context", "cut_key", "empty_cut_analysis", "normalize_cut_analysis",
+    "select_rows_by_cut", "stream_gemini_chat",
+    # Cohort lifecycle (sampling.py, labels.py).
+    "build_cohort", "clean_cohort_label", "cohort_selection_text", "delete_cohort",
+    "facets_from_rows", "pool_facets", "rename_cohort", "sample_cohort_rows",
+    # Extraction and the session write-up.
+    "analyze_session", "build_inlined_session_request", "call_gemini",
+    "extract_session_digest", "load_session_digest", "prompt_digest",
+    "run_extractor", "session_chunk_names", "session_metadata",
+    "write_analysis_result",
+    # Batch.
+    "BatchStillRunning", "apply_cohort_batch", "cancel_gemini_batch",
+    "parse_batch_results", "submit_prepared_gemini_batch", "wait_gemini_batch",
+    # Orchestration.
+    "cohorts_needing_batch_resume", "iter_session_pools", "mark_cohort_paused",
+    "resume_cohort_batch", "run_cohort_job",
+]
 
 # The repo root: EXTRACTOR, the extractor subprocess cwd and the default data
 # dir are all repo-relative, and this file is capture/analyze/__init__.py, so
@@ -165,9 +275,9 @@ ANALYZE_BATCH_POLL_MAX_ERRORS = max(
 
 # Created lazily: a Semaphore binds to the running loop, and this module is
 # imported before the server's loop exists.
-_extract_gate: Optional[asyncio.Semaphore] = None
-_model_gate: Optional[asyncio.Semaphore] = None
-_gate_loop: Optional[asyncio.AbstractEventLoop] = None
+_extract_gate: asyncio.Semaphore | None = None
+_model_gate: asyncio.Semaphore | None = None
+_gate_loop: asyncio.AbstractEventLoop | None = None
 
 
 EXTRACTOR = BASE_DIR / "src" / "analyze" / "extract.mjs"
@@ -193,25 +303,6 @@ def runtime_present() -> bool:
     )
 
 
-# The slice language lives in slices.py: pure predicates over dicts, shared by
-# the sampler, the cut cache key and the UI labels.
-#
-# Imported for use *in this module*, not as a public re-export surface. Anything
-# outside the package reaches the analysis layer through capture/analysis_port.py;
-# anything that wants the slice vocabulary itself imports capture.analyze.slices
-# directly. Names nothing here uses were dropped rather than carried — a re-export
-# with no consumer is a dependency the next reader has to disprove.
-from .slices import (  # noqa: E402
-    DEVICE_VALUES,
-    OUTCOME_LABELS,
-    OUTCOME_VALUES,
-    device_class,
-    normalize_slice,
-    outcome_class,
-    page_path,
-    row_matches_slice,
-    slice_label,
-)
 
 
 def prompt_version(text: str) -> str:
@@ -225,7 +316,7 @@ def prompt_version(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
 
 
-def cut_key(slice_spec: Optional[dict]) -> str:
+def cut_key(slice_spec: dict | None) -> str:
     """Stable cache key for a cut: the filter plus the prompt that answers it.
 
     A cut's answer is a function of which sessions were selected *and* what the
@@ -252,7 +343,7 @@ def cut_key(slice_spec: Optional[dict]) -> str:
     )
 
 
-def select_rows_by_cut(rows: list, slice_spec: Optional[dict]) -> tuple:
+def select_rows_by_cut(rows: list, slice_spec: dict | None) -> tuple:
     """(matching_rows, spec). An empty filter selects the whole cohort."""
     spec = normalize_slice(slice_spec)
     return [row for row in rows if row_matches_slice(row, spec)], spec
@@ -357,24 +448,10 @@ def _given_facts(spec: dict, n: int) -> str:
     return "## Already known — never report these as findings\n\n" + "\n".join(lines)
 
 
-# Measured splits live in stats.py: the model invents shares when asked to
-# count, so the numbers in the cut prompt are computed in Python and handed
-# over as exact. Only what cut_context() calls is imported; the gates and the
-# cell builder are stats.py's own business, and tests reach them there.
-from .stats import cross_tab_block  # noqa: E402
-# The model's reply is coerced into the documented shape in cutfmt.py: pure
-# functions over the returned JSON, including the guard that drops a share whose
-# denominator is not this group's size. Imported through the module object so a
-# test can still patch these; see the patching contract at the foot of this file.
-from .cutfmt import (  # noqa: E402
-    CUT_SECTIONS,
-    empty_cut_analysis,
-    normalize_cut_analysis,
-)
 
 
 def cut_context(
-    rows: list, label: str, given: str = "", spec: Optional[dict] = None
+    rows: list, label: str, given: str = "", spec: dict | None = None
 ) -> tuple:
     """(header, side_text, citations) — the evidence a group's questions run on.
 
@@ -399,7 +476,7 @@ async def call_gemini_cut(
     rows: list,
     label: str,
     given: str = "",
-    spec: Optional[dict] = None,
+    spec: dict | None = None,
 ) -> tuple:
     """(analysis, citations) — one text-only pass over the group's write-ups.
 
@@ -435,7 +512,7 @@ async def call_gemini_cut(
     return analysis, citations
 
 
-async def build_cut_analysis(rows: list, slice_spec: Optional[dict]) -> dict:
+async def build_cut_analysis(rows: list, slice_spec: dict | None) -> dict:
     """Filter the cohort to one group and ask the model what it did."""
     if not ANALYSIS_ENABLED:
         raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
@@ -503,7 +580,7 @@ def clean_chat_messages(messages) -> list:
 
 
 async def stream_gemini_chat(
-    rows: list, label: str, given: str, messages: list, spec: Optional[dict] = None
+    rows: list, label: str, given: str, messages: list, spec: dict | None = None
 ):
     """Yield answer text chunks for the latest question in `messages`.
 
@@ -564,7 +641,7 @@ async def stream_gemini_chat(
             yield text
 
 
-async def chat_context(rows: list, slice_spec: Optional[dict]) -> tuple:
+async def chat_context(rows: list, slice_spec: dict | None) -> tuple:
     """(selected_rows, label, given, citations, spec) for a group.
 
     Mirrors build_cut_analysis's setup so a chat answers about exactly the group
@@ -581,30 +658,13 @@ async def chat_context(rows: list, slice_spec: Optional[dict]) -> tuple:
     return selected, label, given, citations, spec
 
 
-# Cohort membership and the facet picker: the only SQL in the package. Called
-# through the module object rather than bound here, so the sampling shortfall
-# work has one place to change; see sampling.py.
-from .sampling import (  # noqa: E402
-    facets_from_rows,
-    pool_facets,
-    sample_cohort_rows,
-)
-
-# How a cohort describes itself: the selection sentence under it in the UI, and
-# the auto-generated display name. Pure string generation over a normalised
-# slice; see labels.py.
-from .labels import (  # noqa: E402
-    _auto_cohort_label,
-    clean_cohort_label,
-    cohort_selection_text,
-)
 
 def build_cohort(
     conn: spec.Connection,
     pool_key: str,
     selection: spec.CohortSpec,
     *,
-    label: Optional[str] = None,
+    label: str | None = None,
 ) -> dict:
     """Sample a cohort and record how it was sampled.
 
@@ -648,7 +708,7 @@ def build_cohort(
     }
 
 
-def rename_cohort(pool: Path, cohort_id: str, label: str) -> Optional[dict]:
+def rename_cohort(pool: Path, cohort_id: str, label: str) -> dict | None:
     """Set a cohort's display label. Membership is untouched."""
     cohort = read_cohort(pool, cohort_id)
     if not cohort:
@@ -691,9 +751,9 @@ async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> 
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), ANALYZE_TIMEOUT_S)
-    except asyncio.TimeoutError:
+    except TimeoutError as exc:
         proc.kill()
-        raise RuntimeError("page reconstruction timed out")
+        raise RuntimeError("page reconstruction timed out") from exc
 
     if proc.returncode != 0:
         detail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()
@@ -701,8 +761,8 @@ async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> 
 
     try:
         return json.loads(stdout.decode("utf-8"))
-    except Exception:
-        raise RuntimeError("page reconstruction returned no digest")
+    except Exception as exc:
+        raise RuntimeError("page reconstruction returned no digest") from exc
 
 
 def _seconds(ms) -> float:
@@ -803,7 +863,7 @@ def _usable_frames(frames: list) -> list:
     return [f for f in frames if Path(f.get("file") or "").is_file()]
 
 
-def _session_model_parts(digest: dict, frames: list, meta: Optional[dict] = None):
+def _session_model_parts(digest: dict, frames: list, meta: dict | None = None):
     from google.genai import types
 
     usable = _usable_frames(frames)
@@ -856,7 +916,7 @@ def _session_model_config():
 
 
 def build_inlined_session_request(
-    session_id: str, digest: dict, frames: list, meta: Optional[dict] = None
+    session_id: str, digest: dict, frames: list, meta: dict | None = None
 ):
     """One Batch API request for a session write-up, keyed by session_id."""
     from google.genai import types
@@ -875,8 +935,8 @@ def write_analysis_result(
     text: str,
     *,
     frame_count: int = 0,
-    warnings: Optional[list] = None,
-    model: Optional[str] = None,
+    warnings: list | None = None,
+    model: str | None = None,
 ) -> dict:
     result = {
         "status": "done",
@@ -891,7 +951,7 @@ def write_analysis_result(
     return result
 
 
-async def call_gemini(digest: dict, frames: list, meta: Optional[dict] = None) -> str:
+async def call_gemini(digest: dict, frames: list, meta: dict | None = None) -> str:
     from google import genai
     from google.genai import types
 
@@ -909,7 +969,7 @@ async def call_gemini(digest: dict, frames: list, meta: Optional[dict] = None) -
     return text
 
 
-def _batch_jsonl_path(work_dir: Optional[Path] = None) -> Path:
+def _batch_jsonl_path(work_dir: Path | None = None) -> Path:
     """A private, unshared file for one batch's JSONL.
 
     Disk-backed rather than /tmp: on a small box /tmp is tmpfs, and this holds a
@@ -937,8 +997,8 @@ async def submit_prepared_gemini_batch(
     prepared: list,
     *,
     display_name: str,
-    work_dir: Optional[Path] = None,
-    pool: Optional[Path] = None,
+    work_dir: Path | None = None,
+    pool: Path | None = None,
 ) -> str:
     """Create a Batch job from (entry, digest) pairs, one session at a time.
 
@@ -1097,8 +1157,8 @@ class BatchStillRunning(RuntimeError):
 async def wait_gemini_batch(
     job_name: str,
     *,
-    poll_s: Optional[float] = None,
-    max_wait_s: Optional[float] = None,
+    poll_s: float | None = None,
+    max_wait_s: float | None = None,
 ):
     """Poll until the batch reaches a terminal state; return the final job.
 
@@ -1245,7 +1305,7 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
     )
 
 
-def load_session_digest(session_dir: Path) -> Optional[dict]:
+def load_session_digest(session_dir: Path) -> dict | None:
     """Read extractor digest.json if a prior reconstruction left one on disk."""
     path = session_dir / ANALYSIS_DIR / "digest.json"
     if not path.is_file():
@@ -1460,7 +1520,7 @@ async def apply_cohort_batch(
     cohort: dict,
     prepared: list,
     *,
-    job_name: Optional[str] = None,
+    job_name: str | None = None,
 ) -> None:
     """Wait for a batch job and write per-session analysis.json results."""
     name = job_name or (cohort.get("batch") or {}).get("name")

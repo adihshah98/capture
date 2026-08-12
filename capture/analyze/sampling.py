@@ -27,10 +27,9 @@ where it will be fixed.
 """
 
 import json
-from typing import List, Optional, Tuple
+from typing import Any
 
 from . import spec as cohort_spec
-from .spec import CohortSpec, Connection
 from .slices import (
     DEVICE_VALUES,
     OUTCOME_LABELS,
@@ -41,8 +40,10 @@ from .slices import (
     page_path,
     row_matches_slice,
 )
+from .spec import CohortSpec, Connection
 
-def _parse_index_json(raw) -> Optional[dict]:
+
+def _parse_index_json(raw) -> dict | None:
     """A JSON-text index column as a dict, or None when it is not one.
 
     `except Exception` is deliberately wide -- the column is text and a malformed
@@ -96,7 +97,7 @@ def _facet_counts_listed(counts: dict, field: str, order=None) -> list:
 
 def facets_from_rows(rows: list) -> dict:
     """Build the cut-picker facet payload from slice-shaped rows."""
-    counts = {
+    counts: dict[str, dict[str, int]] = {
         "outcome": {},
         "device": {},
         "page": {},
@@ -151,9 +152,9 @@ def _cohort_where(
     *,
     min_duration_ms: int,
     url_contains: str,
-    start_ms: Optional[int] = None,
-    end_ms: Optional[int] = None,
-) -> Tuple[str, List]:
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> tuple[str, list]:
     """Shared WHERE clause for cohort sampling.
 
     Time bounds use `last_seen` so a window means “sessions that were active
@@ -164,7 +165,7 @@ def _cohort_where(
         "chunk_count > 0",
         "(last_seen - first_seen) >= ?",
     ]
-    params: List = [pool, int(min_duration_ms)]
+    params: list = [pool, int(min_duration_ms)]
     needle = (url_contains or "").strip()
     if needle:
         where.append("url LIKE ?")
@@ -192,8 +193,8 @@ def _sample_candidates(
     min_duration_ms: int,
     url_contains: str,
     limit: int,
-    start_ms: Optional[int] = None,
-    end_ms: Optional[int] = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
     order: str = cohort_spec.ORDER_LATEST,
 ) -> list:
     """Index rows (with slice facts) that clear the base duration/path/time gates."""
@@ -230,11 +231,11 @@ def _sample_matching_rows(
     *,
     min_duration_ms: int,
     url_contains: str,
-    slice_spec: Optional[dict],
-    exclude_ids: Optional[set] = None,
+    slice_spec: dict | None,
+    exclude_ids: set | None = None,
     tag: str = "a",
-    start_ms: Optional[int] = None,
-    end_ms: Optional[int] = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
     order: str = cohort_spec.ORDER_LATEST,
 ) -> list:
     """Sessions matching a cut-style slice, tagged for the sample arm."""
@@ -277,13 +278,16 @@ def sample_cohort_rows(conn: Connection, pool: str, spec: CohortSpec) -> list:
     `end_ms` bound that same clock. Sessions with more clicks win a tie.
     """
     spec = spec.normalised()
-    base = dict(
-        min_duration_ms=spec.min_duration_ms,
-        url_contains=spec.url_contains,
-        start_ms=spec.start_ms,
-        end_ms=spec.end_ms,
-        order=spec.order,
-    )
+    # Annotated: these are splatted into _sample_matching_rows, and an
+    # unannotated literal infers dict[str, object], which loses every parameter
+    # type at the call site.
+    base: dict[str, Any] = {
+        "min_duration_ms": spec.min_duration_ms,
+        "url_contains": spec.url_contains,
+        "start_ms": spec.start_ms,
+        "end_ms": spec.end_ms,
+        "order": spec.order,
+    }
 
     if spec.uses_groups:
         sessions = _sample_matching_rows(
@@ -338,8 +342,8 @@ def sample_cohort_rows(conn: Connection, pool: str, spec: CohortSpec) -> list:
     if spec.any_n > 0:
         return [_entry(row) for row in matched[: spec.any_n]]
 
-    purchased = []
-    non_purchase = []
+    purchased: list[dict] = []
+    non_purchase: list[dict] = []
     for row in matched:
         if row.get("bought"):
             if len(purchased) < spec.purchased_n:

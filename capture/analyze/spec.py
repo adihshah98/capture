@@ -16,7 +16,7 @@ the label writer and the port can all depend on it without a cycle.
 
 import os
 from dataclasses import dataclass, field, replace
-from typing import Any, Optional, Protocol
+from typing import Any, Protocol
 
 
 class Connection(Protocol):
@@ -118,8 +118,8 @@ class CohortSpec:
     # Base gates, applied in SQL for every mode.
     min_duration_ms: int = MIN_DURATION_MS
     url_contains: str = URL_CONTAINS
-    start_ms: Optional[int] = None
-    end_ms: Optional[int] = None
+    start_ms: int | None = None
+    end_ms: int | None = None
     order: str = ORDER_LATEST
 
     # Cut-style slices, already normalised by slices.normalize_slice.

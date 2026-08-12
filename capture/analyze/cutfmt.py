@@ -15,19 +15,18 @@ missing share renders as nothing, a wrong one renders as fact.
 """
 
 import re
-from typing import Optional
 
 # Insight sections hold {observation, share, action} objects; recommendations
 # and caveats stay plain string lists (a punch list / sample limit has no share).
 CUT_INSIGHT_SECTIONS = ("journey", "attention", "intent", "blockers")
-CUT_SECTIONS = CUT_INSIGHT_SECTIONS + ("caveats",)
+CUT_SECTIONS = (*CUT_INSIGHT_SECTIONS, "caveats")
 # The prompt asks for 3-8 items; keep a little headroom so a good extra item
 # is kept rather than silently dropped.
 CUT_ITEMS_PER_SECTION = 10
 CUT_RECOMMENDATIONS_CAP = 8
 
 
-def empty_cut_analysis(error: Optional[str] = None) -> dict:
+def empty_cut_analysis(error: str | None = None) -> dict:
     out = {
         "headline": "",
         "recommendations": [],
@@ -43,7 +42,7 @@ def _clean_text(value, limit: int) -> str:
     return value.strip()[:limit] if isinstance(value, str) and value.strip() else ""
 
 
-def _insight_item(item) -> Optional[dict]:
+def _insight_item(item) -> dict | None:
     """One {observation, share, action}, or None when there is no observation.
 
     A bare string is accepted as the observation: the model occasionally falls
@@ -106,7 +105,7 @@ def _recommendations_from_actions(out: dict) -> list:
 _SHARE_DENOM_RE = re.compile(r"\b(\d+)\s+of\s+(\d+)\b", re.IGNORECASE)
 
 
-def _share_denominator_ok(share: str, n: Optional[int]) -> bool:
+def _share_denominator_ok(share: str, n: int | None) -> bool:
     """False when a share cites a total that is not the group size.
 
     The model has been seen to write the cohort-wide total into a share for a
@@ -122,7 +121,7 @@ def _share_denominator_ok(share: str, n: Optional[int]) -> bool:
     return all(int(den) == n and int(num) <= n for num, den in found)
 
 
-def normalize_cut_analysis(raw, n: Optional[int] = None) -> dict:
+def normalize_cut_analysis(raw, n: int | None = None) -> dict:
     """Coerce the model's JSON into the documented shape, dropping anything else.
 
     `n` is the group size when known. Shares citing a different total are

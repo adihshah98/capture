@@ -17,7 +17,6 @@ that view back off before anything writes it down.
 
 import re
 from pathlib import Path
-from typing import Optional
 
 from . import spec, storage
 from .labels import cohort_selection_text
@@ -250,7 +249,7 @@ COHORT_VIEW_ONLY_SESSION_FIELDS = (
 )
 
 
-def persistable_cohort(enriched: dict, stored: Optional[dict] = None) -> dict:
+def persistable_cohort(enriched: dict, stored: dict | None = None) -> dict:
     """Strip an enriched cohort back to what belongs on disk.
 
     The status refresh itself is a durable fact — a crashed runner leaves rows

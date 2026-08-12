@@ -22,7 +22,6 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 from . import store as analyze_store
 
@@ -50,7 +49,7 @@ def _session_ref(session_dir: Path) -> tuple:
     return pool_key(session_dir.parent), session_dir.name
 
 
-def read_analysis(session_dir: Path) -> Optional[dict]:
+def read_analysis(session_dir: Path) -> dict | None:
     key, sid = _session_ref(session_dir)
     return analyze_store.read_analysis(analyze_store.connect(), key, sid)
 
@@ -65,13 +64,13 @@ def forget_analyses(pool: Path) -> int:
     return analyze_store.forget_analyses(analyze_store.connect(), pool_key(pool))
 
 
-def read_job(session_dir: Path) -> Optional[dict]:
+def read_job(session_dir: Path) -> dict | None:
     """In-progress or failed async analysis job, if any."""
     key, sid = _session_ref(session_dir)
     return analyze_store.read_job(analyze_store.connect(), key, sid)
 
 
-def write_job(session_dir: Path, status: str, error: Optional[str] = None) -> dict:
+def write_job(session_dir: Path, status: str, error: str | None = None) -> dict:
     job = {"status": status, "updated_at": int(time.time() * 1000)}
     if error:
         job["error"] = error
@@ -185,7 +184,7 @@ def safe_cohort_id(cohort_id: str) -> str:
     return raw
 
 
-def _read_cohort_file(path: Path) -> Optional[dict]:
+def _read_cohort_file(path: Path) -> dict | None:
     if not path.is_file():
         return None
     try:
@@ -213,7 +212,7 @@ def migrate_legacy_cohort(pool: Path) -> None:
     legacy.unlink(missing_ok=True)
 
 
-def read_cohort(pool: Path, cohort_id: str) -> Optional[dict]:
+def read_cohort(pool: Path, cohort_id: str) -> dict | None:
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
@@ -235,7 +234,7 @@ def list_cohorts(pool: Path) -> list:
     return analyze_store.list_cohorts(conn, key)
 
 
-def latest_cohort(pool: Path) -> Optional[dict]:
+def latest_cohort(pool: Path) -> dict | None:
     cohorts = list_cohorts(pool)
     return cohorts[0] if cohorts else None
 
@@ -257,7 +256,7 @@ def read_cuts(pool: Path, cohort_id: str) -> dict:
     return analyze_store.read_cuts(conn, key, cohort_id)
 
 
-def read_cut(pool: Path, cohort_id: str, key: str) -> Optional[dict]:
+def read_cut(pool: Path, cohort_id: str, key: str) -> dict | None:
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
@@ -312,8 +311,8 @@ def mark_cohort_session(
     entry: dict,
     status: str,
     *,
-    analysis: Optional[str] = None,
-    error: Optional[str] = None,
+    analysis: str | None = None,
+    error: str | None = None,
 ) -> None:
     """Record one session's status, in the cohort and in the caller's dict.
 

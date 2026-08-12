@@ -32,12 +32,10 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
 
 from psycopg.rows import dict_row
 
-from .. import db
-from .. import projects
+from .. import db, projects
 
 # Columns promoted out of the cohort blob. Everything else in a cohort dict
 # (purchased_n, all_n, slice, selection, url_contains, ...) rides in `fields`.
@@ -81,7 +79,7 @@ class Store:
 _store = Store()
 
 
-def connect(data_root: Path = None) -> Store:
+def connect(data_root: Path | None = None) -> Store:
     """The handle analyze.py threads through. data_root is accepted and ignored:
     cohorts are no longer addressed by where the pool sits on disk."""
     return _store
@@ -157,7 +155,7 @@ def _now() -> int:
     return int(time.time() * 1000)
 
 
-def read_cohort(store: Store, pool_key: str, cohort_id: str) -> Optional[dict]:
+def read_cohort(store: Store, pool_key: str, cohort_id: str) -> dict | None:
     with store.tx(pool_key) as (conn, project_id):
         row = _rows(conn).execute(
             "SELECT * FROM cohorts WHERE project_id = %s AND cohort_id = %s",
@@ -230,7 +228,7 @@ def write_cohort(store: Store, pool_key: str, cohort: dict) -> dict:
 
 def update_session_status(
     store: Store, pool_key: str, cohort_id: str, session_id: str, *,
-    status: str, analysis: Optional[str] = None, error: Optional[str] = None,
+    status: str, analysis: str | None = None, error: str | None = None,
 ) -> bool:
     """Mark one session in one cohort.
 
@@ -257,7 +255,7 @@ def update_session_status(
 
 def set_cohort_status(
     store: Store, pool_key: str, cohort_id: str, status: str, *,
-    batch: Optional[dict] = None, clear_batch: bool = False,
+    batch: dict | None = None, clear_batch: bool = False,
 ) -> None:
     """Move a cohort's own status without rewriting its membership."""
     with store.tx(pool_key) as (conn, project_id):
@@ -388,7 +386,7 @@ def read_cuts(store: Store, pool_key: str, cohort_id: str) -> dict:
     return {key: cut for key, cut in rows if isinstance(cut, dict)}
 
 
-def read_cut(store: Store, pool_key: str, cohort_id: str, key: str) -> Optional[dict]:
+def read_cut(store: Store, pool_key: str, cohort_id: str, key: str) -> dict | None:
     with store.tx(pool_key) as (conn, project_id):
         row = conn.execute(
             "SELECT cut FROM cohort_cuts"
@@ -567,7 +565,7 @@ def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
 # frame cache stays on disk: it is regenerable scratch for one run, not state.
 
 
-def read_analysis(store: Store, pool_key: str, session_id: str) -> Optional[dict]:
+def read_analysis(store: Store, pool_key: str, session_id: str) -> dict | None:
     with store.tx(pool_key) as (conn, project_id):
         row = conn.execute(
             "SELECT body FROM analyses WHERE project_id = %s AND session_id = %s",
@@ -612,7 +610,7 @@ def forget_analyses(store: Store, pool_key: str) -> int:
     return removed
 
 
-def read_job(store: Store, pool_key: str, session_id: str) -> Optional[dict]:
+def read_job(store: Store, pool_key: str, session_id: str) -> dict | None:
     with store.tx(pool_key) as (conn, project_id):
         row = _rows(conn).execute(
             "SELECT status, error, updated_at FROM analysis_jobs"

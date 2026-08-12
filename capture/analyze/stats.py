@@ -23,7 +23,6 @@ Splits that fail a gate are still named, under "Examined and not reported" --
 without it the model reads silence as uniformity and asserts the opposite.
 """
 
-from typing import Optional
 
 from .slices import OUTCOME_LABELS
 
@@ -62,7 +61,7 @@ CROSS_TAB_DIMENSIONS = {
 }
 
 
-def _dimension_value(row: dict, dimension: str) -> Optional[str]:
+def _dimension_value(row: dict, dimension: str) -> str | None:
     """One row's value on a cross-tab dimension, or None when unknown.
 
     Unknown is not a value: a session with no utm_source may be direct,
@@ -88,7 +87,7 @@ def _coverage(rows: list, dimension: str) -> tuple:
     return known, len(rows)
 
 
-def _purchase_rate(rows: list) -> Optional[float]:
+def _purchase_rate(rows: list) -> float | None:
     """Share of rows that purchased, as a percentage, or None for no rows."""
     if not rows:
         return None
@@ -113,25 +112,33 @@ def cross_tab_cells(rows: list, left: str, right: str) -> dict:
     known, total = _coverage(rows, left)
     outcomes = {(row.get("outcome") or "rest") for row in rows}
     graded = "lift" if len(outcomes) > 1 else "composition"
-    out = {
-        "left": left,
-        "right": right,
-        "coverage": (known, total),
-        "baseline": _purchase_rate(rows),
-        "graded": graded,
-        "kept": [],
-        "suppressed": 0,
-    }
-    if not rows or not known:
-        return out
+    baseline = _purchase_rate(rows)
+    # Accumulated as locals rather than in `out`: the result mixes strings,
+    # tuples, lists and counters, so reading a counter back out of it gives the
+    # union of all of them and `+= 1` stops meaning anything checkable.
+    kept: list[dict] = []
+    suppressed = 0
 
-    buckets: dict = {}
+    def result() -> dict:
+        return {
+            "left": left,
+            "right": right,
+            "coverage": (known, total),
+            "baseline": baseline,
+            "graded": graded,
+            "kept": kept,
+            "suppressed": suppressed,
+        }
+
+    if not rows or not known:
+        return result()
+
+    buckets: dict[str, list] = {}
     for row in rows:
         value = _dimension_value(row, left)
         if value:
             buckets.setdefault(value, []).append(row)
 
-    baseline = out["baseline"]
     for value, bucket in sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         n = len(bucket)
         coverage = n / total if total else 0.0
@@ -143,13 +150,13 @@ def cross_tab_cells(rows: list, left: str, right: str) -> dict:
             lift is None or abs(lift) < CROSS_TAB_MIN_LIFT_PTS
         )
         if too_small or too_flat:
-            out["suppressed"] += 1
+            suppressed += 1
             continue
-        breakdown = {}
+        breakdown: dict[str, int] = {}
         for member in bucket:
             key = _dimension_value(member, right) or "unknown"
             breakdown[key] = breakdown.get(key, 0) + 1
-        out["kept"].append(
+        kept.append(
             {
                 "value": value,
                 "n": n,
@@ -159,14 +166,14 @@ def cross_tab_cells(rows: list, left: str, right: str) -> dict:
                 "breakdown": breakdown,
             }
         )
-    return out
+    return result()
 
 
 def _pct(value: float) -> str:
     return f"{value:.0f}%"
 
 
-def cross_tab_block(rows: list, spec: Optional[dict] = None) -> str:
+def cross_tab_block(rows: list, spec: dict | None = None) -> str:
     """Exact, pre-computed splits for the group — empty when nothing clears.
 
     Dimensions pinned by the filter are skipped: they are constant across the

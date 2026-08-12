@@ -16,11 +16,11 @@ two apart.
 """
 
 import time
-from typing import Optional
 
 from . import spec as cohort_spec
-from .spec import CohortSpec
 from .slices import OUTCOME_LABELS, normalize_slice, slice_label
+from .spec import CohortSpec
+
 
 def _slice_scope_text(spec: dict, url_contains: str) -> str:
     parts = []
@@ -34,13 +34,13 @@ def _slice_scope_text(spec: dict, url_contains: str) -> str:
     return ", ".join(parts) if parts else "any page"
 
 
-def _format_cohort_clock(ms: Optional[int]) -> str:
+def _format_cohort_clock(ms: int | None) -> str:
     if ms is None:
         return ""
     return time.strftime("%b %-d %H:%M", time.localtime(int(ms) / 1000))
 
 
-def _time_window_text(start_ms: Optional[int], end_ms: Optional[int]) -> str:
+def _time_window_text(start_ms: int | None, end_ms: int | None) -> str:
     if start_ms is None and end_ms is None:
         return ""
     if start_ms is not None and end_ms is not None:
@@ -88,7 +88,7 @@ def cohort_selection_text(selection: CohortSpec) -> str:
     )
 
 
-def _slice_label_bits(spec: Optional[dict], url_contains: str = "") -> list:
+def _slice_label_bits(spec: dict | None, url_contains: str = "") -> list:
     """Compact filter tokens for cohort display names."""
     bits = []
     clean = normalize_slice(spec)
@@ -140,7 +140,7 @@ def _auto_cohort_label(selection: CohortSpec, *, stamp: str) -> str:
     return " · ".join(parts)[:120]
 
 
-def clean_cohort_label(label: Optional[str]) -> str:
+def clean_cohort_label(label: str | None) -> str:
     """Trim and cap a cohort display name. Empty string means “use auto label”."""
     return str(label or "").strip()[:120]
 

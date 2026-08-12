@@ -17,7 +17,7 @@ translatable into SQL (see the sampling-shortfall note in the refactor doc).
 
 import re
 import urllib.parse
-from typing import Optional
+from typing import Any
 
 META_SOURCES = frozenset({"facebook", "meta", "fb", "instagram", "ig"})
 
@@ -31,7 +31,7 @@ DEVICE_VALUES = ("mobile", "desktop")
 OUTCOME_VALUES = ("purchased", "checkout", "rest")
 
 
-def device_class(device: Optional[dict]) -> Optional[str]:
+def device_class(device: dict | None) -> str | None:
     """mobile/desktop from the indexed viewport, or None when unknown."""
     if not isinstance(device, dict):
         return None
@@ -41,7 +41,7 @@ def device_class(device: Optional[dict]) -> Optional[str]:
     return "mobile" if width < MOBILE_MAX_WIDTH else "desktop"
 
 
-def outcome_class(order: Optional[dict]) -> str:
+def outcome_class(order: dict | None) -> str:
     """purchased | checkout (reached, did not buy) | rest."""
     if not isinstance(order, dict):
         return "rest"
@@ -52,7 +52,7 @@ def outcome_class(order: Optional[dict]) -> str:
     return "rest"
 
 
-def is_meta_attribution(attribution: Optional[dict]) -> bool:
+def is_meta_attribution(attribution: dict | None) -> bool:
     attrs = attribution if isinstance(attribution, dict) else {}
     if attrs.get("fbclid"):
         return True
@@ -82,7 +82,7 @@ def _unquote_segments(path: str) -> str:
     )
 
 
-def page_path(url: Optional[str]) -> Optional[str]:
+def page_path(url: str | None) -> str | None:
     """Landing-page path from an entry URL, or None when there is not one.
 
     Pathname only: no query or hash. Trailing slashes are stripped (except `/`)
@@ -125,7 +125,7 @@ def page_path(url: Optional[str]) -> Optional[str]:
     return path or None
 
 
-def normalize_slice(spec: Optional[dict]) -> dict:
+def normalize_slice(spec: dict | None) -> dict:
     """Normalize a slice: any combination of outcome, device, page and attribution.
 
     Keys: outcome (list of purchased|checkout|rest), device (list of
@@ -142,7 +142,9 @@ def normalize_slice(spec: Optional[dict]) -> dict:
     """
     if not isinstance(spec, dict):
         return {}
-    out = {}
+    # Mixed by design: list[str] for the multi-valued keys, str for page and
+    # the utm_* fields, bool for fbclid.
+    out: dict[str, Any] = {}
 
     def _multi(key, allowed, *, total: bool):
         """Clean one multi-valued key.
@@ -208,7 +210,8 @@ def row_matches_slice(row: dict, spec: dict) -> bool:
         # Unknown / missing landing page can't satisfy a page constraint.
         if (row.get("page") or "") != want_page:
             return False
-    attrs = row.get("attribution") if isinstance(row.get("attribution"), dict) else {}
+    raw_attrs = row.get("attribution")
+    attrs: dict = raw_attrs if isinstance(raw_attrs, dict) else {}
     if "fbclid" in spec:
         has = bool(attrs.get("fbclid"))
         if spec["fbclid"] and not has:

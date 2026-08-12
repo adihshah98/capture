@@ -22,10 +22,10 @@ packages = ["capture", "capture.api", "capture.analyze"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-# capture/analyze is the co-founder's; src/analyze is its Node extractor.
-# .claude holds agent git worktrees — full copies of this repo. Without this,
-# `ruff .` walks them and reports (or fixes) findings in someone else's checkout.
-extend-exclude = ["capture/analyze", "src/analyze", ".venv", "node_modules", ".claude"]
+# src/analyze is the Node extractor, not Python. .claude holds agent git
+# worktrees — full copies of this repo. Without this, `ruff .` walks them and
+# reports (or fixes) findings in someone else's checkout.
+extend-exclude = ["src/analyze", ".venv", "node_modules", ".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
@@ -41,6 +41,10 @@ ignore = [
     # isinstance(x, int | float) is slower than the tuple form in CPython, and
     # every site here is on the ingest path. Not worth throughput for syntax.
     "UP038",
+    # capture/analyze's __all__ is grouped by concern (persistence, cuts, batch,
+    # orchestration) with a comment per group, which is how a reader finds the
+    # name they want. Alphabetising it would interleave the groups and lose that.
+    "RUF022",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -54,17 +58,15 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 
-# `exclude` only skips directory crawling, not import-following, so the
-# co-founder's package needs ignore_errors to actually stay out of our report.
-[[tool.mypy.overrides]]
-module = "capture.analyze.*"
-ignore_errors = true
-
 [tool.coverage.run]
 branch = true
-# The package as installed, not the repo root: `omit` below is what keeps the
-# co-founder's analysis package out, and its size would otherwise swamp the
-# signal from the modules this team actually owns.
+# The package as installed, not the repo root.
+#
+# `omit` still drops capture/analyze, but the reason it was written for is gone:
+# the package is no longer excluded from ruff or mypy, so "someone else's code"
+# is not why it is unmeasured. What is left is a size argument — it is a quarter
+# of capture/ — and that is worth revisiting once there is a baseline to compare
+# against, rather than in the commit that lifted the linters.
 source = ["capture"]
 omit = ["capture/analyze/*"]
 # Load-bearing. Every test_api_*.py drives a real uvicorn *subprocess*
