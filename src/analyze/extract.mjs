@@ -468,16 +468,64 @@ export async function extractSession({
   return digest;
 }
 
+/**
+ * CLI args for the extractor subprocess.
+ *
+ * Positional layout used to be `sessionDir outDir bundlePath fps maxFrames
+ * ...chunks`. Inserting one arg on either side made the first chunk name land
+ * in `maxFrames`: Number('1700…json') is NaN, NaN || 0 is 0, so the frame cap
+ * silently disabled and that chunk vanished. Named flags keep the variadic
+ * chunk list from ever being read as numbers.
+ */
+export function parseFiniteNumber(raw, name) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new Error(`${name} must be a finite number, got ${JSON.stringify(raw)}`);
+  }
+  return n;
+}
+
+export function parseExtractorArgs(argv) {
+  const positional = [];
+  let fps = 1;
+  let maxFrames = 0;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--fps') {
+      const next = argv[++i];
+      if (next == null) throw new Error('--fps requires a value');
+      fps = parseFiniteNumber(next, '--fps');
+      continue;
+    }
+    if (arg === '--max-frames') {
+      const next = argv[++i];
+      if (next == null) throw new Error('--max-frames requires a value');
+      maxFrames = parseFiniteNumber(next, '--max-frames');
+      continue;
+    }
+    if (typeof arg === 'string' && arg.startsWith('--')) {
+      throw new Error(`unknown flag: ${arg}`);
+    }
+    positional.push(arg);
+  }
+  const [sessionDir, outDir, bundlePath, ...chunkNames] = positional;
+  if (!sessionDir || !outDir || !bundlePath) {
+    throw new Error(
+      'usage: extract.mjs <sessionDir> <outDir> <bundlePath> [--fps N] [--max-frames N] [chunks...]'
+    );
+  }
+  return { sessionDir, outDir, bundlePath, fps, maxFrames, chunkNames };
+}
+
 if (process.argv[1] && process.argv[1].endsWith('extract.mjs')) {
-  const [, , sessionDir, outDir, bundlePath, fps, maxFrames, ...chunkNames] = process.argv;
-  extractSession({
-    sessionDir,
-    outDir,
-    bundlePath,
-    fps: Number(fps) || 1,
-    maxFrames: Number(maxFrames) || 0,
-    chunkNames,
-  })
+  let opts;
+  try {
+    opts = parseExtractorArgs(process.argv.slice(2));
+  } catch (err) {
+    process.stderr.write(String((err && err.message) || err) + '\n');
+    process.exit(1);
+  }
+  extractSession(opts)
     .then((d) => {
       process.stdout.write(JSON.stringify(d));
     })

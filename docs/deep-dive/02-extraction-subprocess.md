@@ -193,17 +193,17 @@ confident-sounding analysis was built on half a recording.
   reaches the error message ([:1912](../../capture/analyze/__init__.py#L1912)),
   which is usually the actual exception.
 
-**Positional argument order is load-bearing** and undefended:
+**Named flags keep fps / max-frames out of the chunk list:**
 
 ```python
+"--fps",
 str(ANALYZE_FPS),
+"--max-frames",
 str(ANALYZE_MAX_FRAMES),
-# Positional, and ahead of the variadic chunk names.
 *chunk_names,
 ```
 
-The extractor destructures the same order at
-[:471](../../src/analyze/extract.mjs#L471). Insert an argument on one side only and
-the first chunk name is parsed as `maxFrames` — `Number("1700000000000-ab-xyz.json")`
-is `NaN`, `NaN || 0` is `0`, so the cap silently disables and that chunk vanishes from
-the analysis. No error, on either side.
+The extractor parses `--fps` / `--max-frames` by name and rejects non-finite
+values. The old positional layout would read a chunk filename as `maxFrames` —
+`Number("1700000000000-ab-xyz.json")` is `NaN`, `NaN || 0` is `0` — so the cap
+silently disabled and that chunk vanished from the analysis.

@@ -29,7 +29,7 @@ where it applies.
 | 7 | 🟠 | ~~`pool_facets` unbounded `fetchall`~~ — **fixed** | old bug 4 |
 | 8 | 🟡 | `COHORT_URL_CONTAINS` hardcodes one customer | old bug 9 |
 | 9 | 🟡 | `_batch_jsonl_path` collides | old bug 2 |
-| 10 | 🟡 | Extractor argument order is undefended | **new** |
+| 10 | 🟡 | ~~Extractor argument order is undefended~~ — **fixed** | **new** |
 
 ---
 
@@ -237,9 +237,9 @@ covers the submit path's `open("w")` truncating rather than appending.
 Covered by `tests/server/test_batch_tempfile.py` (fast tier — no database). Verified
 against the old implementation: reverting the name turns three of its four red.
 
-## 10. 🟡 Extractor argument order is undefended
+## 10. 🟡 ~~Extractor argument order is undefended~~ — **fixed**
 
-[`run_extractor`](../capture/analyze/__init__.py#L1897) passes positionally:
+[`run_extractor`](../capture/analyze/session.py) used to pass positionally:
 
 ```python
 str(ANALYZE_FPS),
@@ -248,18 +248,18 @@ str(ANALYZE_MAX_FRAMES),
 *chunk_names,
 ```
 
-destructured at [extract.mjs:471](../src/analyze/extract.mjs#L471). Insert an argument
-on one side only and the first chunk name is read as `maxFrames`. Verified:
+destructured in [extract.mjs](../src/analyze/extract.mjs). Insert an argument
+on one side only and the first chunk name was read as `maxFrames`. Verified:
 
 ```
 Number('1700000000000-abcd1234-abcdef.json') -> NaN ;  NaN || 0 -> 0
 ```
 
-So the frame cap silently disables **and** that chunk drops out of the analysis. No
-error on either side. The comment acknowledges the coupling; nothing enforces it.
+So the frame cap silently disabled **and** that chunk dropped out of the analysis. No
+error on either side.
 
-**Fix:** pass `--fps` / `--max-frames` as named flags, or have the extractor validate
-`Number.isFinite` and fail loudly.
+**Fix (landed):** `--fps` / `--max-frames` named flags, with `Number.isFinite`
+validation that exits non-zero on garbage instead of coercing to 0.
 
 ---
 
@@ -284,8 +284,7 @@ error on either side. The comment acknowledges the coupling; nothing enforces it
 4. **#8** — env var (small, and #1 removes one of its two sites).
 5. **#4 + #6 + #7 + #5** — one project inside `sampling.py`, alongside the Postgres
    port. See [design review §4](analyze-design-review.md).
-6. ~~**#9, #10** — hygiene.~~ **#9 done.** #10 remains: it needs a change in
-   `src/analyze/extract.mjs`, which is the Node side and its own review surface.
+6. ~~**#9, #10** — hygiene.~~ **Both done.**
 
 Verification for each: `npm test` green, prompt hashes unchanged
 (`5637eecc` / `d6416d2b` / `6007448b`), and for #3 specifically, assert both parsers

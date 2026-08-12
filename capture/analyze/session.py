@@ -37,8 +37,12 @@ async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> 
         str(session_dir),
         str(out_dir),
         str(runtime.REPLAYER_BUNDLE),
-        # Positional, and ahead of the variadic chunk names.
+        # Named flags — never positional ahead of the variadic chunk list.
+        # A misplaced arg used to make Number(chunkName) → NaN → maxFrames=0
+        # and drop that chunk from the analysis with no error.
+        "--fps",
         str(runtime.ANALYZE_FPS),
+        "--max-frames",
         str(runtime.ANALYZE_MAX_FRAMES),
         *chunk_names,
         stdout=asyncio.subprocess.PIPE,

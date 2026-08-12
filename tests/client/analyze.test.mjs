@@ -7,6 +7,8 @@ import {
   clicksOf,
   collectEvents,
   idleWindows,
+  parseExtractorArgs,
+  parseFiniteNumber,
   pickFrameTimes,
   scrollTimeline,
   viewportOf,
@@ -199,4 +201,57 @@ test('pickFrameTimes honours the default frame cap used in production', () => {
   const capped = pickFrameTimes(busyEvents(), { maxFrames: 90 });
   assert.ok(capped.length <= 90, `got ${capped.length}`);
   assert.ok(capped.every((t, i) => i === 0 || t > capped[i - 1]));
+});
+
+test('parseExtractorArgs reads fps and max-frames as named flags', () => {
+  const parsed = parseExtractorArgs([
+    '/sessions/s1',
+    '/tmp/out',
+    '/bundle.js',
+    '--fps',
+    '2',
+    '--max-frames',
+    '90',
+    '1700000000000-abcd1234-abcdef.json',
+    '1700000001000-abcd1234-abcdef.json',
+  ]);
+  assert.equal(parsed.fps, 2);
+  assert.equal(parsed.maxFrames, 90);
+  assert.deepEqual(parsed.chunkNames, [
+    '1700000000000-abcd1234-abcdef.json',
+    '1700000001000-abcd1234-abcdef.json',
+  ]);
+});
+
+test('parseExtractorArgs does not treat a chunk name as maxFrames', () => {
+  // The old positional layout would Number() this filename into NaN → 0.
+  const chunk = '1700000000000-abcd1234-abcdef.json';
+  const parsed = parseExtractorArgs([
+    '/sessions/s1',
+    '/tmp/out',
+    '/bundle.js',
+    '--fps',
+    '1',
+    '--max-frames',
+    '90',
+    chunk,
+  ]);
+  assert.equal(parsed.maxFrames, 90);
+  assert.deepEqual(parsed.chunkNames, [chunk]);
+});
+
+test('parseFiniteNumber rejects the silent-NaN path', () => {
+  assert.throws(
+    () => parseFiniteNumber('1700000000000-abcd1234-abcdef.json', '--max-frames'),
+    /finite number/
+  );
+  assert.throws(() => parseFiniteNumber(undefined, '--fps'), /finite number/);
+});
+
+test('parseExtractorArgs fails loudly on a missing flag value', () => {
+  assert.throws(
+    () =>
+      parseExtractorArgs(['/s', '/o', '/b.js', '--max-frames']),
+    /requires a value/
+  );
 });
