@@ -74,7 +74,8 @@ def session_chunk_names(session_dir: Path) -> list:
 
 
 def write_analysis_result(
-    session_dir: Path,
+    project_id: str,
+    session_id: str,
     text: str,
     *,
     frame_count: int = 0,
@@ -89,17 +90,17 @@ def write_analysis_result(
         "frame_count": frame_count,
         "warnings": warnings or [],
     }
-    write_analysis(session_dir, result)
-    clear_job(session_dir)
+    write_analysis(project_id, session_id, result)
+    clear_job(project_id, session_id)
     return result
 
 
 async def extract_session_digest(
-    session_dir: Path, chunk_names: list, *, force: bool = False
+    session_dir: Path, chunk_names: list, *, project_id: str, force: bool = False
 ) -> dict:
     """Rebuild frames for a session. Returns the extractor digest."""
     if not force:
-        cached = read_analysis(session_dir)
+        cached = read_analysis(project_id, session_dir.name)
         if cached:
             return {"cached": True, "analysis": cached}
 
@@ -115,22 +116,28 @@ async def extract_session_digest(
     return digest
 
 
-async def analyze_session(session_dir: Path, chunk_names: list, force: bool = False) -> dict:
+async def analyze_session(
+    project_id: str, session_dir: Path, chunk_names: list, force: bool = False
+) -> dict:
     if not runtime.ANALYSIS_ENABLED:
         raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
 
+    session_id = session_dir.name
     if not force:
-        cached = read_analysis(session_dir)
+        cached = read_analysis(project_id, session_id)
         if cached:
             return cached
 
-    digest = await extract_session_digest(session_dir, chunk_names, force=True)
-    meta = gemini.session_metadata(session_dir)
+    digest = await extract_session_digest(
+        session_dir, chunk_names, project_id=project_id, force=True
+    )
+    meta = gemini.session_metadata(project_id, session_id)
     _, model_gate = runtime._gates()
     async with model_gate:
         text = await gemini.call_gemini(digest, digest.get("frames") or [], meta)
     return write_analysis_result(
-        session_dir,
+        project_id,
+        session_id,
         text,
         frame_count=len(digest.get("frames") or []),
         warnings=digest.get("warnings") or [],

@@ -19,8 +19,6 @@ from .. import attribution
 from . import prompts, runtime
 from . import store as analyze_store
 from .slices import OUTCOME_LABELS, outcome_class, page_path
-from .storage import _session_ref
-
 SYSTEM_PROMPT = prompts.load("session.md")
 
 
@@ -41,7 +39,7 @@ def _clock(ms) -> str:
 _session_attribution = attribution.parse
 
 
-def session_metadata(session_dir: Path) -> dict:
+def session_metadata(project_id: str, session_id: str) -> dict:
     """How this visitor arrived and how the session ended.
 
     The digest describes what happened on screen and says nothing about where
@@ -56,11 +54,12 @@ def session_metadata(session_dir: Path) -> dict:
     """
     meta: dict = {}
 
-    key, sid = _session_ref(session_dir)
     try:
-        entry, order = analyze_store.session_facts(analyze_store.connect(), key, sid)
+        entry, order = analyze_store.session_facts(
+            analyze_store.connect(), project_id, session_id
+        )
     except Exception as exc:
-        print(f"session metadata unavailable for {sid}: {exc}")
+        print(f"session metadata unavailable for {session_id}: {exc}")
         entry, order = None, None
 
     if entry:
@@ -222,7 +221,7 @@ async def submit_prepared_gemini_batch(
     *,
     display_name: str,
     work_dir: Path | None = None,
-    pool: Path | None = None,
+    project_id: str | None = None,
 ) -> str:
     """Create a Batch job from (entry, digest) pairs, one session at a time.
 
@@ -230,8 +229,8 @@ async def submit_prepared_gemini_batch(
     whole cohort. Always uses the Files API — at cohort scale the inline path
     is both oversized and an OOM hazard while estimating size.
 
-    `pool` is what lets each request carry its session's campaign metadata; a
-    batch submitted without it still works, minus that context.
+    `project_id` is what lets each request carry its session's campaign
+    metadata; a batch submitted without it still works, minus that context.
     """
     from google import genai
     from google.genai import types
@@ -246,7 +245,9 @@ async def submit_prepared_gemini_batch(
         with tmp.open("w") as out:
             for entry, digest in prepared:
                 sid = entry["session_id"]
-                meta = session_metadata(pool / sid) if pool is not None else None
+                meta = (
+                    session_metadata(project_id, sid) if project_id is not None else None
+                )
                 req = build_inlined_session_request(sid, digest, digest.get("frames") or [], meta)
                 payload = req.model_dump(mode="json", exclude_none=True)
                 del req

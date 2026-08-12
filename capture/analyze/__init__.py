@@ -89,11 +89,12 @@ from .slices import (
 # and the cell builder are stats.py's own business, and tests reach them there.
 from .stats import cross_tab_block
 
-# Result and cohort persistence, addressed by pool path and session directory.
-# Re-exported rather than re-implemented: `capture/analysis_port.py` and the
-# suite reach these off the package, and ANALYSIS_FILE in particular is read by
-# the port at import time. None of them is a patchable name, so binding by value
-# here is safe — see the patching contract at the foot of this file.
+# Result and cohort persistence, addressed by project_id (UUID). Path helpers
+# remain for recording files and legacy migration. Re-exported rather than
+# re-implemented: `capture/analysis_port.py` and the suite reach these off the
+# package, and ANALYSIS_FILE in particular is read by the port at import time.
+# None of them is a patchable name, so binding by value here is safe — see the
+# patching contract at the foot of this file.
 from .storage import (
     ANALYSIS_DIR,
     ANALYSIS_FILE,
@@ -107,7 +108,6 @@ from .storage import (
     clear_cut,
     clear_job,
     cohort_path,
-    cohort_store,
     cohorts_dir,
     cuts_path,
     data_root_for,
@@ -125,6 +125,8 @@ from .storage import (
     read_cuts,
     read_job,
     safe_cohort_id,
+    session_dir,
+    sessions_root,
     write_analysis,
     write_cohort,
     write_cut,
@@ -134,19 +136,7 @@ from .storage import (
     _is_project_pool as _is_project_pool,
 )
 from .storage import (
-    _migrate_cohorts_once as _migrate_cohorts_once,
-)
-from .storage import (
-    _migrate_lock as _migrate_lock,
-)
-from .storage import (
-    _migrated as _migrated,
-)
-from .storage import (
     _read_cohort_file as _read_cohort_file,
-)
-from .storage import (
-    _session_ref as _session_ref,
 )
 
 # What the package exports. Declared because most of the names above are
@@ -204,7 +194,6 @@ __all__ = [
     "clear_cut",
     "clear_job",
     "cohort_path",
-    "cohort_store",
     "cohorts_dir",
     "cuts_path",
     "data_root_for",
@@ -222,6 +211,8 @@ __all__ = [
     "read_cuts",
     "read_job",
     "safe_cohort_id",
+    "session_dir",
+    "sessions_root",
     "write_analysis",
     "write_cohort",
     "write_cut",
@@ -469,7 +460,7 @@ COHORT_ORDERS = spec.ORDERS
 # (`ANALYSIS_ENABLED`, `ANALYZE_BATCH`, `_gate_loop`, the concurrency caps)
 # must be assigned on `analyze.runtime`, not on the package — a package
 # assignment would not reach `_gates` or the orchestration call sites above.
-# `_migrated` and `_undeclared_transitions` are only **mutated in place**, so a
-# re-export binds the same object and `.clear()` still reaches the definition.
+# `_undeclared_transitions` is only **mutated in place**, so a re-export binds
+# the same object and `.clear()` still reaches the definition.
 #
 # See docs/analyze-design-review.md §4.1 and the modularize plan.

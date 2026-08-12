@@ -199,16 +199,19 @@ class ServerCase(unittest.TestCase):
         """
         return analyze_store.connect()
 
-    def stored_cohort(self, cohort_id, pool_key=""):
+    def stored_cohort(self, cohort_id, project_id=None):
         """The cohort as persisted, or None. Mirrors analyze.read_cohort."""
-        return analyze_store.read_cohort(self.cohort_store(), pool_key, cohort_id)
+        pid = project_id if project_id is not None else self.project_id
+        return analyze_store.read_cohort(self.cohort_store(), pid, cohort_id)
 
-    def store_cohort(self, cohort, pool_key=""):
+    def store_cohort(self, cohort, project_id=None):
         """Overwrite persisted cohort state, to stage a mid-run condition."""
-        return analyze_store.write_cohort(self.cohort_store(), pool_key, cohort)
+        pid = project_id if project_id is not None else self.project_id
+        return analyze_store.write_cohort(self.cohort_store(), pid, cohort)
 
-    def stored_cuts(self, cohort_id, pool_key=""):
-        return analyze_store.read_cuts(self.cohort_store(), pool_key, cohort_id)
+    def stored_cuts(self, cohort_id, project_id=None):
+        pid = project_id if project_id is not None else self.project_id
+        return analyze_store.read_cuts(self.cohort_store(), pid, cohort_id)
 
     def ingest(self, session_id, payload=None, gzipped=True, token=None, raw=None, headers=None):
         body = (

@@ -944,58 +944,59 @@ class TestCutCache(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.pool = Path(self.tmp.name) / "sessions"
         self.pool.mkdir(parents=True)
+        self.project_id = self._pg_project
         self.addCleanup(self.tmp.cleanup)
 
     def test_round_trips_a_cut_under_its_key(self):
         key = analyze.cut_key({"outcome": "purchased"})
-        self.assertIsNone(analyze.read_cut(self.pool, "cohort-1", key))
-        analyze.write_cut(self.pool, "cohort-1", key, {"cut": key, "n": 3})
-        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", key)["n"], 3)
+        self.assertIsNone(analyze.read_cut(self.project_id, "cohort-1", key))
+        analyze.write_cut(self.project_id, "cohort-1", key, {"cut": key, "n": 3})
+        self.assertEqual(analyze.read_cut(self.project_id, "cohort-1", key)["n"], 3)
 
     def test_cuts_of_one_cohort_do_not_collide(self):
         k1 = analyze.cut_key({"outcome": "purchased"})
         k2 = analyze.cut_key({"utm_source": "meta"})
-        analyze.write_cut(self.pool, "cohort-1", k1, {"n": 1})
-        analyze.write_cut(self.pool, "cohort-1", k2, {"n": 2})
-        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", k1)["n"], 1)
-        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", k2)["n"], 2)
+        analyze.write_cut(self.project_id, "cohort-1", k1, {"n": 1})
+        analyze.write_cut(self.project_id, "cohort-1", k2, {"n": 2})
+        self.assertEqual(analyze.read_cut(self.project_id, "cohort-1", k1)["n"], 1)
+        self.assertEqual(analyze.read_cut(self.project_id, "cohort-1", k2)["n"], 2)
 
     def test_cohorts_do_not_share_a_cut_cache(self):
         key = analyze.cut_key({"outcome": "purchased"})
-        analyze.write_cut(self.pool, "cohort-1", key, {"n": 1})
-        self.assertIsNone(analyze.read_cut(self.pool, "cohort-2", key))
+        analyze.write_cut(self.project_id, "cohort-1", key, {"n": 1})
+        self.assertIsNone(analyze.read_cut(self.project_id, "cohort-2", key))
 
     def test_a_bad_cohort_id_never_reaches_the_filesystem(self):
         with self.assertRaises(ValueError):
             analyze.cuts_path(self.pool, "../../etc/passwd")
-        self.assertEqual(analyze.read_cuts(self.pool, "../../etc/passwd"), {})
+        self.assertEqual(analyze.read_cuts(self.project_id, "../../etc/passwd"), {})
 
     def test_clearing_a_cut_frees_it_to_be_asked_again(self):
         key = analyze.cut_key({"outcome": "purchased"})
-        analyze.write_cut(self.pool, "cohort-1", key, {"n": 3})
-        self.assertTrue(analyze.clear_cut(self.pool, "cohort-1", key))
-        self.assertIsNone(analyze.read_cut(self.pool, "cohort-1", key))
+        analyze.write_cut(self.project_id, "cohort-1", key, {"n": 3})
+        self.assertTrue(analyze.clear_cut(self.project_id, "cohort-1", key))
+        self.assertIsNone(analyze.read_cut(self.project_id, "cohort-1", key))
 
     def test_clearing_one_cut_leaves_its_neighbours_cached(self):
         k1 = analyze.cut_key({"outcome": "purchased"})
         k2 = analyze.cut_key({"utm_source": "meta"})
-        analyze.write_cut(self.pool, "cohort-1", k1, {"n": 1})
-        analyze.write_cut(self.pool, "cohort-1", k2, {"n": 2})
-        analyze.clear_cut(self.pool, "cohort-1", k1)
-        self.assertIsNone(analyze.read_cut(self.pool, "cohort-1", k1))
-        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", k2)["n"], 2)
+        analyze.write_cut(self.project_id, "cohort-1", k1, {"n": 1})
+        analyze.write_cut(self.project_id, "cohort-1", k2, {"n": 2})
+        analyze.clear_cut(self.project_id, "cohort-1", k1)
+        self.assertIsNone(analyze.read_cut(self.project_id, "cohort-1", k1))
+        self.assertEqual(analyze.read_cut(self.project_id, "cohort-1", k2)["n"], 2)
 
     def test_clearing_a_cut_that_was_never_cached_is_a_no_op(self):
         key = analyze.cut_key({"outcome": "purchased"})
-        self.assertFalse(analyze.clear_cut(self.pool, "cohort-1", key))
-        self.assertFalse(analyze.clear_cut(self.pool, "../../etc/passwd", key))
+        self.assertFalse(analyze.clear_cut(self.project_id, "cohort-1", key))
+        self.assertFalse(analyze.clear_cut(self.project_id, "../../etc/passwd", key))
 
     def test_a_cleared_cut_can_be_rewritten(self):
         key = analyze.cut_key({"outcome": "purchased"})
-        analyze.write_cut(self.pool, "cohort-1", key, {"n": 3})
-        analyze.clear_cut(self.pool, "cohort-1", key)
-        analyze.write_cut(self.pool, "cohort-1", key, {"n": 4})
-        self.assertEqual(analyze.read_cut(self.pool, "cohort-1", key)["n"], 4)
+        analyze.write_cut(self.project_id, "cohort-1", key, {"n": 3})
+        analyze.clear_cut(self.project_id, "cohort-1", key)
+        analyze.write_cut(self.project_id, "cohort-1", key, {"n": 4})
+        self.assertEqual(analyze.read_cut(self.project_id, "cohort-1", key)["n"], 4)
 
 
 def split_rows(converting=8, flat=8, untagged=0):

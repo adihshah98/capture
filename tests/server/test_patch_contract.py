@@ -38,8 +38,8 @@ PATCHABLE = frozenset()
 
 
 # The private hooks the suite reaches that `__all__` deliberately does not list.
-# Underscore-prefixed and not public, but thirteen test modules depend on them:
-# `_migrated` and `_undeclared_transitions` are cleared between cases,
+# Underscore-prefixed and not public, but test modules depend on them:
+# `_undeclared_transitions` is cleared between cases,
 # `_gate_loop` is rebound on analyze.runtime to reset the semaphores, and the
 # rest are called directly. They are named here so dropping one is a failure
 # rather than a surprise somewhere downstream.
@@ -59,9 +59,6 @@ EXPECTED_PRIVATE_SURFACE = frozenset(
         "_given_facts",
         "_is_project_pool",
         "_mark_prepared_still_running",
-        "_migrate_cohorts_once",
-        "_migrate_lock",
-        "_migrated",
         "_model_gate",
         "_parse_json_object",
         "_read_cohort_file",
@@ -69,7 +66,6 @@ EXPECTED_PRIVATE_SURFACE = frozenset(
         "_session_attribution",
         "_session_model_config",
         "_session_model_parts",
-        "_session_ref",
         "_undeclared_transitions",
         "_usable_frames",
     }

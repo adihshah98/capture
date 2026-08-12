@@ -422,7 +422,7 @@ class TestCohort(ServerCase):
     def test_delete_removes_cohort_and_keeps_session_writeups(self):
         sid = "delcoh" + "x" * 26
         cohort_id = self._cohort_of_one(sid)
-        analyze_store.write_cut(self.cohort_store(), "", cohort_id, "some-cut", {"label": "x"})
+        analyze_store.write_cut(self.cohort_store(), self.project_id, cohort_id, "some-cut", {"label": "x"})
         session_dir = self.data_dir / "sessions" / sid
         self.assertIsNotNone(analyze.read_analysis(session_dir))
 

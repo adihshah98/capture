@@ -48,33 +48,32 @@ class PortCase(unittest.TestCase):
 
 
 class TestProjectIsTheIdentity(PortCase):
-    """capture.analyze addresses a tenant as a pool path, a project id, or a data
-    root depending on the function. The port takes a Project and does all three."""
+    """capture.analyze addresses Postgres by project.id; Path only for recordings."""
 
-    def test_cohort_calls_are_addressed_by_pool_path(self):
+    def test_cohort_calls_are_addressed_by_project_id(self):
         port.cohort(NAMED, "c1")
-        self.analyze.read_cohort.assert_called_once_with(NAMED.pool, "c1")
+        self.analyze.read_cohort.assert_called_once_with(NAMED.id, "c1")
 
-    def test_the_default_project_resolves_to_the_legacy_pool(self):
+    def test_the_default_project_uses_its_uuid(self):
         port.cohort(DEFAULT, "c1")
-        pool = self.analyze.read_cohort.call_args[0][0]
-        self.assertEqual(pool.name, "sessions")
-        self.assertNotIn("cap_", str(pool))
+        self.analyze.read_cohort.assert_called_once_with(DEFAULT.id, "c1")
 
     def test_sampling_calls_are_addressed_by_project_id(self):
         conn = object()
         port.pool_facets(conn, NAMED, min_duration_ms=5000)
         self.analyze.pool_facets.assert_called_once_with(conn, NAMED.id, min_duration_ms=5000)
 
-    def test_session_work_gets_a_directory_under_the_project_pool(self):
+    def test_session_jobs_are_addressed_by_project_id(self):
         port.job(NAMED, "sess1")
-        self.analyze.read_job.assert_called_once_with(NAMED.pool / "sess1")
+        self.analyze.read_job.assert_called_once_with(NAMED.id, "sess1")
 
-    def test_two_projects_never_share_a_session_directory(self):
+    def test_two_projects_never_share_a_job_key(self):
         port.job(DEFAULT, "sess1")
         port.job(NAMED, "sess1")
-        first, second = (c[0][0] for c in self.analyze.read_job.call_args_list)
+        first, second = (c[0][:2] for c in self.analyze.read_job.call_args_list)
         self.assertNotEqual(first, second)
+        self.assertEqual(first[1], second[1])  # same session_id
+
 
 
 class TestReadAtCallTime(PortCase):

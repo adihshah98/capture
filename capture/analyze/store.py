@@ -22,7 +22,7 @@ than model ones:
 
 `connect()` returns a handle rather than a connection. Callers only ever pass
 it back into this module, and each entry point opens a pooled connection scoped
-to one project, so row level security applies to cohorts exactly as it does to
+to one project_id, so row level security applies to cohorts exactly as it does to
 sessions.
 """
 
@@ -50,21 +50,18 @@ class Store:
         self._local = threading.local()
 
     @contextmanager
-    def tx(self, pool_key: str):
-        """A transaction scoped to the project owning this pool. Reentrant: a
-        nested call joins the outer transaction instead of waiting on a row the
-        outer one already holds."""
+    def tx(self, project_id: str):
+        """A transaction scoped to one project. Reentrant: a nested call joins
+        the outer transaction instead of waiting on a row the outer one already
+        holds."""
         existing = getattr(self._local, "conn", None)
         if existing is not None:
             yield existing
             return
-        project = projects.by_handle(pool_key)
-        if project is None:
-            raise LookupError(f"no project for pool {pool_key!r}")
-        with db.connection(project.id) as conn:
-            self._local.conn = (conn, project.id)
+        with db.connection(project_id) as conn:
+            self._local.conn = (conn, project_id)
             try:
-                yield (conn, project.id)
+                yield (conn, project_id)
             finally:
                 self._local.conn = None
 
@@ -155,8 +152,8 @@ def _now() -> int:
     return int(time.time() * 1000)
 
 
-def read_cohort(store: Store, pool_key: str, cohort_id: str) -> dict | None:
-    with store.tx(pool_key) as (conn, project_id):
+def read_cohort(store: Store, project_id: str, cohort_id: str) -> dict | None:
+    with store.tx(project_id) as (conn, project_id):
         row = (
             _rows(conn)
             .execute(
@@ -183,7 +180,7 @@ def _read_sessions(conn, project_id, cohort_id: str) -> list:
     return [_row_to_session(r) for r in rows]
 
 
-def write_cohort(store: Store, pool_key: str, cohort: dict) -> dict:
+def write_cohort(store: Store, project_id: str, cohort: dict) -> dict:
     """Upsert a cohort and its membership. Returns the stored dict.
 
     Sessions are replaced wholesale because callers hand back a full list. The
@@ -192,7 +189,7 @@ def write_cohort(store: Store, pool_key: str, cohort: dict) -> dict:
     """
     cols, fields, sessions = _split_cohort(cohort)
     updated = _now()
-    with store.tx(pool_key) as (conn, project_id):
+    with store.tx(project_id) as (conn, project_id):
         conn.execute(
             """
             INSERT INTO cohorts
@@ -242,7 +239,7 @@ def write_cohort(store: Store, pool_key: str, cohort: dict) -> dict:
 
 def update_session_status(
     store: Store,
-    pool_key: str,
+    project_id: str,
     cohort_id: str,
     session_id: str,
     *,
@@ -258,7 +255,7 @@ def update_session_status(
     Returns whether a row matched, so a mark aimed at a session that is no
     longer a member is visible rather than silently dropped.
     """
-    with store.tx(pool_key) as (conn, project_id):
+    with store.tx(project_id) as (conn, project_id):
         cur = conn.execute(
             "UPDATE cohort_sessions SET status = %s, analysis = %s, error = %s"
             " WHERE project_id = %s AND cohort_id = %s AND session_id = %s",
@@ -275,7 +272,7 @@ def update_session_status(
 
 def set_cohort_status(
     store: Store,
-    pool_key: str,
+    project_id: str,
     cohort_id: str,
     status: str,
     *,
@@ -283,7 +280,7 @@ def set_cohort_status(
     clear_batch: bool = False,
 ) -> None:
     """Move a cohort's own status without rewriting its membership."""
-    with store.tx(pool_key) as (conn, project_id):
+    with store.tx(project_id) as (conn, project_id):
         if clear_batch:
             conn.execute(
                 "UPDATE cohorts SET status = %s, batch = NULL, updated_at = %s"
@@ -304,9 +301,9 @@ def set_cohort_status(
             )
 
 
-def list_cohorts(store: Store, pool_key: str) -> list:
-    """Every cohort in this pool, newest first, with membership."""
-    with store.tx(pool_key) as (conn, project_id):
+def list_cohorts(store: Store, project_id: str) -> list:
+    """Every cohort in this project, newest first, with membership."""
+    with store.tx(project_id) as (conn, project_id):
         rows = (
             _rows(conn)
             .execute(
@@ -320,12 +317,12 @@ def list_cohorts(store: Store, pool_key: str) -> list:
 
 
 def resumable_cohorts(store: Store) -> list:
-    """(pool_key, cohort) for every cohort with an in-flight batch job name.
+    """(project_id, cohort) for every cohort with an in-flight batch job name.
 
     Spans projects, so it runs with admin scope — it is the startup path
     deciding what to re-attach to, before any request has named a project.
     """
-    handles = {p.id: p.handle for p in projects.all_projects(fresh=True)}
+    known = {p.id for p in projects.all_projects(fresh=True)}
     out = []
     with store.admin_tx() as conn:
         rows = (
@@ -336,16 +333,16 @@ def resumable_cohorts(store: Store) -> list:
         for row in rows:
             if not (row.get("batch") or {}).get("name"):
                 continue
-            handle = handles.get(str(row["project_id"]))
-            if handle is None:
+            pid = str(row["project_id"])
+            if pid not in known:
                 continue
             sessions = _read_sessions(conn, row["project_id"], row["cohort_id"])
-            out.append((handle, _row_to_cohort(row, sessions)))
+            out.append((pid, _row_to_cohort(row, sessions)))
     return out
 
 
-def delete_cohort(store: Store, pool_key: str, cohort_id: str) -> bool:
-    with store.tx(pool_key) as (conn, project_id):
+def delete_cohort(store: Store, project_id: str, cohort_id: str) -> bool:
+    with store.tx(project_id) as (conn, project_id):
         cur = conn.execute(
             "DELETE FROM cohorts WHERE project_id = %s AND cohort_id = %s",
             (project_id, cohort_id),
@@ -360,7 +357,7 @@ def delete_cohort(store: Store, pool_key: str, cohort_id: str) -> bool:
     return found
 
 
-def forget_session(store: Store, pool_key: str, session_id: str) -> int:
+def forget_session(store: Store, project_id: str, session_id: str) -> int:
     """Drop a deleted session from every cohort that held it.
 
     A cohort member is a reference to a recording, not a copy of it. Once the
@@ -374,7 +371,7 @@ def forget_session(store: Store, pool_key: str, session_id: str) -> int:
     Cached cuts are deliberately left alone — they record what the model said
     when it ran, and rewriting them to match would be a second fabrication.
     """
-    with store.tx(pool_key) as (conn, project_id):
+    with store.tx(project_id) as (conn, project_id):
         owners = conn.execute(
             "SELECT DISTINCT cohort_id FROM cohort_sessions"
             " WHERE project_id = %s AND session_id = %s",
@@ -395,9 +392,9 @@ def forget_session(store: Store, pool_key: str, session_id: str) -> int:
     return removed
 
 
-def forget_pool(store: Store, pool_key: str) -> int:
-    """Drop every cohort in a pool. For a whole-pool reset."""
-    with store.tx(pool_key) as (conn, project_id):
+def forget_pool(store: Store, project_id: str) -> int:
+    """Drop every cohort in a project. For a whole-project reset."""
+    with store.tx(project_id) as (conn, project_id):
         removed = conn.execute(
             "DELETE FROM cohort_sessions WHERE project_id = %s", (project_id,)
         ).rowcount
@@ -406,8 +403,8 @@ def forget_pool(store: Store, pool_key: str) -> int:
     return removed
 
 
-def read_cuts(store: Store, pool_key: str, cohort_id: str) -> dict:
-    with store.tx(pool_key) as (conn, project_id):
+def read_cuts(store: Store, project_id: str, cohort_id: str) -> dict:
+    with store.tx(project_id) as (conn, project_id):
         rows = conn.execute(
             "SELECT cut_key, cut FROM cohort_cuts WHERE project_id = %s AND cohort_id = %s",
             (project_id, cohort_id),
@@ -415,8 +412,8 @@ def read_cuts(store: Store, pool_key: str, cohort_id: str) -> dict:
     return {key: cut for key, cut in rows if isinstance(cut, dict)}
 
 
-def read_cut(store: Store, pool_key: str, cohort_id: str, key: str) -> dict | None:
-    with store.tx(pool_key) as (conn, project_id):
+def read_cut(store: Store, project_id: str, cohort_id: str, key: str) -> dict | None:
+    with store.tx(project_id) as (conn, project_id):
         row = conn.execute(
             "SELECT cut FROM cohort_cuts"
             " WHERE project_id = %s AND cohort_id = %s AND cut_key = %s",
@@ -427,10 +424,10 @@ def read_cut(store: Store, pool_key: str, cohort_id: str, key: str) -> dict | No
     return row[0] if isinstance(row[0], dict) else None
 
 
-def write_cut(store: Store, pool_key: str, cohort_id: str, key: str, cut: dict) -> dict:
+def write_cut(store: Store, project_id: str, cohort_id: str, key: str, cut: dict) -> dict:
     """Cache one cut. One row, so concurrent cuts of one cohort cannot drop
     each other the way the read-mutate-write of the whole map did."""
-    with store.tx(pool_key) as (conn, project_id):
+    with store.tx(project_id) as (conn, project_id):
         conn.execute(
             "INSERT INTO cohort_cuts (project_id, cohort_id, cut_key, cut)"
             " VALUES (%s, %s, %s, %s::jsonb)"
@@ -440,8 +437,8 @@ def write_cut(store: Store, pool_key: str, cohort_id: str, key: str, cut: dict) 
     return cut
 
 
-def clear_cut(store: Store, pool_key: str, cohort_id: str, key: str) -> bool:
-    with store.tx(pool_key) as (conn, project_id):
+def clear_cut(store: Store, project_id: str, cohort_id: str, key: str) -> bool:
+    with store.tx(project_id) as (conn, project_id):
         cur = conn.execute(
             "DELETE FROM cohort_cuts" " WHERE project_id = %s AND cohort_id = %s AND cut_key = %s",
             (project_id, cohort_id, key),
@@ -449,7 +446,7 @@ def clear_cut(store: Store, pool_key: str, cohort_id: str, key: str) -> bool:
     return cur.rowcount > 0
 
 
-def migrate_json_cohorts(store: Store, pool_key: str, cohorts_dir: Path, cuts_suffix: str) -> int:
+def migrate_json_cohorts(store: Store, project_id: str, cohorts_dir: Path, cuts_suffix: str) -> int:
     """Import cohorts/*.json and *.cuts.json, then delete them.
 
     Migrate once and leave nothing behind that a later reader could mistake for
@@ -463,8 +460,8 @@ def migrate_json_cohorts(store: Store, pool_key: str, cohorts_dir: Path, cuts_su
     # One transaction for the whole import, so two servers starting together
     # cannot both read "not present" and double-write. The nested write_cohort
     # and write_cut calls join it rather than opening their own.
-    with store.tx(pool_key):
-        moved = _import_dir(store, pool_key, directory, cuts_suffix)
+    with store.tx(project_id):
+        moved = _import_dir(store, project_id, directory, cuts_suffix)
 
     # Non-empty (an unreadable file deliberately kept) means rmdir fails, which
     # is the correct outcome.
@@ -475,7 +472,7 @@ def migrate_json_cohorts(store: Store, pool_key: str, cohorts_dir: Path, cuts_su
     return moved
 
 
-def _import_dir(store: Store, pool_key: str, directory: Path, cuts_suffix: str) -> int:
+def _import_dir(store: Store, project_id: str, directory: Path, cuts_suffix: str) -> int:
     moved = 0
     for path in sorted(directory.glob("*.json")):
         if path.name.endswith(cuts_suffix):
@@ -490,10 +487,10 @@ def _import_dir(store: Store, pool_key: str, directory: Path, cuts_suffix: str) 
         if not isinstance(data, dict) or not isinstance(data.get("id"), str):
             continue
         cohort_id = data["id"]
-        if not read_cohort(store, pool_key, cohort_id):
+        if not read_cohort(store, project_id, cohort_id):
             # `progress` is a tally of `sessions` older writers persisted; it is
             # view-only now and _split_cohort drops it.
-            write_cohort(store, pool_key, data)
+            write_cohort(store, project_id, data)
             moved += 1
 
         cuts_file = directory / f"{cohort_id}{cuts_suffix}"
@@ -505,8 +502,8 @@ def _import_dir(store: Store, pool_key: str, directory: Path, cuts_suffix: str) 
                 cuts = None
             if isinstance(cuts, dict):
                 for key, cut in cuts.items():
-                    if isinstance(cut, dict) and not read_cut(store, pool_key, cohort_id, key):
-                        write_cut(store, pool_key, cohort_id, key, cut)
+                    if isinstance(cut, dict) and not read_cut(store, project_id, cohort_id, key):
+                        write_cut(store, project_id, cohort_id, key, cut)
                 cuts_file.unlink(missing_ok=True)
         path.unlink(missing_ok=True)
     return moved
@@ -534,10 +531,12 @@ def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
             return counts
 
         for row in legacy.execute("SELECT * FROM cohorts").fetchall():
-            pool_key = row["pool"]
-            if projects.by_handle(pool_key) is None:
+            handle = row["pool"]
+            project = projects.by_handle(handle)
+            if project is None:
                 counts["skipped_pools"] += 1
                 continue
+            project_id = project.id
             cohort = dict(json.loads(row["fields"] or "{}"))
             cohort.update(
                 id=row["id"],
@@ -553,7 +552,7 @@ def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
             for s in legacy.execute(
                 "SELECT * FROM cohort_sessions WHERE pool = ? AND cohort_id = ?"
                 " ORDER BY position",
-                (pool_key, row["id"]),
+                (handle, row["id"]),
             ).fetchall():
                 entry = dict(json.loads(s["fields"] or "{}"))
                 entry["session_id"] = s["session_id"]
@@ -563,26 +562,28 @@ def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
                 sessions.append(entry)
             cohort["sessions"] = sessions
 
-            if read_cohort(_store, pool_key, row["id"]):
+            if read_cohort(_store, project_id, row["id"]):
                 continue
-            write_cohort(_store, pool_key, cohort)
+            write_cohort(_store, project_id, cohort)
             counts["cohorts"] += 1
             counts["sessions"] += len(sessions)
 
         if "cohort_cuts" in names:
             for row in legacy.execute("SELECT * FROM cohort_cuts").fetchall():
-                pool_key = row["pool"]
-                if projects.by_handle(pool_key) is None:
+                handle = row["pool"]
+                project = projects.by_handle(handle)
+                if project is None:
                     continue
+                project_id = project.id
                 try:
                     cut = json.loads(row["cut"])
                 except (TypeError, ValueError):
                     continue
                 if not isinstance(cut, dict):
                     continue
-                if read_cut(_store, pool_key, row["cohort_id"], row["key"]):
+                if read_cut(_store, project_id, row["cohort_id"], row["key"]):
                     continue
-                write_cut(_store, pool_key, row["cohort_id"], row["key"], cut)
+                write_cut(_store, project_id, row["cohort_id"], row["key"], cut)
                 counts["cuts"] += 1
     finally:
         legacy.close()
@@ -594,8 +595,8 @@ def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
 # frame cache stays on disk: it is regenerable scratch for one run, not state.
 
 
-def read_analysis(store: Store, pool_key: str, session_id: str) -> dict | None:
-    with store.tx(pool_key) as (conn, project_id):
+def read_analysis(store: Store, project_id: str, session_id: str) -> dict | None:
+    with store.tx(project_id) as (conn, project_id):
         row = conn.execute(
             "SELECT body FROM analyses WHERE project_id = %s AND session_id = %s",
             (project_id, session_id),
@@ -605,8 +606,8 @@ def read_analysis(store: Store, pool_key: str, session_id: str) -> dict | None:
     return row[0] if isinstance(row[0], dict) else None
 
 
-def write_analysis(store: Store, pool_key: str, session_id: str, result: dict) -> dict:
-    with store.tx(pool_key) as (conn, project_id):
+def write_analysis(store: Store, project_id: str, session_id: str, result: dict) -> dict:
+    with store.tx(project_id) as (conn, project_id):
         conn.execute(
             "INSERT INTO analyses (project_id, session_id, body, created_at)"
             " VALUES (%s, %s, %s::jsonb, %s)"
@@ -622,25 +623,25 @@ def write_analysis(store: Store, pool_key: str, session_id: str, result: dict) -
     return result
 
 
-def clear_analysis(store: Store, pool_key: str, session_id: str) -> None:
-    with store.tx(pool_key) as (conn, project_id):
+def clear_analysis(store: Store, project_id: str, session_id: str) -> None:
+    with store.tx(project_id) as (conn, project_id):
         conn.execute(
             "DELETE FROM analyses WHERE project_id = %s AND session_id = %s",
             (project_id, session_id),
         )
 
 
-def forget_analyses(store: Store, pool_key: str) -> int:
-    """Drop every write-up and job in a pool. The analysis half of a reset,
+def forget_analyses(store: Store, project_id: str) -> int:
+    """Drop every write-up and job in a project. The analysis half of a reset,
     alongside forget_pool for cohorts."""
-    with store.tx(pool_key) as (conn, project_id):
+    with store.tx(project_id) as (conn, project_id):
         removed = conn.execute("DELETE FROM analyses WHERE project_id = %s", (project_id,)).rowcount
         conn.execute("DELETE FROM analysis_jobs WHERE project_id = %s", (project_id,))
     return removed
 
 
-def read_job(store: Store, pool_key: str, session_id: str) -> dict | None:
-    with store.tx(pool_key) as (conn, project_id):
+def read_job(store: Store, project_id: str, session_id: str) -> dict | None:
+    with store.tx(project_id) as (conn, project_id):
         row = (
             _rows(conn)
             .execute(
@@ -658,8 +659,8 @@ def read_job(store: Store, pool_key: str, session_id: str) -> dict | None:
     return job
 
 
-def write_job(store: Store, pool_key: str, session_id: str, job: dict) -> dict:
-    with store.tx(pool_key) as (conn, project_id):
+def write_job(store: Store, project_id: str, session_id: str, job: dict) -> dict:
+    with store.tx(project_id) as (conn, project_id):
         conn.execute(
             "INSERT INTO analysis_jobs (project_id, session_id, status, error, updated_at)"
             " VALUES (%s, %s, %s, %s, %s)"
@@ -671,22 +672,22 @@ def write_job(store: Store, pool_key: str, session_id: str, job: dict) -> dict:
     return job
 
 
-def clear_job(store: Store, pool_key: str, session_id: str) -> None:
-    with store.tx(pool_key) as (conn, project_id):
+def clear_job(store: Store, project_id: str, session_id: str) -> None:
+    with store.tx(project_id) as (conn, project_id):
         conn.execute(
             "DELETE FROM analysis_jobs WHERE project_id = %s AND session_id = %s",
             (project_id, session_id),
         )
 
 
-def session_facts(store: Store, pool_key: str, session_id: str) -> tuple:
+def session_facts(store: Store, project_id: str, session_id: str) -> tuple:
     """(entry url, order) for one session — what visitor.json and order.json held.
 
     The entry URL keeps its query string: it is the only place the UTMs
     survive, since page_path() drops them and the digest's URLs are
     post-navigation.
     """
-    with store.tx(pool_key) as (conn, project_id):
+    with store.tx(project_id) as (conn, project_id):
         row = (
             _rows(conn)
             .execute(

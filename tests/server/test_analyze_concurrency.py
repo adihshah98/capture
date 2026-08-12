@@ -74,10 +74,14 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
             d = self.root / f"session{i}"
             d.mkdir()
             dirs.append(d)
+        project_id = self._pg_project
 
         async def main():
             await asyncio.gather(
-                *(analyze.analyze_session(d, ["chunk.json"], force=True) for d in dirs)
+                *(
+                    analyze.analyze_session(project_id, d, ["chunk.json"], force=True)
+                    for d in dirs
+                )
             )
 
         with (
@@ -100,7 +104,7 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
     def test_each_session_still_writes_its_results(self):
         _, _, dirs = self.run_cohort(n=3)
         for d in dirs:
-            saved = analyze.read_analysis(d)
+            saved = analyze.read_analysis(self._pg_project, d.name)
             self.assertEqual(saved["status"], "done")
             self.assertIn("What stands out", saved["text"])
 

@@ -248,9 +248,9 @@ def _with_role(url: str, role: str, password: str) -> str:
 class CohortStoreMixin:
     """A Postgres-backed cohort store for tests that used to get SQLite.
 
-    One database per class; cohorts are cleared between tests. The pool the
-    tests build resolves to pool_key "" — the default project — so that is what
-    gets seeded.
+    One database per class; cohorts are cleared between tests. The default
+    project UUID is on `cls._pg_project`; tests use that for Postgres and keep
+    a local `self.pool` Path only as sessions_root for chunk files.
     """
 
     @classmethod

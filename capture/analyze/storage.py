@@ -1,9 +1,8 @@
-"""Where analysis results and cohorts live, addressed the way callers address them.
+"""Where analysis results and cohorts live, addressed by project_id.
 
-Every caller here identifies a session by its directory and a tenant by its pool
-path, because the analyser is file-based. The results themselves moved into
-Postgres, so this module is the translation layer: `(pool, session_dir)` in,
-`(pool_key, session_id)` out, `store.py` underneath.
+Callers identify a tenant by its Postgres project UUID. Session write-ups and
+cohort state live in Postgres; Path appears only for recording files (chunks)
+and regenerable scratch under `.analysis/`.
 
 It is deliberately leaf-ward. Nothing here reads a name the tests patch -- no
 prompts, no model config, no `_gates` -- and nothing calls back into the
@@ -12,17 +11,17 @@ patching contract at the foot of `__init__.py` and
 `tests/server/test_patch_contract.py`.
 
 The legacy JSON layouts (`cohort.json`, `cohorts/*.json`) are read only by the
-migration below, which consumes them on import. The steady state is a directory
-that does not exist.
+migration helpers below, which run when explicitly requested. The steady state
+is a directory that does not exist.
 """
 
 import json
 import re
 import shutil
-import threading
 import time
 from pathlib import Path
 
+from .. import projects
 from . import store as analyze_store
 
 ANALYSIS_FILE = "analysis.json"
@@ -43,62 +42,74 @@ def analysis_paths(session_dir: Path) -> tuple:
     return session_dir / ANALYSIS_FILE, session_dir / ANALYSIS_DIR
 
 
-def _session_ref(session_dir: Path) -> tuple:
-    """(pool_key, session_id) for a session directory. The results moved into
-    the database, but every caller still identifies a session by its path."""
-    return pool_key(session_dir.parent), session_dir.name
+def sessions_root(project_id: str) -> Path:
+    """Filesystem root for this project's session recordings."""
+    project = projects.by_id(project_id)
+    if project is None:
+        raise LookupError(f"no project {project_id!r}")
+    return project.pool
 
 
-def read_analysis(session_dir: Path) -> dict | None:
-    key, sid = _session_ref(session_dir)
-    return analyze_store.read_analysis(analyze_store.connect(), key, sid)
+def session_dir(project_id: str, session_id: str) -> Path:
+    return sessions_root(project_id) / session_id
 
 
-def write_analysis(session_dir: Path, result: dict) -> dict:
-    key, sid = _session_ref(session_dir)
-    return analyze_store.write_analysis(analyze_store.connect(), key, sid, result)
+def read_analysis(project_id: str, session_id: str) -> dict | None:
+    return analyze_store.read_analysis(analyze_store.connect(), project_id, session_id)
 
 
-def forget_analyses(pool: Path) -> int:
-    """Drop every write-up in a pool. For a whole-pool reset."""
-    return analyze_store.forget_analyses(analyze_store.connect(), pool_key(pool))
+def write_analysis(project_id: str, session_id: str, result: dict) -> dict:
+    return analyze_store.write_analysis(analyze_store.connect(), project_id, session_id, result)
 
 
-def read_job(session_dir: Path) -> dict | None:
+def forget_analyses(project_id: str) -> int:
+    """Drop every write-up in a project. For a whole-project reset."""
+    return analyze_store.forget_analyses(analyze_store.connect(), project_id)
+
+
+def read_job(project_id: str, session_id: str) -> dict | None:
     """In-progress or failed async analysis job, if any."""
-    key, sid = _session_ref(session_dir)
-    return analyze_store.read_job(analyze_store.connect(), key, sid)
+    return analyze_store.read_job(analyze_store.connect(), project_id, session_id)
 
 
-def write_job(session_dir: Path, status: str, error: str | None = None) -> dict:
+def write_job(project_id: str, session_id: str, status: str, error: str | None = None) -> dict:
     job = {"status": status, "updated_at": int(time.time() * 1000)}
     if error:
         job["error"] = error
-    key, sid = _session_ref(session_dir)
-    return analyze_store.write_job(analyze_store.connect(), key, sid, job)
+    return analyze_store.write_job(analyze_store.connect(), project_id, session_id, job)
 
 
-def clear_job(session_dir: Path) -> None:
-    key, sid = _session_ref(session_dir)
-    analyze_store.clear_job(analyze_store.connect(), key, sid)
+def clear_job(project_id: str, session_id: str) -> None:
+    analyze_store.clear_job(analyze_store.connect(), project_id, session_id)
 
 
-def clear_analysis(session_dir: Path) -> None:
-    """Drop a finished result so a re-analyze starts clean."""
-    key, sid = _session_ref(session_dir)
-    analyze_store.clear_analysis(analyze_store.connect(), key, sid)
-    # Sidecars from the retired theme/QA pass, and the pre-database result —
-    # inert now, but a re-analyze is the natural moment to stop carrying them.
+def clear_analysis(
+    project_id: str, session_id: str, *, session_dir: Path | None = None
+) -> None:
+    """Drop a finished result so a re-analyze starts clean.
+
+    Also clears local `.analysis` scratch (and best-effort legacy sidecars) when
+    the session directory exists on disk.
+    """
+    analyze_store.clear_analysis(analyze_store.connect(), project_id, session_id)
+    root = session_dir
+    if root is None:
+        try:
+            root = sessions_root(project_id) / session_id
+        except LookupError:
+            return
+    if not root.is_dir():
+        return
     for legacy in (ANALYSIS_FILE, "analysis.insights.json", "analysis.qa.json"):
-        (session_dir / legacy).unlink(missing_ok=True)
-    # The frame cache is regenerable scratch for one run, so it stays local.
-    shutil.rmtree(session_dir / ANALYSIS_DIR, ignore_errors=True)
+        (root / legacy).unlink(missing_ok=True)
+    shutil.rmtree(root / ANALYSIS_DIR, ignore_errors=True)
 
 
 def cohorts_dir(pool: Path) -> Path:
     """Where cohort JSON used to live, beside the sessions directory.
 
-    Only the migration reads this now; cohort state is in Postgres.
+    Only the migration and Batch JSONL scratch read this now; cohort state is
+    in Postgres.
     """
     return pool.parent / COHORTS_DIR
 
@@ -113,62 +124,17 @@ def _is_project_pool(pool: Path) -> bool:
 
 
 def data_root_for(pool: Path) -> Path:
-    """The data root owning this pool — where index.db lives."""
+    """The data root owning this pool — where index.db used to live."""
     if _is_project_pool(pool):
         return pool.parent.parent.parent
     return pool.parent
 
 
 def pool_key(pool: Path) -> str:
-    """Stable pool identifier for the store. Matches server.pool_key: the
-    default pool is "", a project pool is its directory name."""
+    """Stable filesystem handle for a sessions pool. Default is ""; a named
+    project pool is its directory name. Not used for Postgres access — that
+    is project_id — but still useful for layout tests and legacy migration."""
     return pool.parent.name if _is_project_pool(pool) else ""
-
-
-def cohort_store(pool: Path):
-    """(connection, pool_key) for this pool, migrating legacy JSON once."""
-    conn = analyze_store.connect(data_root_for(pool))
-    key = pool_key(pool)
-    _migrate_cohorts_once(conn, pool, key)
-    return conn, key
-
-
-_migrated: set = set()
-_migrate_lock = threading.Lock()
-
-
-def _migrate_cohorts_once(conn, pool: Path, key: str) -> None:
-    """Import this pool's cohort files into the store.
-
-    Two legacy layouts feed in: the pre-multi-cohort `cohort.json`, and the
-    `cohorts/*.json` directory. Both are consumed on import, so the steady
-    state is a directory that does not exist.
-
-    Only the directory scan is latched per process — the hundreds of store
-    calls a cohort run makes must not each glob it. `cohort.json` is a single
-    is_file() on a path that normally does not exist, and it can appear after
-    this pool was first touched (an older deployment writing beside a running
-    server), so that check stays live. The import is idempotent either way: an
-    existing row wins, so a second process cannot double-import.
-    """
-    try:
-        migrate_legacy_cohort(pool)
-    except Exception as exc:
-        print(f"legacy cohort migration failed for pool {key or '(default)'}: {exc}")
-
-    directory = cohorts_dir(pool)
-    token = (str(data_root_for(pool).resolve()), key)
-    with _migrate_lock:
-        latched = token in _migrated
-        if latched and not directory.is_dir():
-            return
-        _migrated.add(token)
-    try:
-        analyze_store.migrate_json_cohorts(conn, key, directory, CUTS_SUFFIX)
-    except Exception as exc:
-        # A failed import must not take down the request that triggered it, but
-        # it must be visible — the cohorts would silently read as absent.
-        print(f"cohort migration failed for pool {key or '(default)'}: {exc}")
 
 
 def cohort_path(pool: Path, cohort_id: str) -> Path:
@@ -212,28 +178,27 @@ def migrate_legacy_cohort(pool: Path) -> None:
     legacy.unlink(missing_ok=True)
 
 
-def read_cohort(pool: Path, cohort_id: str) -> dict | None:
+def read_cohort(project_id: str, cohort_id: str) -> dict | None:
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return None
-    conn, key = cohort_store(pool)
-    return analyze_store.read_cohort(conn, key, cohort_id)
+    return analyze_store.read_cohort(analyze_store.connect(), project_id, cohort_id)
 
 
-def write_cohort(pool: Path, cohort: dict) -> dict:
-    conn, key = cohort_store(pool)
-    return analyze_store.write_cohort(conn, key, {**cohort, "id": safe_cohort_id(cohort["id"])})
+def write_cohort(project_id: str, cohort: dict) -> dict:
+    return analyze_store.write_cohort(
+        analyze_store.connect(), project_id, {**cohort, "id": safe_cohort_id(cohort["id"])}
+    )
 
 
-def list_cohorts(pool: Path) -> list:
-    """Every cohort in this pool, newest first. Membership only — no write-ups."""
-    conn, key = cohort_store(pool)
-    return analyze_store.list_cohorts(conn, key)
+def list_cohorts(project_id: str) -> list:
+    """Every cohort in this project, newest first. Membership only — no write-ups."""
+    return analyze_store.list_cohorts(analyze_store.connect(), project_id)
 
 
-def latest_cohort(pool: Path) -> dict | None:
-    cohorts = list_cohorts(pool)
+def latest_cohort(project_id: str) -> dict | None:
+    cohorts = list_cohorts(project_id)
     return cohorts[0] if cohorts else None
 
 
@@ -244,67 +209,63 @@ def cuts_path(pool: Path, cohort_id: str) -> Path:
     return cohorts_dir(pool) / f"{safe_cohort_id(cohort_id)}{CUTS_SUFFIX}"
 
 
-def read_cuts(pool: Path, cohort_id: str) -> dict:
+def read_cuts(project_id: str, cohort_id: str) -> dict:
     """All cached cut analyses for a cohort, keyed by cut_key()."""
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return {}
-    conn, key = cohort_store(pool)
-    return analyze_store.read_cuts(conn, key, cohort_id)
+    return analyze_store.read_cuts(analyze_store.connect(), project_id, cohort_id)
 
 
-def read_cut(pool: Path, cohort_id: str, key: str) -> dict | None:
+def read_cut(project_id: str, cohort_id: str, key: str) -> dict | None:
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return None
-    conn, pkey = cohort_store(pool)
-    return analyze_store.read_cut(conn, pkey, cohort_id, key)
+    return analyze_store.read_cut(analyze_store.connect(), project_id, cohort_id, key)
 
 
-def write_cut(pool: Path, cohort_id: str, key: str, cut: dict) -> dict:
+def write_cut(project_id: str, cohort_id: str, key: str, cut: dict) -> dict:
     """Cache one cut. A done cohort is immutable, so this only needs busting
     when the question changes (a reworded prompt), never when the data does.
 
     One row per cut: two cuts of the same cohort finishing together no longer
     race through a read-mutate-write of the whole map.
     """
-    conn, pkey = cohort_store(pool)
-    return analyze_store.write_cut(conn, pkey, safe_cohort_id(cohort_id), key, cut)
+    return analyze_store.write_cut(
+        analyze_store.connect(), project_id, safe_cohort_id(cohort_id), key, cut
+    )
 
 
-def clear_cut(pool: Path, cohort_id: str, key: str) -> bool:
+def clear_cut(project_id: str, cohort_id: str, key: str) -> bool:
     """Drop one cached cut so the next run re-asks the model. Returns whether
     anything was actually dropped."""
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return False
-    conn, pkey = cohort_store(pool)
-    return analyze_store.clear_cut(conn, pkey, cohort_id, key)
+    return analyze_store.clear_cut(analyze_store.connect(), project_id, cohort_id, key)
 
 
-def forget_session(pool: Path, session_id: str) -> int:
-    """Remove a deleted session from every cohort in this pool.
+def forget_session(project_id: str, session_id: str) -> int:
+    """Remove a deleted session from every cohort in this project.
 
-    Call this wherever a session's directory is removed. A membership row
-    points at a write-up under the session directory, so once that is gone the
-    row is unsupportable — and `enrich_cohort_status` trusts the stored status
-    when it finds nothing on disk, so the row would keep counting as done.
+    Call this wherever a session's recording is removed. A membership row
+    points at a write-up keyed by session_id, so once that is gone the row is
+    unsupportable — and `enrich_cohort_status` trusts the stored status when it
+    finds nothing, so the row would keep counting as done.
     """
-    conn, key = cohort_store(pool)
-    return analyze_store.forget_session(conn, key, str(session_id))
+    return analyze_store.forget_session(analyze_store.connect(), project_id, str(session_id))
 
 
-def forget_pool_cohorts(pool: Path) -> int:
-    """Drop every cohort in a pool, for a whole-pool index reset."""
-    conn, key = cohort_store(pool)
-    return analyze_store.forget_pool(conn, key)
+def forget_pool_cohorts(project_id: str) -> int:
+    """Drop every cohort in a project, for a whole-project index reset."""
+    return analyze_store.forget_pool(analyze_store.connect(), project_id)
 
 
 def mark_cohort_session(
-    pool: Path,
+    project_id: str,
     cohort: dict,
     entry: dict,
     status: str,
@@ -332,10 +293,9 @@ def mark_cohort_session(
     else:
         entry["error"] = error
 
-    conn, key = cohort_store(pool)
     analyze_store.update_session_status(
-        conn,
-        key,
+        analyze_store.connect(),
+        project_id,
         str(cohort["id"]),
         str(entry["session_id"]),
         status=status,

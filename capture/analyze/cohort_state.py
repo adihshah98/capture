@@ -16,7 +16,6 @@ that view back off before anything writes it down.
 """
 
 import re
-from pathlib import Path
 
 from . import spec, storage
 from .labels import cohort_selection_text
@@ -192,8 +191,8 @@ def project_cohort_status(stored: str, tally: dict, *, total: int) -> str:
     return current
 
 
-def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
-    """Refresh per-session status from analysis.json / analysis.status.json on disk."""
+def enrich_cohort_status(project_id: str, cohort: dict) -> dict:
+    """Refresh per-session status from analyses / analysis_jobs in Postgres."""
     sessions = []
     done = running = queued = errors = stale = 0
     for entry in cohort.get("sessions") or []:
@@ -207,9 +206,9 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
         row.pop("attribution", None)
         row.pop("device", None)
         row.pop("outcome", None)
-        session_dir = pool / row["session_id"]
-        cached = storage.read_analysis(session_dir)
-        job = storage.read_job(session_dir)
+        sid = row["session_id"]
+        cached = storage.read_analysis(project_id, sid)
+        job = storage.read_job(project_id, sid)
         if cached:
             row["status"] = "done"
             row["analysis"] = ANALYSIS_FILE
@@ -225,9 +224,9 @@ def enrich_cohort_status(pool: Path, cohort: dict) -> dict:
         elif row.get("status") == "error":
             errors += 1
         elif row.get("status") == "done":
-            # Claims done, but the branches above found no analysis.json. The
-            # write-up was removed after the fact (clear_analysis on a
-            # re-analyze, a deleted file, a crash between the two). Counting it
+            # Claims done, but the branches above found no write-up. The
+            # result was removed after the fact (clear_analysis on a
+            # re-analyze, a deleted row, a crash between the two). Counting it
             # done would have the cohort report a result with nothing behind it.
             row["status"] = SESSION_STALE
             row["error"] = row.get("error") or "write-up is missing — re-analyze this session"
@@ -335,14 +334,13 @@ def standout_line(text: str) -> str:
     return ""
 
 
-def attach_cohort_insights(pool: Path, cohort: dict) -> dict:
+def attach_cohort_insights(project_id: str, cohort: dict) -> dict:
     """Attach analysis write-ups — response-only, never written to the cohort file."""
     sessions = []
     for entry in cohort.get("sessions") or []:
         row = dict(entry)
         if row.get("status") == "done":
-            session_dir = pool / row["session_id"]
-            cached = storage.read_analysis(session_dir)
+            cached = storage.read_analysis(project_id, row["session_id"])
             if cached and isinstance(cached.get("text"), str) and cached["text"].strip():
                 row["text"] = cached["text"]
                 row["standout"] = standout_line(cached["text"])
