@@ -6,12 +6,15 @@ screen. Stepping that player yields a frame per second of activity — the page
 as the visitor saw it change, rather than a single end-state snapshot.
 
 Also owns cohorts: sample latest purchased + non-purchase sessions (or any
-matching set, up to 500 total; default 50+50, ashwamag-01, ≥5s), persist each
-sample under `cohorts/<id>.json` without touching prior cohorts, reconstruct
-pages locally, then run write-ups through the Gemini Batch API (interactive
-generate_content remains for single-session Analyze). A cohort is immutable
-once sampled, so a "cut" across it can be analysed once and cached beside it
-(`refresh=1` busts that cache).
+matching set, up to 500 total), persist each sample without touching prior
+cohorts, reconstruct pages locally, then run write-ups through the Gemini Batch
+API (interactive generate_content remains for single-session Analyze). A cohort
+is immutable once sampled, so a "cut" across it can be analysed once and cached
+against it (`refresh=1` busts that cache).
+
+Cohort state lives in Postgres (`0003_cohorts.sql`); the `cohorts/<id>.json`
+layout this module used to write is read only by the migration in store.py.
+Sampling defaults are in spec.py, not here.
 """
 
 import asyncio
@@ -20,14 +23,14 @@ import json
 import os
 import re
 import shutil
-import sqlite3
 import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from .. import attribution
+from ..paths import SAFE_CHUNK
 from . import prompts, slices, spec, stats
 from . import store as analyze_store
 
@@ -45,10 +48,6 @@ CUTS_SUFFIX = ".cuts.json"
 # Per-project pools live at <data root>/projects/<name>/sessions; the default
 # pool is <data root>/sessions. Same layout server.py indexes by.
 PROJECTS_DIR = "projects"
-# A second copy of paths.SAFE_CHUNK. The CLI that justified keeping it local is
-# gone; collapsing the two is cleanup #3, and drift here means a session that
-# records fine and cannot be analysed.
-SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
 # Cohort ids are ours to mint ("cohort-<ms>"), but they land in filenames, so
 # validate rather than trust anything arriving from a URL.
 SAFE_COHORT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -197,7 +196,7 @@ def clear_analysis(session_dir: Path) -> None:
 def cohorts_dir(pool: Path) -> Path:
     """Where cohort JSON used to live, beside the sessions directory.
 
-    Only the migration reads this now; cohort state is in SQLite.
+    Only the migration reads this now; cohort state is in Postgres.
     """
     return pool.parent / COHORTS_DIR
 
@@ -1155,7 +1154,7 @@ from .labels import (  # noqa: E402
 )
 
 def build_cohort(
-    conn: sqlite3.Connection,
+    conn: spec.Connection,
     pool_key: str,
     selection: spec.CohortSpec,
     *,

@@ -92,8 +92,10 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
             self.assertIsNotNone(pool)
             return "batches/test-job"
 
-        async def fake_wait(name, *, poll_s=None):
-            self.assertEqual(name, "batches/test-job")
+        # Mirrors wait_gemini_batch's real signature: a fake that omits a
+        # parameter the production function grows will not fail loudly here.
+        async def fake_wait(job_name, *, poll_s=None, max_wait_s=None):
+            self.assertEqual(job_name, "batches/test-job")
             return SimpleNamespace(
                 state=SimpleNamespace(name="JOB_STATE_SUCCEEDED"),
                 dest=SimpleNamespace(inlined_responses=[], file_name=None),

@@ -5,13 +5,17 @@ and reads the session index; nothing writes.
 
 Two things are worth knowing before editing.
 
-**The connection is not SQLite.** The signatures say `sqlite3.Connection` and the
-SQL uses `?` placeholders and `json_extract`, because this code predates the move
-to Postgres. What actually arrives is a `compat.SqliteStyleConnection` wrapping
-psycopg, reading a `compat.sessions` view that flattens the normalised schema
-back into the old shape. See migrations/0002_compat.sql -- and note that the
-view's `security_invoker` clause is what keeps row-level security applied, so a
+**The connection is not SQLite.** The SQL uses `?` placeholders and
+`json_extract` because this code predates the move to Postgres. What actually
+arrives is a `compat.SqliteStyleConnection` wrapping psycopg, reading a
+`compat.sessions` view that flattens the normalised schema back into the old
+shape. See migrations/0002_compat.sql -- and note that the view's
+`security_invoker` clause is what keeps row-level security applied, so a
 caller-supplied `pool` cannot read another tenant's rows.
+
+The signatures used to say `sqlite3.Connection`, which was true only on the
+deleted CLI path. They now say `spec.Connection`, a Protocol naming the one
+method these functions call.
 
 **Selective predicates run last.** The SQL applies the cheap filters -- pool,
 duration, URL substring, time bounds -- then `ORDER BY` and `LIMIT`; the slice
@@ -23,11 +27,10 @@ where it will be fixed.
 """
 
 import json
-import sqlite3
 from typing import List, Optional, Tuple
 
 from . import spec as cohort_spec
-from .spec import CohortSpec
+from .spec import CohortSpec, Connection
 from .slices import (
     DEVICE_VALUES,
     OUTCOME_LABELS,
@@ -124,7 +127,7 @@ def facets_from_rows(rows: list) -> dict:
 
 
 def pool_facets(
-    conn: sqlite3.Connection,
+    conn: Connection,
     pool: str,
     *,
     min_duration_ms: int = 0,
@@ -183,7 +186,7 @@ def _cohort_order_sql(order: str) -> str:
 
 
 def _sample_candidates(
-    conn: sqlite3.Connection,
+    conn: Connection,
     pool: str,
     *,
     min_duration_ms: int,
@@ -221,7 +224,7 @@ def _sample_candidates(
 
 
 def _sample_matching_rows(
-    conn: sqlite3.Connection,
+    conn: Connection,
     pool: str,
     n: int,
     *,
@@ -267,7 +270,7 @@ def _sample_matching_rows(
     return out
 
 
-def sample_cohort_rows(conn: sqlite3.Connection, pool: str, spec: CohortSpec) -> list:
+def sample_cohort_rows(conn: Connection, pool: str, spec: CohortSpec) -> list:
     """Sessions matching a selection rule, in the mode the spec asks for.
 
     `spec.order` is latest (default) or earliest by `last_seen`; `start_ms` /

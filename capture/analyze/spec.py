@@ -16,7 +16,24 @@ the label writer and the port can all depend on it without a cycle.
 
 import os
 from dataclasses import dataclass, field, replace
-from typing import Optional
+from typing import Any, Optional, Protocol
+
+
+class Connection(Protocol):
+    """What the sampling functions actually require of a connection.
+
+    They were annotated `sqlite3.Connection`, which was true only on the CLI
+    path that read the stale `data/index.db`. What production passes is
+    `compat.SqliteStyleConnection`, a psycopg wrapper that translates `?`
+    placeholders -- structurally unrelated to `sqlite3.Connection`, so the
+    annotation was false everywhere it mattered.
+
+    `execute` is the entire surface these functions use, and both types have
+    it. Stating that keeps the annotation honest through the Postgres port,
+    which removes the wrapper but not the method.
+    """
+
+    def execute(self, sql: str, params: Any = ..., /) -> Any: ...
 
 # The insights cohort's defaults. A cohort sampled without arguments is the
 # latest 50 purchased plus 50 non-purchase sessions, at least five seconds long.

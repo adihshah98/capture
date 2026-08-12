@@ -3,13 +3,15 @@
 *Reviewed 2026-08-11, re-verified against `main` @ `70f5748`. Part 3 of 3:
 [design](analyze-design-review.md) · [bugs](analyze-bug-review.md) · **cleanups**.*
 
-> **Re-verification note.** `capture/analyze/` is byte-identical since the first
-> draft, so every item below still applies to it. Two changed status: **#3
-> (`SAFE_CHUNK`)** is largely done — `capture/paths.py` is now the single definition
-> and only `analyze`'s own copy remains; **#9 (linter exclusion)** is now the *only*
-> exclusion left, since the rest of `capture/` was formatted and type-gated in
-> `067fe83` / `d177c4c` / `fb82347`. A new item **#10** covers the re-export
-> narrowing that [design §0.3](analyze-design-review.md) added.
+> **Worked through 2026-08-11.** Eight of the ten items are done; see the
+> [status table](#status--2026-08-11) at the foot of this document. Each section
+> below has been rewritten to describe what was actually changed rather than what was
+> proposed, including the two items that turned out to be already fixed (#2, #10) and
+> the one that was already correct (#7's `store.py` entry).
+>
+> What is left is deliberate: #5 (not doing), the `compat.py` ownership comment and
+> the `data/index.db` deletion (both decisions for a human), and #9, which is scoped
+> and measured but wants a clean tree and two commits of its own.
 
 Mechanical tidying: dead code, duplication, stale annotations, tooling. Nothing here
 changes behaviour — anything that does is in the [bug review](analyze-bug-review.md).
@@ -46,81 +48,52 @@ reader, with it.
 its only remaining uses are the stale annotations in #6, which is the item that
 removes it. 208 lines total; `npm run test:server` green at 525 tests.
 
-## 2. Re-exports with no consumers
+## 2. Re-exports with no consumers — **done**
 
-The `from .slices import` / `from .stats import` blocks
-([:779](../capture/analyze/__init__.py#L779),
-[:942](../capture/analyze/__init__.py#L942)) exist because "server.py and the tests
-reach for these off `analyze`." Nine of them do not:
+**Done during the extraction commits.** All ten zero-consumer names —
+`META_SOURCES`, `slice_is_empty`, `is_meta_attribution`, `cross_tab_cells`, the five
+`CROSS_TAB_*` constants and `MOBILE_MAX_WIDTH` — are gone from the re-export blocks
+and have no references anywhere in `capture/` or `tests/`.
 
-Re-measured at `70f5748`, now that `analysis_port.py` mediates all production access:
+The comment now at [:751](../capture/analyze/__init__.py#L751) states the rule the
+narrowing established: the blocks are imports *for use in this module*, not a public
+surface. Outside callers go through `capture/analysis_port.py`; anything wanting the
+slice vocabulary imports `capture.analyze.slices` directly.
 
-| Symbol | Production | Tests |
-| --- | --- | --- |
-| `META_SOURCES`, `slice_is_empty`, `is_meta_attribution`, `OUTCOME_LABELS` | 0 | 0 |
-| `cross_tab_cells`, `CROSS_TAB_PAIRS`, `CROSS_TAB_DIMENSIONS`, `CROSS_TAB_MIN_CELL`, `CROSS_TAB_MIN_COVERAGE`, `CROSS_TAB_MIN_LIFT_PTS` | 0 | 0 |
-| `MOBILE_MAX_WIDTH`, `slice_label` | 0 | 1 |
-| `normalize_slice`, `row_matches_slice`, `cross_tab_block` | 0 | 4–18 |
-| `device_class`, `page_path`, `outcome_class` | 1 each (port) | 6–14 |
+Re-measured 2026-08-11: every name still in a re-export block is live. Six
+(`DEVICE_VALUES`, `OUTCOME_VALUES`, `device_class`, `CUT_SECTIONS`,
+`facets_from_rows`, `pool_facets`) are *unused inside* `__init__.py` and look
+droppable — they are not. `analysis_port.py` and the suite reach all six off the
+package, which is precisely what the re-export is for. Deleting them breaks
+production; the import-line-only grep is the trap here.
 
-**Ten names have zero consumers anywhere.** The rest are reached almost entirely by
-tests, which can `from capture.analyze import slices` directly — that is not a
-production dependency and does not need a re-export.
+This was the precondition for #10, which has also landed (`d2401ee`).
 
-Narrowing the lists makes the remaining exports a deliberate public API rather than a
-dump, and it is the **precondition for deleting `_ForwardingModule`**
-([design §0.3](analyze-design-review.md)): the re-export blocks are the only reason
-the mechanism exists.
+## 3. `SAFE_CHUNK` — **done**
 
-Order: narrow the lists first, then delete the mechanism (#10), then extract.
+The canonical definition is [paths.py:30](../capture/paths.py#L30); `server.py` and
+`storage.py` imported it as of `37d10ff`, and `analyze/__init__.py` now does too. The
+local regex and the comment that justified it ("keep local so the CLI does not import
+server" — a CLI that no longer exists) are gone. Verified the two patterns were
+byte-identical before collapsing them, so no behaviour changed.
 
-## 3. `SAFE_CHUNK` — mostly fixed; one copy left
+**Why it mattered:** a chunk name accepted by ingest but rejected by
+`session_chunk_names` is a session that records fine and cannot be analysed.
 
-**Largely done in `37d10ff`** (*"Give the data root and the chunk-name rules one
-definition, fixing a live bug"*). The canonical definition is now
-[paths.py:30](../capture/paths.py#L30); `server.py` and `storage.py` both import it.
+## 4. Duplicate prompt constants — **done**
 
-One copy remains: [__init__.py:51](../capture/analyze/__init__.py#L51), still
-justified by a comment that is now obsolete —
+`prompts/__init__.py` defined `SYSTEM_PROMPT`, `CUT_PROMPT`, `CHAT_PROMPT` at module
+level with **no readers** — `analyze/__init__.py` calls `prompts.load(...)` itself,
+producing separate equal-valued strings. The three constants are deleted; `load()` is
+the only interface.
 
-> ```python
-> # Same shape as server.SAFE_CHUNK — keep local so the CLI does not import server.
-> ```
-
-`capture/paths.py` is dependency-free, so importing it was never the thing the comment
-was avoiding; and [bug #1](analyze-bug-review.md) deletes the CLI regardless.
-
-**Why it matters:** a chunk name accepted by ingest but rejected by
-`session_chunk_names` is a session that records fine and cannot be analysed. Two
-copies is still one chance to drift.
-
-**Fix:** `from ..paths import SAFE_CHUNK` in `analyze/__init__.py`; delete the local
-regex and the stale comment.
-
-## 4. Duplicate prompt constants
-
-`prompts/__init__.py` defines `SYSTEM_PROMPT`, `CUT_PROMPT`, `CHAT_PROMPT` at module
-level ([:37](../capture/analyze/prompts/__init__.py#L37)). **Nothing reads them** —
-`analyze/__init__.py` calls `prompts.load(...)` itself at
-[:136](../capture/analyze/__init__.py#L136),
-[:840](../capture/analyze/__init__.py#L840) and
-[:1197](../capture/analyze/__init__.py#L1197), producing separate equal-valued
-strings:
-
-```
-analyze.CUT_PROMPT is prompts.CUT_PROMPT   -> False
-analyze.CUT_PROMPT == prompts.CUT_PROMPT   -> True
-```
-
-Because `prompts` is in `_FORWARD_TO` and those names are in its `vars()`, patching
-`analyze.CUT_PROMPT` also rewrites a variable no one reads.
-
-**Fix:** delete the three constants; leave `load()` as the only interface. Makes the
-forwarding surface honest.
+Note the loader docstring still refers to `analyze.CUT_PROMPT`. That is the
+*package-level* name, which is live and is what the suite patches to test cache
+invalidation — a different object from the deleted `prompts.CUT_PROMPT`.
 
 ⚠️ **Do not touch the `.md` files themselves.** `prompt_version` hashes content into
-`cut_key`; a whitespace change re-bills every cached cut. Hashes must stay
-`5637eecc` / `d6416d2b` / `6007448b`.
+`cut_key`; a whitespace change re-bills every cached cut. Hashes verified unchanged
+after this edit: `5637eecc` / `d6416d2b` / `6007448b`.
 
 ## 5. `standout_line` — the dead branch, carefully
 
@@ -141,48 +114,48 @@ defensive parsing that costs nothing and would resume working if a prompt reintr
 the heading. Removing it means editing four test files to delete coverage. Negative
 value — this is the one item on the old plan's list worth dropping entirely.
 
-## 6. Stale type annotations
+## 6. Stale type annotations — **done**
 
-Five functions declare `conn: sqlite3.Connection`
-([:1387](../capture/analyze/__init__.py#L1387),
-[:1446](../capture/analyze/__init__.py#L1446),
-[:1484](../capture/analyze/__init__.py#L1484),
-[:1531](../capture/analyze/__init__.py#L1531),
-[:1775](../capture/analyze/__init__.py#L1775)). What arrives is a
-`compat.SqliteStyleConnection` wrapping psycopg. The annotation is true only on the
-CLI path, which [bug #1](analyze-bug-review.md) deletes.
+Five functions declared `conn: sqlite3.Connection` (one in `__init__.py`, four in
+`sampling.py`). What arrives is `compat.SqliteStyleConnection` wrapping psycopg; the
+annotation was true only on the now-deleted CLI path.
 
-**Fix (after the CLI is gone):** annotate honestly — a `Protocol` with
-`execute(sql, params) -> Cursor` describes what the functions actually require and
-survives the Postgres port. Then drop the `import sqlite3`.
+They now take [`spec.Connection`](../capture/analyze/spec.py#L23), a `Protocol`
+declaring the single method these functions call — `execute` is the entire surface
+they use, confirmed by grep. It sits in `spec.py` because that is already the
+dependency-free leaf the sampler, the label writer and the port all import.
 
-## 7. Docstring / comment drift
+With the last annotation gone, `import sqlite3` was dead in `__init__.py` and is
+removed. `sampling.py`'s module docstring, which explained the false annotation, was
+updated to describe the Protocol instead.
 
-- **Module docstring** ([:8](../capture/analyze/__init__.py#L8)) says cohorts persist
-  "under `cohorts/<id>.json`" and names "ashwamag-01, ≥5s" as defaults. Cohorts have
-  been in Postgres since `0003_cohorts.sql`; the JSON path is migration-only.
-- **`cohorts_dir`** ([:205](../capture/analyze/__init__.py#L205)) says "cohort state
-  is in SQLite" — it is in Postgres.
-- **`store.py:16`** references "a `sqlite3.Connection`'s single transaction state" in
-  a module that now uses psycopg. Historical context, but flag it as such.
-- **`compat.py:3`** — *"analyze.py is owned by Anant's co-founder"* — is the stated
-  reason the compat layer exists. If that ownership boundary has changed, the comment
-  is now the main argument for keeping a layer with no engineering justification.
+## 7. Docstring / comment drift — **done, except one judgement call**
 
-Cheap, and these are the comments most likely to mislead the next reader.
+- **Module docstring** — rewritten. Dropped the "ashwamag-01, ≥5s" defaults (they
+  live in `spec.py` and are no longer hardcoded to one customer) and the claim that
+  cohorts persist as `cohorts/<id>.json`; it now states that state is in Postgres and
+  the JSON layout is migration-only.
+- **`cohorts_dir`** — "cohort state is in SQLite" → "in Postgres".
+- **`store.py:16`** — **left as-is.** Re-read in full: the file opens *"Cohort state,
+  in Postgres"* and the `sqlite3.Connection` mention sits inside an explicit list of
+  "three things the move simplifies". It is already flagged as historical.
+- **`compat.py:3`** — **left for you.** *"analyze.py is owned by Anant's co-founder"*
+  is a statement about a team boundary, not about code. If that boundary has changed,
+  it is the main argument for keeping a layer with no engineering justification — but
+  whether it has changed is not something the tree can tell me.
 
-## 8. Minor
+## 8. Minor — **done, except the data file**
 
-- **`resolve_project(project)` called twice** in one statement,
-  [server.py:1153](../capture/server.py#L1153) and
-  [:1156](../capture/server.py#L1156). Hoist to a local.
-- **Test fake signature drift** — `test_cohort_batch.py:95` defines
-  `fake_wait(name, *, poll_s=None)` while production is
-  `wait_gemini_batch(job_name, *, poll_s=None, max_wait_s=None)`. Benign (the call
-  site passes one positional arg) but the fake will not fail loudly if the real
-  signature grows a required parameter.
-- **`data/index.db`** — stale SQLite file, 141 orphaned sessions. Delete after the
-  CLI, and after confirming `store.migrate_sqlite_cohorts` has consumed it.
+- **`resolve_project(project)` called twice** — **already fixed.** All 19 call sites
+  in `server.py` now bind `found = resolve_project(project)` first; no double call
+  remains.
+- **Test fake signature drift** — fixed. `fake_wait` in `test_cohort_batch.py` now
+  mirrors `wait_gemini_batch(job_name, *, poll_s=None, max_wait_s=None)`, with a
+  comment saying why the signatures must track.
+- **`data/index.db`** — **not done, needs your call.** Still present (110KB, 141
+  orphaned sessions). Deleting a data file is irreversible and the doc's own
+  precondition is confirming `store.migrate_sqlite_cohorts` has consumed it, which I
+  have not verified.
 
 ---
 
@@ -220,51 +193,90 @@ refactor:
 `capture/` was formatted and gated in `067fe83` / `d177c4c`, so this is the last file
 outside the net.
 
-## 10. Delete `_ForwardingModule`
+### Measured 2026-08-11 — not yet lifted
+
+Tooling installed and run against the package with the exclusion still in place. Note
+that a global `user = true` in `~/.config/pip/pip.conf` breaks `pip install` into the
+venv; `PIP_USER=0` in front of it is the workaround.
+
+`ruff format --check`: **8 of 9 files** would be reformatted. `mypy capture/` is
+already clean. `ruff check`: **99 errors**, of which 80 are autofixable —
+
+| Rule | Count | Character |
+| --- | --- | --- |
+| `UP007` / `UP006` / `UP035` | 78 | `Optional[x]` → `x \| None`. Mechanical. |
+| `F401` unused-import | 10 | **See the hazard below.** |
+| `I001` unsorted-imports | 5 | Mechanical, but see the `E402` note. |
+| `B904` raise-without-from | 2 | Real: loses the causal traceback. Judgement. |
+| `C408`, `UP041`, `RUF005`, `RUF013` | 4 | Mechanical. |
+
+> ⚠️ **Do not run `ruff check --fix` on this package.** Eight of the ten `F401`s are
+> the re-export blocks from #2, and six of those names — `DEVICE_VALUES`,
+> `OUTCOME_VALUES`, `device_class`, `CUT_SECTIONS`, `facets_from_rows`, `pool_facets`
+> — are *unused inside the module* but reached off the package by
+> `analysis_port.py` and the suite. Autofixing deletes them and breaks production.
+> Ruff's own alternative is the right one: declare an `__all__`, which also gives #2
+> the explicit public surface it was arguing for.
+>
+> The other two `F401`s (`typing.List`, `typing.Tuple`) were genuinely dead and are
+> already removed.
+
+The re-export blocks also carry `# noqa: E402` because they sit mid-file; the
+`I001` fixes and any `__all__` work have to preserve that placement, which is
+deliberate — see the comment at [:750](../capture/analyze/__init__.py#L750).
+
+## 10. Delete `_ForwardingModule` — **done in `d2401ee`**
 
 Added on re-verification; see [design §0.3](analyze-design-review.md) for the full
 argument.
 
-`_ForwardingModule` ([:3014](../capture/analyze/__init__.py#L3014)) swaps the live
-module's `__class__` so assignment to the package is pushed into whichever submodule
-owns the name. It exists to serve the two re-export blocks (#2) — and with
-`analysis_port.py` mediating production access, those blocks have almost no consumers
-left.
+`_ForwardingModule` swapped the live module's `__class__` so assignment to the package
+was pushed into whichever submodule owned the name. Its costs were all concrete:
+invisible to type checkers, IDEs and `__all__` tooling; fired on every module-global
+write; `OUTCOME_LABELS` was in `vars()` of both `slices` and `stats` and the loop had
+no `break`, so one assignment wrote three bindings; and the class swap was the last
+statement of a 3,000-line module, so any import-time exception disabled it silently.
 
-Costs, all concrete: invisible to type checkers, IDEs and `__all__` tooling; fires on
-every module-global write including internal `global` statements; `OUTCOME_LABELS` is
-in `vars()` of both `slices` and `stats` and the loop has no `break`, so one
-assignment writes three bindings; and the class swap is the **last statement of a
-3,026-line module**, so any import-time exception disables it with no error.
+It was also propping up a testing style rather than being required by one: the suite
+used **54 raw assignments** against **one** `unittest.mock.patch`.
 
-It is also propping up a testing style rather than being required by one: the suite
-uses **54 raw assignments** against **one** `unittest.mock.patch`.
+**Replaced by a checked import rule**, as proposed: `_ForwardingModule` and
+`_FORWARD_TO` are gone, and [tests/test_patch_contract.py](../tests/test_patch_contract.py)
+enforces the *rule* by walking the AST — no module in the package may bind a patchable
+name via `from . import X`.
 
-**Fix:** after #2, delete `_ForwardingModule` and `_FORWARD_TO`. Preserve the *rule*
-— submodules call through the module object, never `from .x import y` for a name
-tests patch — as an AST test in the style of
-[test_analysis_port.py:153](../tests/test_analysis_port.py#L153). A machine-checked
-convention, which is what the deleted mechanism's own comment argues for.
+One coupling worth knowing: that file's `PATCHABLE` set has a companion test asserting
+every listed name still exists on the package. Deleting a patchable function (as #1
+did with `submit_gemini_batch`) fails CI until the name is removed from the set too.
+That is the guard working — it catches a list going stale — but it is a second place
+to edit.
 
 ---
 
-## Suggested order
+## Status — 2026-08-11
 
-Safe to interleave with the other two documents' work.
+| # | Item | State |
+| --- | --- | --- |
+| 1 | Dead code (+ the CLI) | **done** |
+| 2 | Narrow the re-exports | **done** (extraction commits) |
+| 3 | `SAFE_CHUNK` single definition | **done** |
+| 4 | Duplicate prompt constants | **done** |
+| 5 | `standout_line` | **not doing** — deliberate, see above |
+| 6 | Stale `sqlite3` annotations | **done** — `spec.Connection` Protocol |
+| 7 | Docstring / comment drift | **done**, except `compat.py:3` (your call) |
+| 8 | Minor | **done**, except deleting `data/index.db` (your call) |
+| 9 | Lift the linter exclusion | **measured, not lifted** |
+| 10 | Delete `_ForwardingModule` | **done** (`d2401ee`) |
 
-**Before structural work:** #3 (`SAFE_CHUNK`), #4 (prompt constants), #7 (docstrings),
-#8 (minor). All independent, all low-risk.
+Two items are left deliberately, because both are decisions rather than edits: the
+`compat.py` ownership comment (#7) and the `data/index.db` deletion (#8). #9 is
+scoped and measured above but is the closing deliverable — it wants its own two
+commits, on a clean tree.
 
-**Then, as the extraction precondition:** #2 (narrow re-exports) → #10 (delete
-forwarding). These are ordered and must land before any new submodule, so nothing is
-wired into a mechanism that is about to go.
+Verification for everything marked done: `npm run test:server` green at **525 tests**,
+`npm run test:client` green at **172**, prompt hashes unchanged
+(`5637eecc` / `d6416d2b` / `6007448b`), `mypy capture/` clean.
 
-**During:** ~~#1 (dead code, alongside the CLI deletion)~~ — **done**; #6
-(annotations) is now unblocked, since the CLI went with it.
-
-**Last:** #9 (linter exclusion).
-
-**Not doing:** #5 (`standout_line`) — leave it.
-
-Verification: `npm test` green, prompt hashes unchanged
-(`5637eecc` / `d6416d2b` / `6007448b`).
+Note: `ruff check .` reports 19 pre-existing errors and 4 files needing reformat, all
+under `tests/`. Confirmed identical on a stashed clean tree — not introduced by this
+work, and out of scope for the analyze cleanup.

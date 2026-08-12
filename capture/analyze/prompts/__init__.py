@@ -31,8 +31,3 @@ def load(name: str) -> str:
     literal. Stripping it here would silently invalidate every cached cut.
     """
     return (PROMPT_DIR / name).read_text(encoding="utf-8")
-
-
-SYSTEM_PROMPT = load("session.md")
-CUT_PROMPT = load("cut.md")
-CHAT_PROMPT = load("chat.md")
