@@ -22,17 +22,17 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.pool = Path(self.tmp.name) / "sessions"
         self.pool.mkdir()
         self._saved = {
-            "ANALYSIS_ENABLED": analyze.ANALYSIS_ENABLED,
-            "ANALYZE_BATCH": analyze.ANALYZE_BATCH,
+            "ANALYSIS_ENABLED": analyze.runtime.ANALYSIS_ENABLED,
+            "ANALYZE_BATCH": analyze.runtime.ANALYZE_BATCH,
             "run_extractor": analyze.run_extractor,
             "submit_prepared_gemini_batch": analyze.submit_prepared_gemini_batch,
             "wait_gemini_batch": analyze.wait_gemini_batch,
             "parse_batch_results": analyze.parse_batch_results,
             "call_gemini": analyze.call_gemini,
         }
-        analyze.ANALYSIS_ENABLED = True
-        analyze.ANALYZE_BATCH = True
-        analyze._gate_loop = None
+        analyze.runtime.ANALYSIS_ENABLED = True
+        analyze.runtime.ANALYZE_BATCH = True
+        analyze.runtime._gate_loop = None
         # Every test in this class drives the real pipeline, so each one is an
         # enforcement pass over COHORT_TRANSITIONS: cohort_transition logs
         # rather than raises, and this turns the log into a failure.
@@ -48,9 +48,11 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
         )
 
     def restore(self):
+        runtime_keys = {"ANALYSIS_ENABLED", "ANALYZE_BATCH"}
         for key, value in self._saved.items():
-            setattr(analyze, key, value)
-        analyze._gate_loop = None
+            target = analyze.runtime if key in runtime_keys else analyze
+            setattr(target, key, value)
+        analyze.runtime._gate_loop = None
         self.tmp.cleanup()
 
     def _session(self, sid):
@@ -174,16 +176,16 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         self.pool = self.root / "sessions"
         self.pool.mkdir(parents=True)
         self._saved = {
-            "ANALYSIS_ENABLED": analyze.ANALYSIS_ENABLED,
-            "ANALYZE_BATCH": analyze.ANALYZE_BATCH,
+            "ANALYSIS_ENABLED": analyze.runtime.ANALYSIS_ENABLED,
+            "ANALYZE_BATCH": analyze.runtime.ANALYZE_BATCH,
             "run_extractor": analyze.run_extractor,
             "submit_prepared_gemini_batch": analyze.submit_prepared_gemini_batch,
             "wait_gemini_batch": analyze.wait_gemini_batch,
             "_cohort_sync_model": analyze._cohort_sync_model,
         }
-        analyze.ANALYSIS_ENABLED = True
-        analyze.ANALYZE_BATCH = True
-        analyze._gate_loop = None
+        analyze.runtime.ANALYSIS_ENABLED = True
+        analyze.runtime.ANALYZE_BATCH = True
+        analyze.runtime._gate_loop = None
         self.sync_calls = 0
 
         async def fake_extract(session_dir, out_dir, chunk_names):
@@ -204,9 +206,11 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         self.addCleanup(self.restore)
 
     def restore(self):
+        runtime_keys = {"ANALYSIS_ENABLED", "ANALYZE_BATCH"}
         for key, value in self._saved.items():
-            setattr(analyze, key, value)
-        analyze._gate_loop = None
+            target = analyze.runtime if key in runtime_keys else analyze
+            setattr(target, key, value)
+        analyze.runtime._gate_loop = None
         self.tmp.cleanup()
 
     def cohort(self, n=2) -> dict:

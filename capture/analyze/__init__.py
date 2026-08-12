@@ -35,7 +35,7 @@ from ..paths import SAFE_CHUNK
 # them that way. `as` rather than a bare import because these are re-exports,
 # not uses: this file calls through the names below, not through the modules.
 from . import cohort_state as cohort_state
-from . import prompts, spec
+from . import prompts, runtime, spec
 from . import slices as slices
 from . import stats as stats
 from . import storage as storage
@@ -302,33 +302,46 @@ __all__ = [
     "run_cohort_job",
 ]
 
-# The repo root: EXTRACTOR, the extractor subprocess cwd and the default data
-# dir are all repo-relative, and this file is capture/analyze/__init__.py, so
-# it climbs two levels rather than the one a top-level module would.
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+# Config, path anchors, and the shared extract/model semaphores live in
+# runtime.py. Re-exported below so `analyze.X` and analysis_port keep working;
+# call sites in this file go through the `runtime` module object so test patches
+# against `capture.analyze.runtime` reach the reader.
+_gates = runtime._gates
+runtime_present = runtime.runtime_present
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-ANALYZE_TIMEOUT_S = float(os.environ.get("ANALYZE_TIMEOUT_S", "300"))
+# Mutable / rebound runtime names are forwarded via __getattr__ rather than
+# copied at import: a from-import of ANALYSIS_ENABLED would freeze the bool, and
+# analyze._gate_loop = None would set an unrelated attribute while _gates kept
+# reading runtime._gate_loop. Tests that rebind these assign on analyze.runtime.
+_RUNTIME_EXPORTS = frozenset(
+    {
+        "ANALYSIS_ENABLED",
+        "ANALYZE_BATCH",
+        "ANALYZE_BATCH_MAX_WAIT_S",
+        "ANALYZE_BATCH_POLL_MAX_ERRORS",
+        "ANALYZE_BATCH_POLL_S",
+        "ANALYZE_EXTRACT_CONCURRENCY",
+        "ANALYZE_FPS",
+        "ANALYZE_MAX_FRAMES",
+        "ANALYZE_MODEL_CONCURRENCY",
+        "ANALYZE_TIMEOUT_S",
+        "BASE_DIR",
+        "EXTRACTOR",
+        "GEMINI_API_KEY",
+        "GEMINI_MODEL",
+        "REPLAYER_BUNDLE",
+        "_extract_gate",
+        "_gate_loop",
+        "_model_gate",
+    }
+)
 
-# Frames come one per second of activity; dead air is skipped, so a long
-# session with a little interaction stays cheap.
-ANALYZE_FPS = float(os.environ.get("ANALYZE_FPS", "1"))
-# Capped by default: activity-based sampling keeps a typical session well under
-# this, but a continuously-active one grows a frame per second without bound
-# (~200 frames for 200s), and at cohort scale those JPEGs are the OOM the batch
-# path was rewritten to survive. Set 0 to disable the cap.
-ANALYZE_MAX_FRAMES = int(os.environ.get("ANALYZE_MAX_FRAMES", "90"))
 
-ANALYSIS_ENABLED = bool(GEMINI_API_KEY)
+def __getattr__(name: str):
+    if name in _RUNTIME_EXPORTS:
+        return getattr(runtime, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-# Extraction and model calls contend for different resources, so they get
-# different gates. Reconstruction drives a headless Chromium and is memory
-# bound — one at a time, or a small box starts swapping. The Gemini calls are
-# pure network wait, so a few can overlap and the cohort loop stops spending
-# most of its wall clock idle.
-ANALYZE_EXTRACT_CONCURRENCY = max(1, int(os.environ.get("ANALYZE_EXTRACT_CONCURRENCY", "1")))
-ANALYZE_MODEL_CONCURRENCY = max(1, int(os.environ.get("ANALYZE_MODEL_CONCURRENCY", "3")))
 
 # The sampling vocabulary lives in spec.py. Aliased under the older names so the
 # sampler and the port keep reading the way they always have.
@@ -342,52 +355,7 @@ COHORT_ORDER_LATEST = spec.ORDER_LATEST
 COHORT_ORDER_EARLIEST = spec.ORDER_EARLIEST
 COHORT_ORDERS = spec.ORDERS
 
-# Cohort write-ups go through Gemini Batch (≈50% cheaper). Single-session
-# Analyze stays on the interactive API. Set ANALYZE_BATCH=0 to force sync.
-ANALYZE_BATCH = os.environ.get("ANALYZE_BATCH", "1").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-    "off",
-)
-ANALYZE_BATCH_POLL_S = float(os.environ.get("ANALYZE_BATCH_POLL_S", "15"))
-# Batch is slow by design (the 50% discount buys a queue, not a latency SLA),
-# so this is a stuck-job backstop rather than a deadline anyone should hit.
-# The job name stays on disk when it trips, so a resume picks the job back up
-# instead of re-billing the cohort. 0 waits forever, as before.
-ANALYZE_BATCH_MAX_WAIT_S = float(os.environ.get("ANALYZE_BATCH_MAX_WAIT_S", str(24 * 3600)))
-# A poll that raises is usually a blip, and escalating one would cost a re-run
-# of the whole cohort, so tolerate a few in a row before giving up.
-ANALYZE_BATCH_POLL_MAX_ERRORS = max(1, int(os.environ.get("ANALYZE_BATCH_POLL_MAX_ERRORS", "5")))
-
-# Created lazily: a Semaphore binds to the running loop, and this module is
-# imported before the server's loop exists.
-_extract_gate: asyncio.Semaphore | None = None
-_model_gate: asyncio.Semaphore | None = None
-_gate_loop: asyncio.AbstractEventLoop | None = None
-
-
-EXTRACTOR = BASE_DIR / "src" / "analyze" / "extract.mjs"
-REPLAYER_BUNDLE = BASE_DIR / "src" / "analyze" / "replayer.bundle.js"
-
-
-def _gates() -> tuple:
-    """(extract, model) semaphores bound to the running loop."""
-    global _extract_gate, _model_gate, _gate_loop
-    loop = asyncio.get_running_loop()
-    if _gate_loop is not loop or _extract_gate is None or _model_gate is None:
-        _extract_gate = asyncio.Semaphore(ANALYZE_EXTRACT_CONCURRENCY)
-        _model_gate = asyncio.Semaphore(ANALYZE_MODEL_CONCURRENCY)
-        _gate_loop = loop
-    return _extract_gate, _model_gate
-
-
 SYSTEM_PROMPT = prompts.load("session.md")
-
-
-def runtime_present() -> bool:
-    """Whether the headless reconstruction can run: node, the extractor, the bundle."""
-    return bool(shutil.which("node") and EXTRACTOR.is_file() and REPLAYER_BUNDLE.is_file())
 
 
 def prompt_version(text: str) -> str:
@@ -567,14 +535,14 @@ async def call_gemini_cut(
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=runtime.GEMINI_API_KEY)
     header, side_text, citations = cut_context(rows, label, given, spec)
     parts = [
         types.Part.from_text(text=header),
         types.Part.from_text(text=side_text),
     ]
     response = await client.aio.models.generate_content(
-        model=GEMINI_MODEL,
+        model=runtime.GEMINI_MODEL,
         contents=[types.Content(role="user", parts=parts)],
         config=types.GenerateContentConfig(
             system_instruction=CUT_PROMPT,
@@ -595,7 +563,7 @@ async def call_gemini_cut(
 
 async def build_cut_analysis(rows: list, slice_spec: dict | None) -> dict:
     """Filter the cohort to one group and ask the model what it did."""
-    if not ANALYSIS_ENABLED:
+    if not runtime.ANALYSIS_ENABLED:
         raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
 
     selected, spec = select_rows_by_cut(rows, slice_spec)
@@ -606,7 +574,7 @@ async def build_cut_analysis(rows: list, slice_spec: dict | None) -> dict:
         "label": label,
         "n": len(selected),
         "session_ids": [r.get("session_id") for r in selected],
-        "model": GEMINI_MODEL,
+        "model": runtime.GEMINI_MODEL,
         "created_at": int(time.time() * 1000),
     }
 
@@ -617,7 +585,7 @@ async def build_cut_analysis(rows: list, slice_spec: dict | None) -> dict:
         return {**base, "analysis": empty, "citations": {}}
 
     given = _given_facts(spec, len(selected))
-    _, model_gate = _gates()
+    _, model_gate = runtime._gates()
     async with model_gate:
         analysis, citations = await call_gemini_cut(selected, label, given, spec)
     # Stored, not derived: this is the numbering the model actually saw, so a
@@ -673,7 +641,7 @@ async def stream_gemini_chat(
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=runtime.GEMINI_API_KEY)
     header, side_text, _ = cut_context(rows, label, given, spec)
     contents = [
         types.Content(
@@ -704,7 +672,7 @@ async def stream_gemini_chat(
         )
 
     stream = await client.aio.models.generate_content_stream(
-        model=GEMINI_MODEL,
+        model=runtime.GEMINI_MODEL,
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=CHAT_PROMPT,
@@ -730,7 +698,7 @@ async def chat_context(rows: list, slice_spec: dict | None) -> tuple:
     stream_gemini_chat: without it the chat would rebuild its context without
     the measured splits and answer from a thinner view than the cut on screen.
     """
-    if not ANALYSIS_ENABLED:
+    if not runtime.ANALYSIS_ENABLED:
         raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
     selected, spec = select_rows_by_cut(rows, slice_spec)
     label = slice_label(spec) if spec else "all sessions"
@@ -816,25 +784,25 @@ def delete_cohort(pool: Path, cohort_id: str) -> bool:
 async def run_extractor(session_dir: Path, out_dir: Path, chunk_names: list) -> dict:
     if not shutil.which("node"):
         raise RuntimeError("node is not installed on this server — analysis is unavailable")
-    if not REPLAYER_BUNDLE.is_file():
+    if not runtime.REPLAYER_BUNDLE.is_file():
         raise RuntimeError("replayer bundle missing — run `npm run build`")
 
     proc = await asyncio.create_subprocess_exec(
         "node",
-        str(EXTRACTOR),
+        str(runtime.EXTRACTOR),
         str(session_dir),
         str(out_dir),
-        str(REPLAYER_BUNDLE),
+        str(runtime.REPLAYER_BUNDLE),
         # Positional, and ahead of the variadic chunk names.
-        str(ANALYZE_FPS),
-        str(ANALYZE_MAX_FRAMES),
+        str(runtime.ANALYZE_FPS),
+        str(runtime.ANALYZE_MAX_FRAMES),
         *chunk_names,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=str(BASE_DIR),
+        cwd=str(runtime.BASE_DIR),
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), ANALYZE_TIMEOUT_S)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), runtime.ANALYZE_TIMEOUT_S)
     except TimeoutError as exc:
         proc.kill()
         raise RuntimeError("page reconstruction timed out") from exc
@@ -1021,7 +989,7 @@ def write_analysis_result(
     result = {
         "status": "done",
         "text": text,
-        "model": model or GEMINI_MODEL,
+        "model": model or runtime.GEMINI_MODEL,
         "created_at": int(time.time() * 1000),
         "frame_count": frame_count,
         "warnings": warnings or [],
@@ -1035,9 +1003,9 @@ async def call_gemini(digest: dict, frames: list, meta: dict | None = None) -> s
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=runtime.GEMINI_API_KEY)
     response = await client.aio.models.generate_content(
-        model=GEMINI_MODEL,
+        model=runtime.GEMINI_MODEL,
         contents=[types.Content(role="user", parts=_session_model_parts(digest, frames, meta))],
         config=_session_model_config(),
     )
@@ -1093,7 +1061,7 @@ async def submit_prepared_gemini_batch(
     if not prepared:
         raise ValueError("batch requires at least one request")
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=runtime.GEMINI_API_KEY)
     config = types.CreateBatchJobConfig(display_name=display_name[:128])
     tmp = _batch_jsonl_path(work_dir)
     try:
@@ -1116,7 +1084,7 @@ async def submit_prepared_gemini_batch(
         tmp.unlink(missing_ok=True)
 
     job = await client.aio.batches.create(
-        model=GEMINI_MODEL,
+        model=runtime.GEMINI_MODEL,
         src=types.BatchJobSource(file_name=uploaded.name),
         config=config,
     )
@@ -1176,7 +1144,7 @@ def parse_batch_results(job) -> dict:
         return out
     from google import genai
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=runtime.GEMINI_API_KEY)
     raw = client.files.download(file=file_name)
     if isinstance(raw, bytes):
         content = raw.decode("utf-8", "replace")
@@ -1240,9 +1208,9 @@ async def wait_gemini_batch(
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    interval = ANALYZE_BATCH_POLL_S if poll_s is None else poll_s
-    limit = ANALYZE_BATCH_MAX_WAIT_S if max_wait_s is None else max_wait_s
+    client = genai.Client(api_key=runtime.GEMINI_API_KEY)
+    interval = runtime.ANALYZE_BATCH_POLL_S if poll_s is None else poll_s
+    limit = runtime.ANALYZE_BATCH_MAX_WAIT_S if max_wait_s is None else max_wait_s
     deadline = None if limit <= 0 else time.monotonic() + limit
     terminal = {
         types.JobState.JOB_STATE_SUCCEEDED,
@@ -1263,7 +1231,7 @@ async def wait_gemini_batch(
             # A failed poll says nothing about the job, so treat it as a blip
             # until it stops looking like one.
             errors += 1
-            if errors >= ANALYZE_BATCH_POLL_MAX_ERRORS:
+            if errors >= runtime.ANALYZE_BATCH_POLL_MAX_ERRORS:
                 raise BatchStillRunning(
                     f"could not read batch {job_name} after {errors} attempts: {exc}"
                 ) from exc
@@ -1290,7 +1258,7 @@ async def cancel_gemini_batch(job_name: str) -> None:
         return
     from google import genai
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=runtime.GEMINI_API_KEY)
     try:
         await client.aio.batches.cancel(name=job_name)
     except Exception as exc:
@@ -1332,7 +1300,7 @@ async def extract_session_digest(
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    extract_gate, _ = _gates()
+    extract_gate, _ = runtime._gates()
     async with extract_gate:
         digest = await run_extractor(session_dir, out_dir, chunk_names)
     if digest.get("error"):
@@ -1355,7 +1323,7 @@ def _parse_json_object(text: str) -> dict:
 
 
 async def analyze_session(session_dir: Path, chunk_names: list, force: bool = False) -> dict:
-    if not ANALYSIS_ENABLED:
+    if not runtime.ANALYSIS_ENABLED:
         raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
 
     if not force:
@@ -1365,7 +1333,7 @@ async def analyze_session(session_dir: Path, chunk_names: list, force: bool = Fa
 
     digest = await extract_session_digest(session_dir, chunk_names, force=True)
     meta = session_metadata(session_dir)
-    _, model_gate = _gates()
+    _, model_gate = runtime._gates()
     async with model_gate:
         text = await call_gemini(digest, digest.get("frames") or [], meta)
     return write_analysis_result(
@@ -1493,7 +1461,7 @@ async def run_cohort_job(pool: Path, cohort: dict, *, force: bool = False) -> di
         if not prepared:
             return enrich_cohort_status(pool, read_cohort(pool, cohort["id"]) or cohort)
 
-        use_batch = ANALYZE_BATCH and ANALYSIS_ENABLED
+        use_batch = runtime.ANALYZE_BATCH and runtime.ANALYSIS_ENABLED
         job_name = None
         if use_batch:
             # Only submission falls back to sync. Once a job exists it is
@@ -1637,7 +1605,7 @@ async def _cohort_sync_model(pool: Path, cohort: dict, prepared: list) -> None:
         write_job(session_dir, "running")
         mark_cohort_session(pool, cohort, entry, "running")
         try:
-            _, model_gate = _gates()
+            _, model_gate = runtime._gates()
             async with model_gate:
                 text = await call_gemini(
                     digest, digest.get("frames") or [], session_metadata(session_dir)
@@ -1727,14 +1695,11 @@ def cohorts_needing_batch_resume(data_root: Path) -> list:
 # anything on the paid path: `cut_key` reads CUT_PROMPT, `_session_model_config`
 # reads SYSTEM_PROMPT, and `run_cohort_job` calls nearly everything.
 #
-# One hazard the AST test does not cover, because it only knows about PATCHABLE:
-# the suite also reaches privates, and *how* it reaches them decides whether they
-# can move. `_gate_loop` is **rebound** (`analyze._gate_loop = None`, nine sites),
-# so `_gates` must keep reading it from this namespace -- move it and the
-# assignment lands on an unrelated attribute, the semaphore reset silently stops
-# happening, and gates bound to a dead event loop leak between tests.
+# Config and `_gates` live in `runtime.py`. Rebound test hooks
+# (`ANALYSIS_ENABLED`, `ANALYZE_BATCH`, `_gate_loop`, the concurrency caps)
+# must be assigned on `analyze.runtime`, not on the package — a package
+# assignment would not reach `_gates` or the orchestration call sites above.
 # `_migrated` and `_undeclared_transitions` are only **mutated in place**, so a
 # re-export binds the same object and `.clear()` still reaches the definition.
 #
-# Rebound names stay. Mutated-in-place and pure names may move. See
-# docs/analyze-design-review.md §4.1.
+# See docs/analyze-design-review.md §4.1 and the modularize plan's runtime step.

@@ -34,30 +34,30 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self._saved = {
-            "ANALYSIS_ENABLED": analyze.ANALYSIS_ENABLED,
+            "ANALYSIS_ENABLED": analyze.runtime.ANALYSIS_ENABLED,
             "run_extractor": analyze.run_extractor,
             "call_gemini": analyze.call_gemini,
-            "extract": analyze.ANALYZE_EXTRACT_CONCURRENCY,
-            "model": analyze.ANALYZE_MODEL_CONCURRENCY,
+            "extract": analyze.runtime.ANALYZE_EXTRACT_CONCURRENCY,
+            "model": analyze.runtime.ANALYZE_MODEL_CONCURRENCY,
         }
-        analyze.ANALYSIS_ENABLED = True
+        analyze.runtime.ANALYSIS_ENABLED = True
         # Force fresh semaphores bound to this test's loop.
-        analyze._gate_loop = None
+        analyze.runtime._gate_loop = None
         self.addCleanup(self.restore)
 
     def restore(self):
-        analyze.ANALYSIS_ENABLED = self._saved["ANALYSIS_ENABLED"]
+        analyze.runtime.ANALYSIS_ENABLED = self._saved["ANALYSIS_ENABLED"]
         analyze.run_extractor = self._saved["run_extractor"]
         analyze.call_gemini = self._saved["call_gemini"]
-        analyze.ANALYZE_EXTRACT_CONCURRENCY = self._saved["extract"]
-        analyze.ANALYZE_MODEL_CONCURRENCY = self._saved["model"]
-        analyze._gate_loop = None
+        analyze.runtime.ANALYZE_EXTRACT_CONCURRENCY = self._saved["extract"]
+        analyze.runtime.ANALYZE_MODEL_CONCURRENCY = self._saved["model"]
+        analyze.runtime._gate_loop = None
         self.tmp.cleanup()
 
     def run_cohort(self, n=4, extract_n=1, model_n=3):
-        analyze.ANALYZE_EXTRACT_CONCURRENCY = extract_n
-        analyze.ANALYZE_MODEL_CONCURRENCY = model_n
-        analyze._gate_loop = None
+        analyze.runtime.ANALYZE_EXTRACT_CONCURRENCY = extract_n
+        analyze.runtime.ANALYZE_MODEL_CONCURRENCY = model_n
+        analyze.runtime._gate_loop = None
 
         # Mirrors production: a model call outlasts the next extraction, which
         # is the only condition under which overlapping them buys anything.

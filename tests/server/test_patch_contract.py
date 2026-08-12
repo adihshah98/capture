@@ -54,8 +54,8 @@ PATCHABLE = frozenset(
         "SYSTEM_PROMPT",
         "CUT_PROMPT",
         "CHAT_PROMPT",
-        "ANALYSIS_ENABLED",
-        "ANALYZE_BATCH",
+        # ANALYSIS_ENABLED / ANALYZE_BATCH moved to runtime.py; tests patch
+        # capture.analyze.runtime rather than the package namespace.
     }
 )
 
@@ -63,9 +63,9 @@ PATCHABLE = frozenset(
 # The private hooks the suite reaches that `__all__` deliberately does not list.
 # Underscore-prefixed and not public, but thirteen test modules depend on them:
 # `_migrated` and `_undeclared_transitions` are cleared between cases,
-# `_gate_loop` is rebound to reset the semaphores, and the rest are called
-# directly. They are named here so dropping one is a failure rather than a
-# surprise somewhere downstream.
+# `_gate_loop` is rebound on analyze.runtime to reset the semaphores, and the
+# rest are called directly. They are named here so dropping one is a failure
+# rather than a surprise somewhere downstream.
 EXPECTED_PRIVATE_SURFACE = frozenset(
     {
         "_auto_cohort_label",
@@ -190,32 +190,30 @@ class TestPatchingReachesTheCallSite(unittest.TestCase):
                 offenders[module.__name__] = sorted(shared)
         self.assertEqual(offenders, {}, f"submodules hold patchable names: {offenders}")
 
-    def test_the_gate_loop_is_rebindable_from_the_package(self):
+    def test_the_gate_loop_is_rebindable_from_runtime(self):
         """`_gates` must read `_gate_loop` out of the namespace tests assign to.
 
-        Nine test sites reset the gates with `analyze._gate_loop = None` so a new
-        event loop gets fresh semaphores. That is a *rebind*, not a mutation, so
-        it only works while `_gates` resolves the name in the same module the
-        assignment lands in. Move `_gates` into a submodule and the assignment
-        silently sets an unrelated attribute: the reset stops happening, and
-        semaphores bound to a dead loop leak into the next test.
+        Test sites reset the gates with `analyze.runtime._gate_loop = None` so a
+        new event loop gets fresh semaphores. That is a *rebind*, not a mutation,
+        so it only works while `_gates` resolves the name in the same module the
+        assignment lands in (`runtime.py`).
         """
         from capture import analyze
 
         async def gates():
-            return analyze._gates()
+            return analyze.runtime._gates()
 
-        previous = analyze._gate_loop
+        previous = analyze.runtime._gate_loop
         try:
-            analyze._gate_loop = None
+            analyze.runtime._gate_loop = None
             first = asyncio.run(gates())
-            analyze._gate_loop = None
+            analyze.runtime._gate_loop = None
             second = asyncio.run(gates())
             # Fresh objects, or the rebind did not reach the reader.
             self.assertIsNot(first[0], second[0])
             self.assertIsNot(first[1], second[1])
         finally:
-            analyze._gate_loop = previous
+            analyze.runtime._gate_loop = previous
 
 
 class TestThePackageSurfaceIsDeclared(unittest.TestCase):

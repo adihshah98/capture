@@ -540,16 +540,16 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
 
 class TestBuildCutAnalysis(unittest.TestCase):
     def setUp(self):
-        self._enabled = analyze.ANALYSIS_ENABLED
+        self._enabled = analyze.runtime.ANALYSIS_ENABLED
         self._call = analyze.call_gemini_cut
-        analyze.ANALYSIS_ENABLED = True
-        analyze._gate_loop = None
+        analyze.runtime.ANALYSIS_ENABLED = True
+        analyze.runtime._gate_loop = None
         self.addCleanup(self.restore)
 
     def restore(self):
-        analyze.ANALYSIS_ENABLED = self._enabled
+        analyze.runtime.ANALYSIS_ENABLED = self._enabled
         analyze.call_gemini_cut = self._call
-        analyze._gate_loop = None
+        analyze.runtime._gate_loop = None
 
     def test_an_empty_group_skips_the_model_call(self):
         calls = []
@@ -732,17 +732,17 @@ class TestGivenFacts(unittest.TestCase):
             seen["given"] = given
             return analyze.empty_cut_analysis(), {}
 
-        saved_enabled, saved_call = analyze.ANALYSIS_ENABLED, analyze.call_gemini_cut
-        analyze.ANALYSIS_ENABLED = True
+        saved_enabled, saved_call = analyze.runtime.ANALYSIS_ENABLED, analyze.call_gemini_cut
+        analyze.runtime.ANALYSIS_ENABLED = True
         analyze.call_gemini_cut = fake
-        analyze._gate_loop = None
+        analyze.runtime._gate_loop = None
         try:
             rows = [row("a", "purchased"), row("b", "rest")]
             asyncio.run(analyze.build_cut_analysis(rows, {"outcome": ["purchased"]}))
         finally:
-            analyze.ANALYSIS_ENABLED = saved_enabled
+            analyze.runtime.ANALYSIS_ENABLED = saved_enabled
             analyze.call_gemini_cut = saved_call
-            analyze._gate_loop = None
+            analyze.runtime._gate_loop = None
         # One row matches the filter, so the premise must say 1 — not 2.
         self.assertIn("All 1 session(s) in this group purchased", seen["given"])
         self.assertIn("exactly 1 session(s)", seen["given"])
@@ -1191,14 +1191,14 @@ class TestCrossTabReachesBothReaders(unittest.TestCase):
             seen["cut"] = analyze.cut_context(rows_, label_, given_, spec_)[0]
             return analyze.empty_cut_analysis(), {}
 
-        saved_call, saved_enabled = analyze.call_gemini_cut, analyze.ANALYSIS_ENABLED
-        analyze.call_gemini_cut, analyze.ANALYSIS_ENABLED = fake_cut, True
+        saved_call, saved_enabled = analyze.call_gemini_cut, analyze.runtime.ANALYSIS_ENABLED
+        analyze.call_gemini_cut, analyze.runtime.ANALYSIS_ENABLED = fake_cut, True
         try:
             asyncio.run(analyze.build_cut_analysis(rows, slice_spec))
             selected, label, given, _, spec = asyncio.run(analyze.chat_context(rows, slice_spec))
         finally:
             analyze.call_gemini_cut = saved_call
-            analyze.ANALYSIS_ENABLED = saved_enabled
+            analyze.runtime.ANALYSIS_ENABLED = saved_enabled
 
         seen["chat"] = analyze.cut_context(selected, label, given, spec)[0]
         self.assertEqual(seen["cut"], seen["chat"])

@@ -54,11 +54,11 @@ class TestChatContext(unittest.TestCase):
     runs without a real key — nothing here reaches the network."""
 
     def setUp(self):
-        self._enabled = analyze.ANALYSIS_ENABLED
-        analyze.ANALYSIS_ENABLED = True
+        self._enabled = analyze.runtime.ANALYSIS_ENABLED
+        analyze.runtime.ANALYSIS_ENABLED = True
 
     def tearDown(self):
-        analyze.ANALYSIS_ENABLED = self._enabled
+        analyze.runtime.ANALYSIS_ENABLED = self._enabled
 
     def test_the_filter_selects_the_group_and_names_it(self):
         rows = [
@@ -96,13 +96,13 @@ class TestChatContext(unittest.TestCase):
         self.assertEqual(citations, {})
 
     def test_it_refuses_to_run_unconfigured(self):
-        enabled = analyze.ANALYSIS_ENABLED
-        analyze.ANALYSIS_ENABLED = False
+        enabled = analyze.runtime.ANALYSIS_ENABLED
+        analyze.runtime.ANALYSIS_ENABLED = False
         try:
             with self.assertRaises(RuntimeError):
                 asyncio.run(analyze.chat_context([row("a")], None))
         finally:
-            analyze.ANALYSIS_ENABLED = enabled
+            analyze.runtime.ANALYSIS_ENABLED = enabled
 
 
 class TestCleanChatMessages(unittest.TestCase):
@@ -210,12 +210,12 @@ class TestChatEndpoint(unittest.TestCase):
         shutil.rmtree(cls.data_dir, ignore_errors=True)
 
     def setUp(self):
-        self._enabled = analyze.ANALYSIS_ENABLED
+        self._enabled = analyze.runtime.ANALYSIS_ENABLED
         self._stream = analyze.stream_gemini_chat
-        analyze.ANALYSIS_ENABLED = True
+        analyze.runtime.ANALYSIS_ENABLED = True
 
     def tearDown(self):
-        analyze.ANALYSIS_ENABLED = self._enabled
+        analyze.runtime.ANALYSIS_ENABLED = self._enabled
         analyze.stream_gemini_chat = self._stream
 
     def ask(self, messages, chunks=("hello ", "world")):
@@ -286,7 +286,7 @@ class TestChatEndpoint(unittest.TestCase):
         self.assertEqual(res.status_code, 404)
 
     def test_an_unconfigured_server_says_so(self):
-        analyze.ANALYSIS_ENABLED = False
+        analyze.runtime.ANALYSIS_ENABLED = False
         res = self.client.post(
             "/api/cohorts/cohort-chat-test/chat",
             json={"messages": [{"role": "user", "content": "q"}]},
