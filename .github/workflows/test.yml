@@ -22,8 +22,8 @@ jobs:
           pip install --quiet -r requirements-dev.txt
           pip install --quiet -e .
 
-      # capture/analyze is excluded in pyproject.toml — it belongs to the
-      # analysis refactor and must not be reformatted from here.
+      # Everything under capture/ is gated, capture/analyze included. Only the
+      # Node extractor in src/analyze is excluded, in pyproject.toml.
       - run: ruff check --output-format=github .
       - run: ruff format --check .
       - run: mypy capture/

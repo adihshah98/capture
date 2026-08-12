@@ -1,8 +1,8 @@
 # Moves the style gate before the commit, so CI stops being where formatting is
 # discovered. Install once: pre-commit install
 #
-# capture/analyze and src/analyze are excluded in pyproject.toml's ruff config,
-# which these hooks inherit.
+# src/analyze (the Node extractor) is excluded in pyproject.toml's ruff config,
+# which these hooks inherit. capture/analyze is gated like the rest of capture/.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Pinned to the same version as requirements-dev.txt. A hook and a CLI on
