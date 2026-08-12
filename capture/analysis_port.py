@@ -17,9 +17,10 @@ changes.
 Two rules worth keeping if you edit this:
 
   * Call through `analyze.<name>` inside the function body rather than binding
-    the attribute at import. Tests monkeypatch `analyze.ANALYSIS_ENABLED` in 17
-    places and `analyze.stream_gemini_chat` in 5, and a bound copy would not see
-    the patch.
+    the attribute at import. Mutable config (`ANALYSIS_ENABLED`, gates) and the
+    Gemini/session/cut/cohort edges live on owner submodules and are re-exported
+    lazily; a bound copy taken at import would miss both live config and
+    definition-site test patches.
   * The constants below are the exception: they are read at import time by
     FastAPI `Query()` defaults, and nothing patches them.
 """
@@ -57,7 +58,8 @@ DEVICE_VALUES = analyze.DEVICE_VALUES
 
 def enabled() -> bool:
     """Whether a model is configured at all. A function, not a constant: tests
-    flip analyze.ANALYSIS_ENABLED, and a copy taken at import would miss it."""
+    flip analyze.runtime.ANALYSIS_ENABLED (reachable as analyze.ANALYSIS_ENABLED),
+    and a copy taken at import would miss it."""
     return bool(analyze.ANALYSIS_ENABLED)
 
 

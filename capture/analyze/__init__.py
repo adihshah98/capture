@@ -420,6 +420,10 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def __dir__():
+    return sorted(set(globals()) | _RUNTIME_EXPORTS | _GEMINI_EXPORTS | _SESSION_EXPORTS | _CUTS_EXPORTS | _COHORTS_EXPORTS)
+
+
 # The sampling vocabulary lives in spec.py. Aliased under the older names so the
 # sampler and the port keep reading the way they always have.
 COHORT_DEFAULT_PURCHASED_N = spec.DEFAULT_PURCHASED_N
