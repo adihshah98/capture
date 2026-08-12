@@ -1,11 +1,31 @@
-import { currentProject, fetchJson, setProject } from './api.js';
-import { parseFrames, splitSettled } from './chat-stream.js';
-import { linkCitations } from './citations.js';
-import { writeHash } from './deeplink.js';
-import { loadSession, setPendingSeek } from './session-player.js';
+import { currentProject, fetchJson, setProject } from '../api.js';
+import { parseFrames, splitSettled } from '../chat-stream.js';
+import { linkCitations } from '../citations.js';
+import { writeHash } from '../deeplink.js';
+import { loadSession, setPendingSeek } from '../session-player.js';
+import { chatInline, chatMarkdown } from './markdown.js';
+import {
+  SLICE_FIELDS,
+  emptySlice,
+  formatCreateOutcome,
+  rowMatches,
+  sliceIsEmpty,
+  sliceNameBits,
+  suggestCohortName,
+} from './slices.js';
+import {
+  COHORT_MAX_SESSIONS,
+  analyzedCount,
+  clampGroupSize,
+  escapeAttr,
+  escapeHtml,
+  formatViewClock,
+  formatViewFacet,
+  localDateTimeMs,
+  progressText,
+} from './text.js';
 
 const POLL_MS = 2000;
-const COHORT_MAX_SESSIONS = 500;
 const COHORT_MIN_DURATION_S = 5;
 
 const modeButtons = document.querySelectorAll('#mode-switch button');
@@ -158,28 +178,24 @@ function syncRunButtons() {
   syncCutRunButton();
 }
 
-function analyzedCount() {
-  if (!cohort) return 0;
-  return (cohort.sessions || []).filter((s) => s.status === 'done' && s.text).length;
-}
 
 function syncCutRunButton() {
   if (!cutRunBtn) return;
-  const ready = analysisEnabled && analyzedCount() > 0 && !cutPollTimer;
+  const ready = analysisEnabled && analyzedCount(cohort) > 0 && !cutPollTimer;
   cutRunBtn.disabled = !ready;
   cutRunBtn.hidden = false;
   if (cutIsShowing) {
     cutRunBtn.textContent = 'Run analysis again';
     cutRunBtn.title = ready
       ? 'Discard this cached answer and ask the model again'
-      : !analyzedCount()
+      : !analyzedCount(cohort)
         ? 'Analyze sessions on the Sessions tab first'
         : cutRunBtn.title;
   } else {
     cutRunBtn.textContent = 'Analyze';
     if (!analysisEnabled) {
       cutRunBtn.title = 'Analysis is not configured on this server';
-    } else if (!analyzedCount()) {
+    } else if (!analyzedCount(cohort)) {
       cutRunBtn.title = 'Start analysis on the Sessions tab first';
     } else if (sliceIsEmpty(slice)) {
       cutRunBtn.title = 'No filters set — this reads every analyzed session in the cohort';
@@ -246,17 +262,7 @@ function poolFacetsUrl(minDurationMs) {
   return `/api/facets?${params.toString()}`;
 }
 
-function clampGroupSize(raw, fallback = 100) {
-  const n = Math.round(Number(raw) || 0);
-  if (n < 1) return fallback;
-  return Math.min(COHORT_MAX_SESSIONS, n);
-}
 
-function localDateTimeMs(value) {
-  if (!value) return null;
-  const ms = new Date(value).getTime();
-  return Number.isFinite(ms) ? ms : null;
-}
 
 function readCreateForm() {
   const addB = !!(addBInput && addBInput.checked);
@@ -356,47 +362,8 @@ function renderCreateFacets() {
   }
 }
 
-function formatCreateOutcome(value) {
-  if (value === 'all') return 'non-purchase';
-  if (value === 'purchased') return 'purchased';
-  if (value === 'checkout') return 'checkout';
-  return value || '';
-}
 
-function sliceNameBits(sliceState) {
-  if (!sliceState) return [];
-  const bits = [];
-  for (const field of SLICE_FIELDS) {
-    const value = sliceState[field];
-    if (!value) continue;
-    bits.push(field === 'outcome' ? formatCreateOutcome(value) : String(value));
-  }
-  return bits;
-}
 
-function suggestCohortName(opts) {
-  const stamp = new Date().toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
-  const parts = [stamp];
-  if (opts.addB) {
-    const aBits = sliceNameBits(opts.sliceA);
-    const bBits = sliceNameBits(opts.sliceB);
-    if (aBits.length || bBits.length) {
-      parts.push(
-        `A ${aBits.length ? aBits.join(' ') : 'any'} / B ${
-          bBits.length ? bBits.join(' ') : 'any'
-        }`
-      );
-    }
-  } else {
-    parts.push(...sliceNameBits(opts.sliceA));
-  }
-  return parts.join(' · ').slice(0, 120);
-}
 
 function syncCreateFormHints() {
   if (!splitHintEl || !timeHintEl) return;
@@ -526,16 +493,8 @@ function facetsUrl(id) {
   return `/api/cohorts/${encodeURIComponent(id)}/facets${qs ? `?${qs}` : ''}`;
 }
 
-/** One group's filter. Every field is a single value; '' means "any". */
-const SLICE_FIELDS = ['outcome', 'device', 'page', 'utm_source', 'utm_campaign'];
 
-function emptySlice() {
-  return { outcome: '', device: '', page: '', utm_source: '', utm_campaign: '' };
-}
 
-function sliceIsEmpty(spec) {
-  return SLICE_FIELDS.every((field) => !spec[field]);
-}
 
 function cutUrl(id, { run = false, refresh = false } = {}) {
   const params = withProject(new URLSearchParams());
@@ -623,43 +582,9 @@ function openSession(sessionId, atMs = 0) {
   loadSession(sessionId);
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
 
-function escapeAttr(s) {
-  return escapeHtml(s).replace(/'/g, '&#39;');
-}
 
-function formatViewClock(ms) {
-  const n = Number(ms);
-  if (!Number.isFinite(n)) return '';
-  try {
-    return new Date(n).toLocaleString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    });
-  } catch {
-    return String(n);
-  }
-}
 
-function formatViewFacet(field, value) {
-  if (!value) return '';
-  if (field === 'outcome') {
-    if (value === 'all') return 'did not purchase';
-    if (value === 'purchased') return 'purchased';
-    if (value === 'checkout') return 'reached checkout';
-  }
-  return String(value);
-}
 
 function viewSettingRows(body) {
   const rows = [];
@@ -776,24 +701,6 @@ function openViewCohort() {
   viewDialog.showModal();
 }
 
-function progressText(body) {
-  const prog = body.progress || {};
-  const batch = body.batch ? ' · Gemini batch queued' : '';
-  const phase =
-    body.status === 'idle'
-      ? 'Sampled — not analyzed yet · '
-      : body.status === 'paused'
-        ? 'Paused · '
-        : '';
-  return (
-    phase +
-    `${prog.done || 0} / ${prog.total || 0} done · ${prog.running || 0} running · ` +
-    `${prog.queued || 0} queued` +
-    (prog.error ? ` · ${prog.error} failed` : '') +
-    (prog.stale ? ` · ${prog.stale} missing a write-up` : '') +
-    batch
-  );
-}
 
 function renderEmpty(message) {
   tableWrapEl.innerHTML = `<div id="cohort-empty">${message}</div>`;
@@ -947,18 +854,6 @@ function updatePickerCounts() {
   }
 }
 
-/** Client-side mirror of row_matches_slice, for the live counts only. */
-function rowMatches(row, spec) {
-  if (sliceIsEmpty(spec)) return true;
-  if (spec.outcome && (row.outcome || 'rest') !== spec.outcome) return false;
-  if (spec.device && (row.device || '') !== spec.device) return false;
-  if (spec.page && (row.page || '') !== spec.page) return false;
-  const attrs = row.attribution || {};
-  const norm = (v) => String(v || '').trim().toLowerCase();
-  if (spec.utm_source && norm(attrs.utm_source) !== spec.utm_source) return false;
-  if (spec.utm_campaign && norm(attrs.utm_campaign) !== spec.utm_campaign) return false;
-  return true;
-}
 
 function onSliceChanged() {
   renderPicker();
@@ -1170,7 +1065,7 @@ async function pollCut() {
 }
 
 function showCutOffer() {
-  const n = analyzedCount();
+  const n = analyzedCount(cohort);
   cutProgressEl.textContent = n ? 'Not analyzed yet' : 'No analyzed sessions';
   renderCutPlaceholder(
     n
@@ -1267,27 +1162,7 @@ function chatCitations(text) {
   );
 }
 
-/** Minimal markdown: paragraphs, `-` bullets, inline code. */
-function chatMarkdown(html) {
-  const blocks = html.split(/\n{2,}/);
-  return blocks
-    .map((block) => {
-      const lines = block.split('\n').filter((l) => l.trim());
-      if (!lines.length) return '';
-      if (lines.every((l) => /^\s*[-*]\s+/.test(l))) {
-        const items = lines
-          .map((l) => `<li>${l.replace(/^\s*[-*]\s+/, '')}</li>`)
-          .join('');
-        return `<ul>${items}</ul>`;
-      }
-      return `<p>${lines.join('<br>')}</p>`;
-    })
-    .join('');
-}
 
-function chatInline(html) {
-  return html.replace(/`([^`]+)`/g, '<code>$1</code>');
-}
 
 /**
  * Render one model turn.

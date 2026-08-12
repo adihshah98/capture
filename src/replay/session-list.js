@@ -13,7 +13,7 @@ import {
 } from './format.js';
 import { clearPlayer, loadSession, loadedSessionId, setPendingSeek } from './session-player.js';
 import { setAnalysisEnabled } from './analysis.js';
-import { setInsightsAnalysisEnabled } from './insights.js';
+import { setInsightsAnalysisEnabled } from './insights/index.js';
 
 const boot = parseHash();
 
