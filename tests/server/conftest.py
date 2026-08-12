@@ -25,6 +25,7 @@ UNIT_MODULES = {
     "test_analysis_port",
     "test_patch_contract",
     "test_attribution",
+    "test_batch_tempfile",
 }
 
 

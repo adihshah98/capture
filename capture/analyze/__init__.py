@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -909,10 +910,27 @@ async def call_gemini(digest: dict, frames: list, meta: Optional[dict] = None) -
 
 
 def _batch_jsonl_path(work_dir: Optional[Path] = None) -> Path:
-    """Disk-backed temp path for batch JSONL (avoid tmpfs /tmp on small boxes)."""
+    """A private, unshared file for one batch's JSONL.
+
+    Disk-backed rather than /tmp: on a small box /tmp is tmpfs, and this holds a
+    whole cohort's frames.
+
+    `mkstemp` rather than a timestamped name. The name used to be
+    `capture-batch-<ms>.jsonl`, so two cohorts submitting in the same millisecond
+    got the same path — and since the caller unlinks in a `finally`, the first to
+    finish deleted the other's payload out from under an in-flight upload. It
+    also creates 0600, which matters more than the collision: the default base is
+    a world-readable shared directory and these lines carry session frames and
+    visitor metadata. Set explicitly rather than relying on the default, since
+    that is the property being depended on.
+    """
     base = work_dir if work_dir is not None else Path("/var/tmp")
     base.mkdir(parents=True, exist_ok=True)
-    return base / f"capture-batch-{int(time.time() * 1000)}.jsonl"
+    fd, name = tempfile.mkstemp(prefix="capture-batch-", suffix=".jsonl", dir=base)
+    os.close(fd)
+    path = Path(name)
+    path.chmod(0o600)
+    return path
 
 
 async def submit_prepared_gemini_batch(
