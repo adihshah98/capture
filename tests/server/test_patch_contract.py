@@ -5,14 +5,15 @@ Gemini API -- is swapped in tests so CI never bills and never boots browsers,
 then the *real* pipeline is driven.
 
 Gemini sync/batch I/O lives in `capture.analyze.gemini`. The extractor and
-single-session path live in `capture.analyze.session`. Tests patch those modules
-with `unittest.mock.patch` (or `patch.object`). Remaining edges still rebound on
-the package by assignment (`analyze.call_gemini_cut = fake`) must resolve at call
-time through a namespace the assignment reaches.
+single-session path live in `capture.analyze.session`. Cut and chat live in
+`capture.analyze.cuts`. Tests patch those modules with `unittest.mock.patch`
+(or `patch.object`). Remaining edges still rebound on the package by assignment
+(`analyze._cohort_sync_model = fake`) must resolve at call time through a
+namespace the assignment reaches.
 
-`from .x import call_gemini_cut` (etc.) breaks package-assignment patches: the
+`from .x import _cohort_sync_model` (etc.) breaks package-assignment patches: the
 value is copied into the importing module's globals at import, so a later
-`analyze.call_gemini_cut = fake` rebinds the copy while the pipeline keeps
+`analyze._cohort_sync_model = fake` rebinds the copy while the pipeline keeps
 calling the real one. Nothing fails: the assertions are about cohort state, and
 a real Gemini response satisfies them exactly as well as a fake one does. The
 symptom is a green suite that makes billed API calls against live
@@ -38,16 +39,12 @@ PACKAGE = Path(__file__).resolve().parent.parent.parent / "capture" / "analyze"
 # plausibly rebind later via assignment). A `from .x import <one of these>` is
 # the bug this file exists to catch for that style.
 #
-# Gemini I/O and session extraction moved to owner modules; tests patch
-# `capture.analyze.gemini` / `capture.analyze.session` rather than the package.
+# Gemini I/O, session extraction, and cut/chat moved to owner modules; tests
+# patch `capture.analyze.gemini` / `session` / `cuts` rather than the package.
 # ANALYSIS_ENABLED / ANALYZE_BATCH live on runtime.py for the same reason.
 PATCHABLE = frozenset(
     {
-        "call_gemini_cut",
-        "stream_gemini_chat",
         "_cohort_sync_model",
-        "CUT_PROMPT",
-        "CHAT_PROMPT",
     }
 )
 
@@ -174,6 +171,18 @@ class TestPatchingReachesTheCallSite(unittest.TestCase):
         with patch.object(analyze.session, "run_extractor", fake):
             self.assertIs(analyze.session.run_extractor, fake)
             self.assertIs(analyze.run_extractor, fake)
+
+    def test_cuts_patches_reach_build_via_the_owner_module(self):
+        """Definition-site patch: build_cut_analysis looks up call_gemini_cut
+        in cuts.py, so mock.patch there redirects the model edge."""
+        from capture import analyze
+
+        async def fake(*a, **k):
+            return analyze.empty_cut_analysis(), {}
+
+        with patch.object(analyze.cuts, "call_gemini_cut", fake):
+            self.assertIs(analyze.cuts.call_gemini_cut, fake)
+            self.assertIs(analyze.call_gemini_cut, fake)
 
     def test_submodules_do_not_shadow_the_package_namespace(self):
         """No submodule may hold a patchable name in its own globals.

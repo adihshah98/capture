@@ -4,6 +4,7 @@ import asyncio
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from capture import analyze
 
@@ -211,20 +212,20 @@ class TestChatEndpoint(unittest.TestCase):
 
     def setUp(self):
         self._enabled = analyze.runtime.ANALYSIS_ENABLED
-        self._stream = analyze.stream_gemini_chat
         analyze.runtime.ANALYSIS_ENABLED = True
 
     def tearDown(self):
         analyze.runtime.ANALYSIS_ENABLED = self._enabled
-        analyze.stream_gemini_chat = self._stream
 
     def ask(self, messages, chunks=("hello ", "world")):
         async def fake(rows, label, given, msgs, spec=None):
             for c in chunks:
                 yield c
 
-        analyze.stream_gemini_chat = fake
-        return self.client.post("/api/cohorts/cohort-chat-test/chat", json={"messages": messages})
+        with patch.object(analyze.cuts, "stream_gemini_chat", fake):
+            return self.client.post(
+                "/api/cohorts/cohort-chat-test/chat", json={"messages": messages}
+            )
 
     def test_meta_comes_first_so_citations_resolve_while_text_streams(self):
         res = self.ask([{"role": "user", "content": "why?"}])
@@ -250,11 +251,11 @@ class TestChatEndpoint(unittest.TestCase):
             raise RuntimeError("gemini exploded")
             yield  # pragma: no cover
 
-        analyze.stream_gemini_chat = boom
-        res = self.client.post(
-            "/api/cohorts/cohort-chat-test/chat",
-            json={"messages": [{"role": "user", "content": "q"}]},
-        )
+        with patch.object(analyze.cuts, "stream_gemini_chat", boom):
+            res = self.client.post(
+                "/api/cohorts/cohort-chat-test/chat",
+                json={"messages": [{"role": "user", "content": "q"}]},
+            )
         # The status is already 200 by the time it fails, so the failure has
         # to travel in the stream.
         self.assertEqual(res.status_code, 200)
@@ -301,11 +302,11 @@ class TestChatEndpoint(unittest.TestCase):
             called = True
             yield "x"
 
-        analyze.stream_gemini_chat = fake
-        res = self.client.post(
-            "/api/cohorts/cohort-chat-test/chat?device=desktop",
-            json={"messages": [{"role": "user", "content": "q"}]},
-        )
+        with patch.object(analyze.cuts, "stream_gemini_chat", fake):
+            res = self.client.post(
+                "/api/cohorts/cohort-chat-test/chat?device=desktop",
+                json={"messages": [{"role": "user", "content": "q"}]},
+            )
         self.assertEqual(res.status_code, 400)
         self.assertFalse(called)
 
@@ -316,11 +317,11 @@ class TestChatEndpoint(unittest.TestCase):
             seen["ids"] = [r["session_id"] for r in rows]
             yield "ok"
 
-        analyze.stream_gemini_chat = fake
-        res = self.client.post(
-            "/api/cohorts/cohort-chat-test/chat?outcome=purchased",
-            json={"messages": [{"role": "user", "content": "q"}]},
-        )
+        with patch.object(analyze.cuts, "stream_gemini_chat", fake):
+            res = self.client.post(
+                "/api/cohorts/cohort-chat-test/chat?outcome=purchased",
+                json={"messages": [{"role": "user", "content": "q"}]},
+            )
         self.assertEqual(res.status_code, 200)
         # Only the purchased session reaches the model.
         self.assertEqual(seen["ids"], ["a" * 32])

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -321,22 +322,22 @@ class TestCutKeyPromptVersion(unittest.TestCase):
     path and no signal — the response still said `cached: true`."""
 
     def setUp(self):
-        self._prompt = analyze.CUT_PROMPT
-        self.addCleanup(setattr, analyze, "CUT_PROMPT", self._prompt)
+        self._prompt = analyze.cuts.CUT_PROMPT
+        self.addCleanup(setattr, analyze.cuts, "CUT_PROMPT", self._prompt)
 
     def key(self, spec=None):
         return analyze.cut_key(spec or {"outcome": "purchased"})
 
     def test_editing_the_prompt_changes_the_key(self):
         before = self.key()
-        analyze.CUT_PROMPT = self._prompt + "\n\nAlways mention shipping."
+        analyze.cuts.CUT_PROMPT = self._prompt + "\n\nAlways mention shipping."
         self.assertNotEqual(before, self.key())
 
     def test_reverting_the_prompt_restores_the_key(self):
         """A revert should reuse the cache it had, not pay for it again."""
         before = self.key()
-        analyze.CUT_PROMPT = "something else entirely"
-        analyze.CUT_PROMPT = self._prompt
+        analyze.cuts.CUT_PROMPT = "something else entirely"
+        analyze.cuts.CUT_PROMPT = self._prompt
         self.assertEqual(before, self.key())
 
     def test_the_prompt_hash_does_not_collapse_distinct_filters(self):
@@ -346,12 +347,12 @@ class TestCutKeyPromptVersion(unittest.TestCase):
         """Content-addressed, so there is no judgement call about what counts
         as a meaningful edit."""
         before = self.key()
-        analyze.CUT_PROMPT = self._prompt + " "
+        analyze.cuts.CUT_PROMPT = self._prompt + " "
         self.assertNotEqual(before, self.key())
 
     def test_the_key_carries_the_hash_where_it_can_be_read(self):
         payload = json.loads(self.key())
-        self.assertEqual(payload["prompt"], analyze.prompt_version(analyze.CUT_PROMPT))
+        self.assertEqual(payload["prompt"], analyze.prompt_version(analyze.cuts.CUT_PROMPT))
         self.assertEqual(len(payload["prompt"]), 8)
 
     def test_a_key_from_before_this_change_no_longer_matches(self):
@@ -541,14 +542,12 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
 class TestBuildCutAnalysis(unittest.TestCase):
     def setUp(self):
         self._enabled = analyze.runtime.ANALYSIS_ENABLED
-        self._call = analyze.call_gemini_cut
         analyze.runtime.ANALYSIS_ENABLED = True
         analyze.runtime._gate_loop = None
         self.addCleanup(self.restore)
 
     def restore(self):
         analyze.runtime.ANALYSIS_ENABLED = self._enabled
-        analyze.call_gemini_cut = self._call
         analyze.runtime._gate_loop = None
 
     def test_an_empty_group_skips_the_model_call(self):
@@ -558,9 +557,9 @@ class TestBuildCutAnalysis(unittest.TestCase):
             calls.append(args)
             return analyze.empty_cut_analysis(), {}
 
-        analyze.call_gemini_cut = fake
         rows = [row("a", "purchased"), row("b", "purchased")]
-        out = asyncio.run(analyze.build_cut_analysis(rows, {"outcome": "checkout"}))
+        with patch.object(analyze.cuts, "call_gemini_cut", fake):
+            out = asyncio.run(analyze.build_cut_analysis(rows, {"outcome": "checkout"}))
 
         self.assertEqual(calls, [], "no sessions match — nothing to read")
         self.assertEqual(out["n"], 0)
@@ -575,9 +574,9 @@ class TestBuildCutAnalysis(unittest.TestCase):
             seen["given"] = given
             return analyze.normalize_cut_analysis({"headline": "they hesitate"}), {"1": "p1"}
 
-        analyze.call_gemini_cut = fake
         rows = [row("p1", "purchased"), row("n1"), row("n2")]
-        out = asyncio.run(analyze.build_cut_analysis(rows, {"outcome": "purchased"}))
+        with patch.object(analyze.cuts, "call_gemini_cut", fake):
+            out = asyncio.run(analyze.build_cut_analysis(rows, {"outcome": "purchased"}))
 
         self.assertEqual(seen["rows"], ["p1"])
         self.assertEqual(seen["label"], "purchased")
@@ -597,9 +596,9 @@ class TestBuildCutAnalysis(unittest.TestCase):
             seen["given"] = given
             return analyze.empty_cut_analysis(), {}
 
-        analyze.call_gemini_cut = fake
         rows = [row("p1", "purchased"), row("n1"), row("n2")]
-        out = asyncio.run(analyze.build_cut_analysis(rows, None))
+        with patch.object(analyze.cuts, "call_gemini_cut", fake):
+            out = asyncio.run(analyze.build_cut_analysis(rows, None))
 
         self.assertEqual(seen["rows"], ["p1", "n1", "n2"])
         # No filter means nothing is banned — but the group size is still
@@ -732,16 +731,15 @@ class TestGivenFacts(unittest.TestCase):
             seen["given"] = given
             return analyze.empty_cut_analysis(), {}
 
-        saved_enabled, saved_call = analyze.runtime.ANALYSIS_ENABLED, analyze.call_gemini_cut
+        saved_enabled = analyze.runtime.ANALYSIS_ENABLED
         analyze.runtime.ANALYSIS_ENABLED = True
-        analyze.call_gemini_cut = fake
         analyze.runtime._gate_loop = None
         try:
             rows = [row("a", "purchased"), row("b", "rest")]
-            asyncio.run(analyze.build_cut_analysis(rows, {"outcome": ["purchased"]}))
+            with patch.object(analyze.cuts, "call_gemini_cut", fake):
+                asyncio.run(analyze.build_cut_analysis(rows, {"outcome": ["purchased"]}))
         finally:
             analyze.runtime.ANALYSIS_ENABLED = saved_enabled
-            analyze.call_gemini_cut = saved_call
             analyze.runtime._gate_loop = None
         # One row matches the filter, so the premise must say 1 — not 2.
         self.assertIn("All 1 session(s) in this group purchased", seen["given"])
@@ -1191,13 +1189,13 @@ class TestCrossTabReachesBothReaders(unittest.TestCase):
             seen["cut"] = analyze.cut_context(rows_, label_, given_, spec_)[0]
             return analyze.empty_cut_analysis(), {}
 
-        saved_call, saved_enabled = analyze.call_gemini_cut, analyze.runtime.ANALYSIS_ENABLED
-        analyze.call_gemini_cut, analyze.runtime.ANALYSIS_ENABLED = fake_cut, True
+        saved_enabled = analyze.runtime.ANALYSIS_ENABLED
+        analyze.runtime.ANALYSIS_ENABLED = True
         try:
-            asyncio.run(analyze.build_cut_analysis(rows, slice_spec))
+            with patch.object(analyze.cuts, "call_gemini_cut", fake_cut):
+                asyncio.run(analyze.build_cut_analysis(rows, slice_spec))
             selected, label, given, _, spec = asyncio.run(analyze.chat_context(rows, slice_spec))
         finally:
-            analyze.call_gemini_cut = saved_call
             analyze.runtime.ANALYSIS_ENABLED = saved_enabled
 
         seen["chat"] = analyze.cut_context(selected, label, given, spec)[0]
