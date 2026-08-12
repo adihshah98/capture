@@ -60,6 +60,46 @@ no_implicit_optional = true
 module = "capture.analyze.*"
 ignore_errors = true
 
+[tool.coverage.run]
+branch = true
+# The package as installed, not the repo root: `omit` below is what keeps the
+# co-founder's analysis package out, and its size would otherwise swamp the
+# signal from the modules this team actually owns.
+source = ["capture"]
+omit = ["capture/analyze/*"]
+# Load-bearing. Every test_api_*.py drives a real uvicorn *subprocess*
+# (tests/server/servercase.py), so without this the run measures the test
+# process and none of the server it is talking to: the routers report ~20-30%
+# when they are in fact among the best-exercised code in the tree. This works
+# with no change to the tests because servercase builds the child environment
+# from os.environ, and it implies parallel mode — so `coverage combine` has to
+# run before `coverage report`.
+patch = ["subprocess"]
+# The uvicorn child is stopped with terminate(), and it dies on the default
+# SIGTERM disposition (exit -15), so atexit never runs and its data is dropped
+# on the floor. This installs a handler that writes the file first.
+sigterm = true
+
+[tool.coverage.report]
+show_missing = true
+precision = 1
+# Read every number here as a floor. Inside an async request handler the C
+# tracer stops recording the handler's own frame after it suspends on a real
+# await and picks it up again later, so stretches of code that provably ran
+# (capture/api/ingest.py 76-104 runs on every accepted batch — the sessionstore
+# write below it is covered) are reported missing. It is not uvloop, not
+# BaseHTTPMiddleware and not the options above; all three were ruled out.
+# capture/api/* is the module set to distrust, and always in the pessimistic
+# direction.
+# Deliberately no fail_under. Coverage is reported for a few weeks before
+# anything is gated on it; a threshold picked before the baseline is known is a
+# threshold that gets lowered.
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests/server"]
 markers = [

@@ -10,6 +10,7 @@
     "test:client": "npm run build && node --test tests/client/*.test.mjs",
     "test:server": ".venv/bin/python -m unittest discover -s tests/server",
     "test:fast": ".venv/bin/python -m pytest tests/server -m unit -q",
+    "test:coverage": ".venv/bin/python -m coverage erase && .venv/bin/python -m coverage run -m unittest discover -s tests/server && .venv/bin/python -m coverage combine && .venv/bin/python -m coverage report --sort=cover",
     "lint": ".venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy capture/",
     "start": ".venv/bin/uvicorn capture.server:app --port 3000",
     "dev": "npm run build && REPLAY_AUTH_DISABLED=1 .venv/bin/uvicorn capture.server:app --port 3000"

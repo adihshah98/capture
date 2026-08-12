@@ -81,6 +81,28 @@ jobs:
       # Client tests build the bundles first, so this also catches build breaks.
       - run: npm test
 
+      # Reporting only, for a few weeks, before anything is gated on the number.
+      # No --fail-under, and continue-on-error so a flaky run or a coverage bug
+      # can never turn this build red — `npm test` above is what decides that.
+      # It re-runs the server suite rather than measuring the run above, so the
+      # pass/fail signal stays in a step that is allowed to fail.
+      - name: Coverage report (advisory)
+        continue-on-error: true
+        run: |
+          # The pin lives in requirements-dev.txt; this job installs only the
+          # runtime deps, so take that one line rather than the whole dev set.
+          .venv/bin/pip install --quiet "$(grep '^coverage==' requirements-dev.txt)"
+          .venv/bin/python -m coverage erase
+          .venv/bin/python -m coverage run -m unittest discover -s tests/server
+          # combine, not report: the HTTP tests measure a uvicorn subprocess,
+          # which writes its own data file.
+          .venv/bin/python -m coverage combine
+          .venv/bin/python -m coverage report --sort=cover
+          {
+            echo '## Coverage (`capture/`, excluding `capture/analyze/`)'
+            .venv/bin/python -m coverage report --format=markdown --sort=cover
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Advisory only, and deliberately non-blocking: seven pinned runtime deps had
   # no advisory check at all, but a new CVE must not be able to wedge a deploy.
   audit:
