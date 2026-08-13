@@ -83,6 +83,14 @@ def applied_versions(conn) -> set:
     return {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
 
 
+def migration_files() -> list:
+    """SQL files to apply, in filename order.
+
+    Names start with a digit so a macOS AppleDouble fork (._0001_init.sql)
+    is not treated as SQL. Those match *.sql, sort first, and are binary."""
+    return sorted(MIGRATIONS_DIR.glob("[0-9]*.sql"))
+
+
 def migrate(url: str | None = None) -> list:
     """Apply pending migrations in filename order. Each runs in its own
     transaction so a failure leaves the ones before it committed."""
@@ -91,7 +99,7 @@ def migrate(url: str | None = None) -> list:
     with psycopg.connect(target) as conn:
         conn.autocommit = True
         done = applied_versions(conn)
-    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+    for path in migration_files():
         version = path.stem
         if version in done:
             continue

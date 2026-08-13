@@ -26,6 +26,7 @@ UNIT_MODULES = {
     "test_patch_contract",
     "test_attribution",
     "test_batch_tempfile",
+    "test_db",
 }
 
 

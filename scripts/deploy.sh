@@ -30,7 +30,11 @@ echo "release $RELEASE"
 # `capture` is the whole Python app, so this no longer enumerates modules by
 # name -- that list silently omitted analyze_store.py from the day it was added,
 # and the box ran the pre-SQLite store until it was noticed.
-tar czf /tmp/capture-deploy.tar.gz --exclude='__pycache__' \
+# COPYFILE_DISABLE keeps macOS tar from shipping AppleDouble forks
+# (._0001_init.sql). Those match *.sql, sort first, and are not UTF-8 —
+# which is how a deploy failed in migrate() before applying anything.
+COPYFILE_DISABLE=1 tar czf /tmp/capture-deploy.tar.gz \
+  --exclude='__pycache__' --exclude='._*' \
   capture \
   migrations requirements.txt public \
   package.json package-lock.json \
