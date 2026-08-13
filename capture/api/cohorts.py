@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import analysis_port as ap
-from .. import db, jobs, projects, sessionstore
+from .. import db, jobs, projects
 from ..errors import ApiError
 from .deps import readable_project, session_dir
 
@@ -635,7 +635,7 @@ async def post_cohort_chat(
 
 def stamp_cohort_attribution(found: projects.Project, cohort: dict) -> dict:
     """Attach attribution, device, outcome and page so the UI can slice client-side."""
-    facts = _session_facts(found)
+    facts = _session_facts(found, cohort)
     sessions = []
     for entry in cohort.get("sessions") or []:
         row = dict(entry)
@@ -661,29 +661,18 @@ def cohort_response(found: projects.Project, cohort: dict) -> dict:
     return stamp_cohort_attribution(found, ap.with_insights(found, cohort))
 
 
-def _session_facts(found: projects.Project) -> dict:
-    """session_id → {attribution, device, outcome, page} straight from the index."""
+def _session_facts(found: projects.Project, cohort: dict) -> dict:
+    """session_id → classified row from materialised columns, this cohort only."""
+    ids = [e.get("session_id") for e in cohort.get("sessions") or [] if e.get("session_id")]
+    if not ids:
+        return {}
     with db.connection(found.id) as conn:
-        rows = conn.execute(
-            "SELECT s.session_id, s.attribution, s.device, s.url,"
-            " o.checkout_started_at, o.purchased_at, o.total, o.currency"
-            " FROM sessions s LEFT JOIN orders o"
-            "   ON o.project_id = s.project_id AND o.session_id = s.session_id"
-        ).fetchall()
-
-    out = {}
-    for sid, attribution, device, url, started, purchased, total, currency in rows:
-        order = sessionstore._order((started, purchased, None, total, currency))
-        out[sid] = {
-            "attribution": attribution,
-            **ap.classify(device, order, url),
-        }
-    return out
+        return ap.classified_rows(conn, found, ids)
 
 
 def _cut_rows(found: projects.Project, cohort: dict) -> list:
     """Analyzed sessions in this cohort, with the write-up a cut reasons over."""
-    facts = _session_facts(found)
+    facts = _session_facts(found, cohort)
     rows = []
     for entry in cohort.get("sessions") or []:
         sid = entry["session_id"]
@@ -695,7 +684,7 @@ def _cut_rows(found: projects.Project, cohort: dict) -> list:
         rows.append(
             {
                 "session_id": sid,
-                # Fall back to the sample filter when the index has no order row.
+                # Fall back to the sample filter when the index has no class row.
                 "outcome": fact.get("outcome")
                 or ("purchased" if entry.get("filter") == "purchased" else "rest"),
                 "device": fact.get("device"),

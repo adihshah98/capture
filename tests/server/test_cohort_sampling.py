@@ -322,6 +322,70 @@ class TestCohortSampling(unittest.TestCase):
         self.assertEqual(devices.get("mobile"), 2)
         self.assertEqual(devices.get("desktop"), 1)
 
+    def test_classified_rows_are_scoped_to_the_requested_ids(self):
+        """Cuts used to SELECT every session, then re-classify from raw JSON."""
+        keep = "keep" + "x" * 28
+        skip = "skip" + "x" * 28
+        other = "othr" + "x" * 28
+        conn = self._conn(
+            [
+                (
+                    "",
+                    keep,
+                    0,
+                    20_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/p?utm_source=google",
+                    json.dumps({"purchased_at": 1}),
+                    None,
+                    json.dumps({"width": 375}),
+                    json.dumps({"utm_source": "google"}),
+                ),
+                (
+                    "",
+                    skip,
+                    0,
+                    20_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/other",
+                    None,
+                    None,
+                    json.dumps({"width": 1280}),
+                    None,
+                ),
+                (
+                    "p2",
+                    other,
+                    0,
+                    20_000,
+                    1,
+                    1,
+                    None,
+                    "https://x.test/p",
+                    json.dumps({"purchased_at": 1}),
+                    None,
+                    json.dumps({"width": 375}),
+                    None,
+                ),
+            ]
+        )
+        facts = sampling.classified_rows(conn, "", [keep, "gone" + "x" * 28])
+        self.assertEqual(set(facts), {keep})
+        row = facts[keep]
+        self.assertEqual(row["outcome"], "purchased")
+        self.assertEqual(row["device"], "mobile")
+        self.assertEqual(row["page"], "/p")
+        self.assertEqual(row["attribution"].get("utm_source"), "google")
+
+    def test_classified_rows_skip_sql_when_the_id_list_is_empty(self):
+        conn = mock.Mock()
+        self.assertEqual(sampling.classified_rows(conn, "proj", []), {})
+        conn.execute.assert_not_called()
+
     def test_sample_honours_the_url_filter_and_min_duration(self):
         conn = self._conn(
             [

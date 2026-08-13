@@ -78,6 +78,11 @@ class TestProjectIsTheIdentity(PortCase):
         port.pool_facets(conn, NAMED, min_duration_ms=5000)
         self.sampling.pool_facets.assert_called_once_with(conn, NAMED.id, min_duration_ms=5000)
 
+    def test_classified_rows_are_addressed_by_project_id(self):
+        conn = object()
+        port.classified_rows(conn, NAMED, ["s1", "s2"])
+        self.sampling.classified_rows.assert_called_once_with(conn, NAMED.id, ["s1", "s2"])
+
     def test_session_jobs_are_addressed_by_project_id(self):
         port.job(NAMED, "sess1")
         self.storage.read_job.assert_called_once_with(NAMED.id, "sess1")
@@ -134,14 +139,6 @@ class TestPrivateAccessIsContained(PortCase):
             }
         )
         self.assertEqual(privates, ["_gates"])
-
-
-class TestClassify(unittest.TestCase):
-    def test_it_returns_the_three_columns_a_cut_slices_on(self):
-        self.assertEqual(
-            port.classify({"width": 375}, {"purchased_at": 1}, "https://x/pages/x?a=b"),
-            {"device": "mobile", "outcome": "purchased", "page": "/pages/x"},
-        )
 
 
 class TestVocabularyIsExposed(unittest.TestCase):

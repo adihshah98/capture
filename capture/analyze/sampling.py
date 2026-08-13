@@ -110,6 +110,52 @@ def classified_row(
     }
 
 
+def classified_rows(conn: Connection, project_id: str, session_ids: list | tuple | set) -> dict:
+    """Slice-shaped facts for these sessions, from the materialised columns.
+
+    Scoped to the ids the caller already chose (a cohort). Does not scan the
+    project and does not re-derive labels from raw JSON — sampling already
+    filtered on the same columns, and a cut must use that vocabulary.
+    """
+    ids = [sid for sid in session_ids if sid]
+    if not ids:
+        return {}
+    placeholders = ", ".join("%s" for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT s.session_id, s.outcome, s.device_class, s.page,
+               s.utm_source, s.utm_medium, s.utm_campaign, s.utm_content, s.has_fbclid
+        FROM sessions s
+        WHERE s.project_id = %s AND s.session_id IN ({placeholders})
+        """,
+        (project_id, *ids),
+    ).fetchall()
+    out = {}
+    for (
+        sid,
+        outcome,
+        device,
+        page,
+        utm_source,
+        utm_medium,
+        utm_campaign,
+        utm_content,
+        has_fbclid,
+    ) in rows:
+        out[sid] = classified_row(
+            sid,
+            outcome=outcome,
+            device_class=device,
+            page=page,
+            utm_source=utm_source,
+            utm_medium=utm_medium,
+            utm_campaign=utm_campaign,
+            utm_content=utm_content,
+            has_fbclid=bool(has_fbclid),
+        )
+    return out
+
+
 def _facet_counts_listed(counts: dict, field: str, order=None) -> list:
     items = counts[field]
     keys = order if order else sorted(items, key=lambda k: (-items[k], k))
@@ -222,9 +268,7 @@ def pool_facets(
     Scans at most `CANDIDATE_CAP` newest rows under the duration gate — the same
     recency window sampling uses — reading materialised class columns.
     """
-    where_sql, params = _cohort_where(
-        project_id, min_duration_ms=min_duration_ms, url_contains=""
-    )
+    where_sql, params = _cohort_where(project_id, min_duration_ms=min_duration_ms, url_contains="")
     order_sql = _cohort_order_sql(cohort_spec.ORDER_LATEST)
     rows = conn.execute(
         f"""
@@ -237,21 +281,22 @@ def pool_facets(
         """,
         (*params, cohort_spec.CANDIDATE_CAP),
     ).fetchall()
-    facts = [
-        classified_row(
-            sid,
-            outcome=outcome,
-            device_class=device,
-            page=page,
-            utm_source=utm_source,
-            utm_medium=utm_medium,
-            utm_campaign=utm_campaign,
-            utm_content=utm_content,
-            has_fbclid=bool(has_fbclid),
-        )
-        for sid, outcome, device, page, utm_source, utm_medium, utm_campaign, utm_content, has_fbclid in rows
-    ]
-    return facets_from_rows(facts)
+    return facets_from_rows(
+        [
+            classified_row(
+                sid,
+                outcome=outcome,
+                device_class=device,
+                page=page,
+                utm_source=utm_source,
+                utm_medium=utm_medium,
+                utm_campaign=utm_campaign,
+                utm_content=utm_content,
+                has_fbclid=bool(has_fbclid),
+            )
+            for sid, outcome, device, page, utm_source, utm_medium, utm_campaign, utm_content, has_fbclid in rows
+        ]
+    )
 
 
 def _cohort_where(
@@ -408,7 +453,9 @@ def _sample_matching_rows(
         end_ms=end_ms,
         order=order,
     )
-    sessions = [{"session_id": row["session_id"], "filter": tag, "status": "queued"} for row in rows]
+    sessions = [
+        {"session_id": row["session_id"], "filter": tag, "status": "queued"} for row in rows
+    ]
     matched = len(sessions)
     return SampleResult(
         sessions=sessions,
@@ -487,9 +534,7 @@ def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> Sample
         matched = len(sessions)
         return SampleResult(
             sessions=sessions,
-            sample=SampleStats(
-                requested=needed, matched=matched, scanned=matched, capped=False
-            ),
+            sample=SampleStats(requested=needed, matched=matched, scanned=matched, capped=False),
         )
 
     # purchased/all: two top-N queries with the same order ≡ interleaved

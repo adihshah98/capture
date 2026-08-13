@@ -185,6 +185,16 @@ def facets_from_rows(rows: list) -> dict:
     return sampling.facets_from_rows(rows)
 
 
+def classified_rows(conn, project: Project, session_ids) -> dict:
+    """Materialised class columns for these sessions, named the way a cut slices.
+
+    Sampling already filtered on the same columns. The caller passes the cohort's
+    ids so this is a point lookup, not a project scan, and does not re-derive
+    labels from raw JSON.
+    """
+    return sampling.classified_rows(conn, project.id, session_ids)
+
+
 def clean_label(label: str | None) -> str:
     return labels.clean_cohort_label(label)
 
@@ -265,25 +275,6 @@ def stream_chat(
     """Not async itself: returns analyze's async generator so the caller can
     `async for` over it. Looked up at call time — tests replace it."""
     return cuts.stream_gemini_chat(rows, label, given, messages, spec)
-
-
-# ----------------------------------------------------------- row classifiers
-
-
-def classify(device: dict | None, order: dict | None, url: str | None) -> dict:
-    """The three index columns a cut slices on, named the way analyze names them.
-
-    One call rather than three exported classifiers: the only caller wants all
-    three together, and the shape of a cut row belongs on this side of the seam.
-    Ingest writes the same labels via `capture.classify` onto sessions columns.
-    """
-    from . import classify as session_classify
-
-    return {
-        "device": session_classify.device_class(device),
-        "outcome": session_classify.outcome_class(order),
-        "page": session_classify.page_path(url),
-    }
 
 
 # ---------------------------------------------------------------------- paths
