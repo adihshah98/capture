@@ -90,6 +90,37 @@ class TestCohort(ServerCase):
         self.assertEqual(status, 404)
         self.assertIn("no such cohort", json.loads(body)["error"])
 
+    def test_get_persists_a_crashed_runners_status_without_rewriting_membership(self):
+        sid = "getpers" + "x" * 25
+        self.assertEqual(self.ingest(sid), 200)
+        self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
+        status, body = request(self.create_cohort_url(purchased=1, all_n=0), method="POST", data=b"")
+        self.assertEqual(status, 201, body)
+        cohort_id = json.loads(body)["id"]
+
+        saved = self.stored_cohort(cohort_id)
+        saved["status"] = "running"
+        saved["sessions"][0]["status"] = "running"
+        saved["sessions"][0]["filter"] = "purchased"
+        saved.pop("selection", None)
+        self.store_cohort(saved)
+
+        self.seed_analysis(sid)
+        status, body = request(f"{self.base}/api/cohorts/{cohort_id}")
+        self.assertEqual(status, 200, body)
+        live = json.loads(body)
+        self.assertEqual(live["status"], "done")
+        self.assertEqual(live["sessions"][0]["status"], "done")
+
+        stored = self.stored_cohort(cohort_id)
+        self.assertEqual(stored["status"], "done")
+        self.assertEqual(stored["sessions"][0]["status"], "done")
+        # Sampling extras must survive: GET used to DELETE+INSERT the whole list.
+        self.assertEqual(stored["sessions"][0]["filter"], "purchased")
+        # Enrich backfills selection on the response; a poll must not freeze the guess.
+        self.assertIsNone(stored.get("selection"))
+        self.assertTrue(live.get("selection"))
+
     def test_list_reports_every_cohort_with_its_progress(self):
         sid = "listed" + "x" * 26
         cohort_id = self._cohort_of_one(sid)

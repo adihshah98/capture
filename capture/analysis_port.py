@@ -131,6 +131,11 @@ def save_cohort(project: Project, cohort: dict) -> dict:
     return storage.write_cohort(project.id, cohort)
 
 
+def persist_cohort_refresh(project: Project, stored: dict, live: dict) -> bool:
+    """Write enrich's durable status without replacing membership."""
+    return storage.persist_cohort_refresh(project.id, stored, live)
+
+
 def cohorts(project: Project) -> list:
     return storage.list_cohorts(project.id)
 

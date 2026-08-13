@@ -125,6 +125,49 @@ def write_cohort(project_id: str, cohort: dict) -> dict:
     )
 
 
+def persist_cohort_refresh(project_id: str, stored: dict, live: dict) -> bool:
+    """Persist enrich's durable status without replacing membership.
+
+    The status refresh is a durable fact — a crashed runner leaves rows saying
+    "running" that only a re-read of the write-up corrects — so GET still
+    writes it back. What it must not do is `write_cohort`: that DELETE+INSERTs
+    every member from the poll's snapshot and drops in-flight marks.
+
+    Returns whether anything was written.
+    """
+    cohort_id = safe_cohort_id(stored["id"])
+    new_status = live.get("status")
+    status = new_status if new_status != stored.get("status") else None
+
+    stored_rows = {str(row.get("session_id")): row for row in stored.get("sessions") or []}
+    sessions = []
+    for entry in live.get("sessions") or []:
+        sid = str(entry.get("session_id") or "")
+        prev = stored_rows.get(sid)
+        if prev is None:
+            continue
+        nxt_status = entry.get("status")
+        nxt_analysis = entry.get("analysis")
+        nxt_error = entry.get("error")
+        if (
+            nxt_status != prev.get("status")
+            or nxt_analysis != prev.get("analysis")
+            or nxt_error != prev.get("error")
+        ):
+            sessions.append((sid, nxt_status, nxt_analysis, nxt_error))
+
+    if status is None and not sessions:
+        return False
+    analyze_store.persist_cohort_refresh(
+        analyze_store.connect(),
+        project_id,
+        cohort_id,
+        status=status,
+        sessions=sessions,
+    )
+    return True
+
+
 def list_cohorts(project_id: str) -> list:
     """Every cohort in this project, newest first. Membership only — no write-ups."""
     return analyze_store.list_cohorts(analyze_store.connect(), project_id)

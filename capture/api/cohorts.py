@@ -64,10 +64,9 @@ def get_cohort(cohort_id: str, found: projects.Project = Depends(readable_projec
     cohort = _resolve_cohort_or_404(found, cohort_id)
     live = ap.cohort_view(found, cohort)
     # Persist refreshed status so a crashed runner still shows accurate counts.
-    # Status only — persistable_cohort drops the derived view enrich lays over
-    # it, so a poll cannot freeze a guessed `selection` into the file.
-    if live.get("sessions") != cohort.get("sessions") or live.get("status") != cohort.get("status"):
-        ap.save_cohort(found, ap.storable_cohort(live, cohort))
+    # Row-at-a-time, not write_cohort: DELETE+INSERT of membership races
+    # mark_cohort_session, and a poll during extract can drop in-flight marks.
+    ap.persist_cohort_refresh(found, cohort, live)
     return cohort_response(found, live)
 
 

@@ -285,7 +285,10 @@ def persistable_cohort(enriched: dict, stored: dict | None = None) -> dict:
 
     The status refresh itself is a durable fact — a crashed runner leaves rows
     saying "running" that only a re-read of analysis.json corrects — so callers
-    do need to write it back. What they must not write is the view laid over it.
+    do need to write it back. GET does that through `persist_cohort_refresh`
+    rather than `write_cohort`, so a poll cannot DELETE+INSERT membership over
+    in-flight marks. Pipeline finish still goes through this function, then
+    `write_cohort`. What they must not write is the view laid over it.
 
     `selection` is the trap. enrich backfills it from whatever sampling fields
     are present, so for a cohort sampled by any_n / a_n (where purchased_n and

@@ -387,6 +387,68 @@ class TestConcurrentMarks(StoreCase):
             storage.read_cohort(self.project_id, "c")["sessions"][0]["filter"], "purchased"
         )
 
+    def test_a_status_refresh_does_not_clobber_in_flight_marks(self):
+        """GET used to persist enrich via write_cohort, which DELETE+INSERTed
+        membership from a stale snapshot and dropped marks that landed in between."""
+        snapshot = self.cohort()
+        live = {
+            **snapshot,
+            "status": "running",
+            "sessions": [
+                {**row, "status": "running" if i == 1 else row["status"]}
+                for i, row in enumerate(snapshot["sessions"])
+            ],
+        }
+        # The pipeline holds a different copy, the way GET's poll and extract do.
+        pipeline = storage.read_cohort(self.project_id, "c")
+        storage.mark_cohort_session(
+            self.project_id, pipeline, pipeline["sessions"][0], "done", analysis="analysis.json"
+        )
+        self.assertTrue(storage.persist_cohort_refresh(self.project_id, snapshot, live))
+
+        got = storage.read_cohort(self.project_id, "c")
+        self.assertEqual(got["status"], "running")
+        self.assertEqual(
+            [s["status"] for s in got["sessions"]],
+            ["done", "running", "queued", "queued"],
+        )
+
+    def test_a_status_refresh_still_persists_corrected_rows(self):
+        storage.write_cohort(
+            self.project_id,
+            {
+                "id": "c",
+                "created_at": 1,
+                "status": "running",
+                "sessions": [
+                    {"session_id": "s0", "status": "running", "filter": "purchased"},
+                    {"session_id": "s1", "status": "queued"},
+                ],
+            },
+        )
+        stored = storage.read_cohort(self.project_id, "c")
+        live = {
+            **stored,
+            "status": "done",
+            "sessions": [
+                {**stored["sessions"][0], "status": "done", "analysis": "analysis.json"},
+                stored["sessions"][1],
+            ],
+        }
+        self.assertTrue(storage.persist_cohort_refresh(self.project_id, stored, live))
+        got = storage.read_cohort(self.project_id, "c")
+        self.assertEqual(got["status"], "done")
+        self.assertEqual(got["sessions"][0]["status"], "done")
+        self.assertEqual(got["sessions"][0]["analysis"], "analysis.json")
+        self.assertEqual(got["sessions"][0]["filter"], "purchased")
+        self.assertEqual(got["sessions"][1]["status"], "queued")
+
+    def test_a_matching_view_does_not_touch_the_store(self):
+        stored = self.cohort()
+        before = storage.read_cohort(self.project_id, "c")["updated_at"]
+        self.assertFalse(storage.persist_cohort_refresh(self.project_id, stored, stored))
+        self.assertEqual(storage.read_cohort(self.project_id, "c")["updated_at"], before)
+
     def test_marking_a_session_that_left_the_cohort_is_reported(self):
         self.cohort()
         store = analyze_store.connect()

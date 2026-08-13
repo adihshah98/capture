@@ -184,6 +184,10 @@ def write_cohort(store: Store, project_id: str, cohort: dict) -> dict:
     Sessions are replaced wholesale because callers hand back a full list. The
     delete and insert share a transaction, so a reader never sees the cohort
     without its members.
+
+    A status refresh must not go through here. DELETE+INSERT of membership
+    races `update_session_status`: a poll's snapshot reinserts stale queued
+    rows over in-flight running/done marks. Use `persist_cohort_refresh`.
     """
     cols, fields, sessions = _split_cohort(cohort)
     updated = _now()
@@ -266,6 +270,49 @@ def update_session_status(
                 (_now(), project_id, cohort_id),
             )
     return matched
+
+
+def persist_cohort_refresh(
+    store: Store,
+    project_id: str,
+    cohort_id: str,
+    *,
+    status: str | None = None,
+    sessions: list | None = None,
+) -> None:
+    """Write status changes without replacing membership.
+
+    `sessions` is `(session_id, status, analysis, error)` for rows that
+    actually changed. Unlisted members are left alone — a GET poll must not
+    reinsert a stale snapshot over in-flight marks from `update_session_status`.
+    """
+    rows = list(sessions or [])
+    if status is None and not rows:
+        return
+    now = _now()
+    with store.tx(project_id) as (conn, project_id):
+        if status is not None:
+            conn.execute(
+                "UPDATE cohorts SET status = %s, updated_at = %s"
+                " WHERE project_id = %s AND cohort_id = %s",
+                (status, now, project_id, cohort_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE cohorts SET updated_at = %s WHERE project_id = %s AND cohort_id = %s",
+                (now, project_id, cohort_id),
+            )
+        if rows:
+            conn.cursor().executemany(
+                """
+                UPDATE cohort_sessions SET status = %s, analysis = %s, error = %s
+                 WHERE project_id = %s AND cohort_id = %s AND session_id = %s
+                """,
+                [
+                    (sess_status, analysis, error, project_id, cohort_id, sid)
+                    for sid, sess_status, analysis, error in rows
+                ],
+            )
 
 
 def set_cohort_status(
