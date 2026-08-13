@@ -257,8 +257,8 @@ async def submit_prepared_gemini_batch(
     prepared: list,
     *,
     display_name: str,
+    project_id: str,
     work_dir: Path | None = None,
-    project_id: str | None = None,
 ) -> str:
     """Create a Batch job from (entry, digest) pairs, one session at a time.
 
@@ -266,14 +266,16 @@ async def submit_prepared_gemini_batch(
     whole cohort. Always uses the Files API — at cohort scale the inline path
     is both oversized and an OOM hazard while estimating size.
 
-    `project_id` is what lets each request carry its session's campaign
-    metadata; a batch submitted without it still works, minus that context.
+    `project_id` is required: without it every request is submitted, billed,
+    and written up with no campaign metadata.
     """
     from google import genai
     from google.genai import types
 
     if not prepared:
         raise ValueError("batch requires at least one request")
+    if not project_id:
+        raise ValueError("batch submit needs project_id so write-ups keep campaign metadata")
 
     client = genai.Client(api_key=runtime.GEMINI_API_KEY)
     config = types.CreateBatchJobConfig(display_name=display_name[:128])
@@ -283,7 +285,7 @@ async def submit_prepared_gemini_batch(
         with tmp.open("w") as out:
             for entry, digest in prepared:
                 sid = entry["session_id"]
-                meta = session_metadata(project_id, sid) if project_id is not None else None
+                meta = session_metadata(project_id, sid)
                 req = build_inlined_session_request(sid, digest, digest.get("frames") or [], meta)
                 key, payload = _batch_file_request(req)
                 del req

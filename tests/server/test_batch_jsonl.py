@@ -178,6 +178,28 @@ class TestSubmitPreparedGeminiBatch(unittest.TestCase):
                 )
         self.assertEqual(deleted, ["files/in"])
 
+    def test_project_id_cannot_be_omitted(self):
+        with self.assertRaises(TypeError):
+            asyncio.run(
+                gemini.submit_prepared_gemini_batch(
+                    [({"session_id": "s1"}, {"frames": []})],
+                    display_name="capture-c",
+                    work_dir=Path(self.tmp.name),
+                )
+            )
+
+    def test_a_blank_project_id_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            asyncio.run(
+                gemini.submit_prepared_gemini_batch(
+                    [({"session_id": "s1"}, {"frames": []})],
+                    display_name="capture-c",
+                    work_dir=Path(self.tmp.name),
+                    project_id="",
+                )
+            )
+        self.assertIn("project_id", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
