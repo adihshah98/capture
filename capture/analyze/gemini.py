@@ -176,6 +176,44 @@ def build_inlined_session_request(
     )
 
 
+# SDK-only GenerateContentConfig fields. They are not GenerationConfig, and
+# leaving them in the JSONL is a 400.
+_SDK_CONFIG_KEYS = frozenset(
+    {
+        "httpOptions",
+        "http_options",
+        "shouldReturnHttpResponse",
+        "should_return_http_response",
+    }
+)
+
+
+def _batch_file_request(req) -> tuple[str, dict]:
+    """One JSONL record in the Files-API shape the batch parser accepts.
+
+    `InlinedRequest.model_dump()` is the SDK's inline-batch wrapper: a `config`
+    object and snake_case names. The file parser wants a GenerateContentRequest
+    — `systemInstruction` + `generationConfig`, camelCase. Dumping the wrapper
+    400'd every submit and the cohort fell back to sync Gemini at full price.
+    """
+    dumped = req.model_dump(mode="json", exclude_none=True, by_alias=True)
+    meta = dumped.pop("metadata", None) or {}
+    key = meta.get("session_id") or meta.get("sessionId") or ""
+    config = dumped.pop("config", None) or {}
+    system = config.pop("systemInstruction", None)
+    if system is None:
+        system = config.pop("system_instruction", None)
+    for sdk_key in _SDK_CONFIG_KEYS:
+        config.pop(sdk_key, None)
+    if system is not None:
+        dumped["systemInstruction"] = system
+    if config:
+        dumped["generationConfig"] = config
+    if not key:
+        raise ValueError("batch request is missing session_id metadata")
+    return key, dumped
+
+
 async def call_gemini(digest: dict, frames: list, meta: dict | None = None) -> str:
     from google import genai
     from google.genai import types
@@ -249,15 +287,16 @@ async def submit_prepared_gemini_batch(
                     session_metadata(project_id, sid) if project_id is not None else None
                 )
                 req = build_inlined_session_request(sid, digest, digest.get("frames") or [], meta)
-                payload = req.model_dump(mode="json", exclude_none=True)
+                key, payload = _batch_file_request(req)
                 del req
-                key = (payload.pop("metadata", None) or {}).get("session_id") or sid
                 out.write(json.dumps({"key": key, "request": payload}, separators=(",", ":")))
                 out.write("\n")
                 del payload
+        # `jsonl` becomes application/jsonl, which the Files API 400s. JSONL
+        # content with application/json is the workaround that actually uploads.
         uploaded = await client.aio.files.upload(
             file=str(tmp),
-            config=types.UploadFileConfig(mime_type="jsonl"),
+            config=types.UploadFileConfig(mime_type="application/json"),
         )
     finally:
         tmp.unlink(missing_ok=True)
