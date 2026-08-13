@@ -102,6 +102,23 @@ class TestChunkNames(unittest.TestCase):
         self.assertIsNone(paths.chunk_window("1700000000000-x7k2m9.json"))
 
 
+class TestAnalysisFiles(unittest.TestCase):
+    def test_digest_and_frames_are_accepted(self):
+        for name in ("digest.json", "f0000.jpg", "f000.jpg", "f12.jpg"):
+            self.assertTrue(paths.SAFE_ANALYSIS_FILE.match(name), name)
+
+    def test_traversal_and_sidecars_are_refused(self):
+        for name in (
+            "../digest.json",
+            ".analysis/digest.json",
+            "DIGEST.json",
+            "f0000.png",
+            "frame.jpg",
+            "digest.json.bak",
+        ):
+            self.assertIsNone(paths.SAFE_ANALYSIS_FILE.match(name), name)
+
+
 class TestSessionIds(unittest.TestCase):
     def test_ordinary_ids_are_accepted(self):
         for value in ("abc", "A-b_C-123", "x" * 64):

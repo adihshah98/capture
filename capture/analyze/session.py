@@ -145,12 +145,28 @@ async def analyze_session(
 
 
 def load_session_digest(session_dir: Path) -> dict | None:
-    """Read extractor digest.json if a prior reconstruction left one on disk."""
+    """Read extractor digest.json if a prior reconstruction left one on disk.
+
+    Frame paths are rewritten to this `session_dir`: the extractor stores
+    absolute paths, and a digest restored from S3 was written on another box.
+    """
     path = session_dir / ANALYSIS_DIR / "digest.json"
     if not path.is_file():
         return None
     try:
         data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
     except Exception:
         return None
+    out_dir = path.parent
+    frames = []
+    for frame in data.get("frames") or []:
+        if not isinstance(frame, dict):
+            continue
+        name = Path(frame.get("file") or "").name
+        if not name:
+            continue
+        frames.append({**frame, "file": str(out_dir / name)})
+    data["frames"] = frames
+    return data

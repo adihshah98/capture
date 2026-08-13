@@ -145,6 +145,56 @@ class TestStaging(MaterializeCase):
         self.run_with_staging(lambda: None)
         self.assertTrue((self.dir / name).exists())
 
+    def test_a_persisted_digest_is_present_inside_the_block(self):
+        self.put_remote(".analysis/digest.json", b'{"frames":[]}')
+        self.put_remote(".analysis/f0000.jpg", b"jpeg")
+        seen = {}
+        self.run_with_staging(
+            lambda: seen.update(
+                digest=(self.dir / ".analysis" / "digest.json").read_bytes(),
+                frame=(self.dir / ".analysis" / "f0000.jpg").read_bytes(),
+            )
+        )
+        self.assertEqual(seen["digest"], b'{"frames":[]}')
+        self.assertEqual(seen["frame"], b"jpeg")
+
+    def test_fetched_digest_is_removed_afterwards(self):
+        self.put_remote(".analysis/digest.json", b"{}")
+        self.run_with_staging(lambda: None)
+        self.assertFalse((self.dir / ".analysis" / "digest.json").exists())
+
+    def test_a_digest_written_during_the_block_is_uploaded(self):
+        name = chunk_name(1000)
+        self.put_remote(name, b"x")
+
+        def write_digest():
+            analysis = self.dir / ".analysis"
+            analysis.mkdir(exist_ok=True)
+            (analysis / "digest.json").write_text('{"kept": true}')
+            (analysis / "f0000.jpg").write_bytes(b"jpeg")
+
+        self.run_with_staging(write_digest)
+        self.assertEqual(
+            self.fake.objects["sessions/cap_a/s1/.analysis/digest.json"],
+            b'{"kept": true}',
+        )
+        self.assertEqual(self.fake.objects["sessions/cap_a/s1/.analysis/f0000.jpg"], b"jpeg")
+
+    def test_a_failed_run_does_not_upload_a_partial_digest(self):
+        name = chunk_name(1000)
+        self.put_remote(name, b"x")
+
+        async def main():
+            async with self.jobs.chunks_on_disk(self.project, [self.session]):
+                analysis = self.dir / ".analysis"
+                analysis.mkdir(exist_ok=True)
+                (analysis / "digest.json").write_text("{}")
+                raise RuntimeError("analysis blew up")
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(main())
+        self.assertNotIn("sessions/cap_a/s1/.analysis/digest.json", self.fake.objects)
+
 
 class TestCohortSessionIds(unittest.TestCase):
     def test_it_reads_ids_and_skips_malformed_rows(self):
@@ -157,6 +207,26 @@ class TestCohortSessionIds(unittest.TestCase):
         from capture import jobs
 
         self.assertEqual(jobs.cohort_session_ids({}), [])
+
+
+class TestLoadSessionDigest(unittest.TestCase):
+    def test_frame_paths_are_rewritten_to_this_directory(self):
+        """A digest restored from S3 still names files on the box that wrote it."""
+        from capture.analyze import session
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        session_dir = Path(tmp.name) / "sess"
+        out = session_dir / ".analysis"
+        out.mkdir(parents=True)
+        frame = out / "f0000.jpg"
+        frame.write_bytes(b"jpeg")
+        (out / "digest.json").write_text(
+            json.dumps({"frames": [{"atMs": 0, "file": "/other/box/.analysis/f0000.jpg"}]})
+        )
+        digest = session.load_session_digest(session_dir)
+        self.assertEqual(digest["frames"][0]["file"], str(frame))
+        self.assertTrue(Path(digest["frames"][0]["file"]).is_file())
 
 
 if __name__ == "__main__":

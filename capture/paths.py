@@ -28,6 +28,10 @@ CONFIG_PATH = DATA_ROOT / "config.json"
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SAFE_CHUNK = re.compile(r"^\d{1,16}(-[a-f0-9]{1,8})?-[a-z0-9]{6}\.json$")
+# Extractor scratch beside the recording. Same relative path on disk and in S3
+# so staging is a straight copy. digest.json + fNNNN.jpg, nothing else.
+ANALYSIS_DIR = ".analysis"
+SAFE_ANALYSIS_FILE = re.compile(r"^(digest\.json|f\d+\.jpg)$")
 
 
 def pool_for(storage_prefix: str) -> Path:

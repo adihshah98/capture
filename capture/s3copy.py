@@ -68,14 +68,24 @@ def local_chunks(session_dir: Path) -> list:
     return [p for p in session_dir.iterdir() if p.is_file() and storage.SAFE_CHUNK.match(p.name)]
 
 
+def local_analysis_files(session_dir: Path) -> list:
+    directory = session_dir / storage.ANALYSIS_DIR
+    if not directory.is_dir():
+        return []
+    return [
+        p for p in directory.iterdir() if p.is_file() and storage.SAFE_ANALYSIS_FILE.match(p.name)
+    ]
+
+
 def copy_session(prefix: str, session_dir: Path, progress: Progress, dry_run: bool) -> None:
     session_id = session_dir.name
-    local = local_chunks(session_dir)
-    if not local:
+    chunks = local_chunks(session_dir)
+    analysis = local_analysis_files(session_dir)
+    if not chunks and not analysis:
         return
-    already = {c.name for c in storage._list_s3(prefix, session_id)}
-    for path in local:
-        if path.name in already:
+    already_chunks = {c.name for c in storage._list_s3(prefix, session_id)}
+    for path in chunks:
+        if path.name in already_chunks:
             progress.chunk(skipped=1)
             continue
         if dry_run:
@@ -88,6 +98,25 @@ def copy_session(prefix: str, session_dir: Path, progress: Progress, dry_run: bo
         except Exception as exc:
             progress.chunk(failed=1)
             print(f"  failed {session_id}/{path.name}: {exc}", file=sys.stderr, flush=True)
+    already_analysis = {c.name for c in storage._list_analysis_s3(prefix, session_id)}
+    for path in analysis:
+        if path.name in already_analysis:
+            progress.chunk(skipped=1)
+            continue
+        if dry_run:
+            progress.chunk(uploaded=1, size=path.stat().st_size)
+            continue
+        try:
+            body = path.read_bytes()
+            storage.put_analysis_file(prefix, session_id, path.name, body)
+            progress.chunk(uploaded=1, size=len(body))
+        except Exception as exc:
+            progress.chunk(failed=1)
+            print(
+                f"  failed {session_id}/{storage.ANALYSIS_DIR}/{path.name}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def copy_all(

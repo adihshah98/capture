@@ -97,6 +97,22 @@ class TestKeys(StorageCase):
         prefix = storage.session_key_prefix("cap_abc", "sess")
         self.assertFalse(storage.key_for("cap_abc", "sess2", "c.json").startswith(prefix))
 
+    def test_analysis_keys_sit_beside_chunks_not_among_them(self):
+        self.assertEqual(
+            storage.analysis_key("cap_abc", "sess", "digest.json"),
+            "sessions/cap_abc/sess/.analysis/digest.json",
+        )
+        self.assertTrue(
+            storage.analysis_key("cap_abc", "sess", "digest.json").startswith(
+                storage.analysis_key_prefix("cap_abc", "sess")
+            )
+        )
+        self.assertFalse(
+            storage.analysis_key("cap_abc", "sess2", "digest.json").startswith(
+                storage.analysis_key_prefix("cap_abc", "sess")
+            )
+        )
+
 
 class TestLocalBackend(StorageCase):
     def test_round_trip(self):
@@ -116,6 +132,21 @@ class TestLocalBackend(StorageCase):
             storage.list_chunks("cap_a", "s1"),
             [storage.Chunk(chunk_name(1000), 1), storage.Chunk(chunk_name(2000), 2)],
         )
+
+    def test_analysis_round_trip_stays_out_of_the_chunk_listing(self):
+        storage.put_analysis_file("cap_a", "s1", "digest.json", b'{"frames":[]}')
+        storage.put_analysis_file("cap_a", "s1", "f0000.jpg", b"jpeg")
+        self.assertEqual(storage.open_analysis_file("cap_a", "s1", "digest.json"), b'{"frames":[]}')
+        self.assertEqual(
+            [c.name for c in storage.list_analysis_files("cap_a", "s1")],
+            ["digest.json", "f0000.jpg"],
+        )
+        self.assertEqual(storage.list_chunks("cap_a", "s1"), [])
+
+    def test_a_junk_name_is_not_an_analysis_file(self):
+        with self.assertRaises(ValueError):
+            storage.put_analysis_file("cap_a", "s1", "../chunk.json", b"x")
+        self.assertIsNone(storage.open_analysis_file("cap_a", "s1", "../chunk.json"))
 
     def test_missing_chunk_is_none_not_an_error(self):
         self.assertIsNone(storage.open_chunk("cap_a", "s1", chunk_name(1)))
@@ -189,6 +220,66 @@ class TestDualReadDuringMigration(StorageCase):
         self.assertEqual(self.fake.objects, {})
         self.assertFalse(storage.local_dir("cap_a", "s1").exists())
         self.assertEqual(storage.list_chunks("cap_a", "s1"), [])
+
+
+class TestAnalysisOnS3(StorageCase):
+    s3 = True
+
+    def test_put_goes_to_the_bucket_not_the_disk(self):
+        storage.put_analysis_file("cap_a", "s1", "digest.json", b'{"frames":[]}')
+        storage.put_analysis_file("cap_a", "s1", "f0000.jpg", b"jpeg")
+        self.assertEqual(
+            sorted(self.fake.objects),
+            [
+                "sessions/cap_a/s1/.analysis/digest.json",
+                "sessions/cap_a/s1/.analysis/f0000.jpg",
+            ],
+        )
+        self.assertFalse(
+            (storage.local_dir("cap_a", "s1") / storage.ANALYSIS_DIR / "digest.json").exists()
+        )
+
+    def test_round_trip(self):
+        storage.put_analysis_file("cap_a", "s1", "digest.json", b'{"ok":true}')
+        self.assertEqual(storage.open_analysis_file("cap_a", "s1", "digest.json"), b'{"ok":true}')
+
+    def test_listing_chunks_does_not_see_the_digest(self):
+        name = chunk_name(1000)
+        storage.put_chunk("cap_a", "s1", name, b"chunk")
+        storage.put_analysis_file("cap_a", "s1", "digest.json", b"{}")
+        self.assertEqual([c.name for c in storage.list_chunks("cap_a", "s1")], [name])
+        self.assertEqual(
+            [c.name for c in storage.list_analysis_files("cap_a", "s1")], ["digest.json"]
+        )
+
+    def test_delete_session_removes_the_digest_too(self):
+        """Retention used to rebuild keys from chunk names, which misses
+        `.analysis/` and would orphan every persisted reconstruction."""
+        storage.put_chunk("cap_a", "s1", chunk_name(1000), b"chunk")
+        storage.put_analysis_file("cap_a", "s1", "digest.json", b"{}")
+        storage.put_analysis_file("cap_a", "s1", "f0000.jpg", b"jpeg")
+        storage.delete_session("cap_a", "s1")
+        self.assertEqual(self.fake.objects, {})
+
+    def test_delete_analysis_leaves_the_recording(self):
+        name = chunk_name(1000)
+        storage.put_chunk("cap_a", "s1", name, b"chunk")
+        storage.put_analysis_file("cap_a", "s1", "digest.json", b"{}")
+        storage.delete_analysis("cap_a", "s1")
+        self.assertEqual(list(self.fake.objects), [f"sessions/cap_a/s1/{name}"])
+        self.assertEqual(storage.list_analysis_files("cap_a", "s1"), [])
+
+    def test_content_type_follows_the_file(self):
+        storage.put_analysis_file("cap_a", "s1", "digest.json", b"{}")
+        storage.put_analysis_file("cap_a", "s1", "f0000.jpg", b"jpeg")
+        self.assertEqual(
+            self.fake.put_kwargs["sessions/cap_a/s1/.analysis/digest.json"]["ContentType"],
+            "application/json",
+        )
+        self.assertEqual(
+            self.fake.put_kwargs["sessions/cap_a/s1/.analysis/f0000.jpg"]["ContentType"],
+            "image/jpeg",
+        )
 
 
 # Chunk-name parsing moved to capture/paths.py with the rest of the naming

@@ -446,7 +446,8 @@ def clear_cut(store: Store, project_id: str, cohort_id: str, key: str) -> bool:
 
 # --- per-session analysis results and job status ------------------------------
 # These were analysis.json and analysis.status.json beside the recording. The
-# frame cache stays on disk: it is regenerable scratch for one run, not state.
+# write-up is the durable row; extractor frames are local scratch, copied to
+# S3 next to the chunks so a later box can skip Playwright.
 
 
 def read_analysis(store: Store, project_id: str, session_id: str) -> dict | None:

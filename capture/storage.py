@@ -24,6 +24,8 @@ from . import paths
 from .paths import chunk_timestamp  # re-exported: callers use storage.*
 
 SAFE_CHUNK = paths.SAFE_CHUNK
+ANALYSIS_DIR = paths.ANALYSIS_DIR
+SAFE_ANALYSIS_FILE = paths.SAFE_ANALYSIS_FILE
 
 BASE_DIR = paths.BASE_DIR
 DATA_ROOT = paths.DATA_ROOT
@@ -62,6 +64,14 @@ def key_for(storage_prefix: str, session_id: str, name: str) -> str:
 def session_key_prefix(storage_prefix: str, session_id: str) -> str:
     parts = [S3_PREFIX, storage_prefix or "_default", session_id]
     return "/".join(p for p in parts if p) + "/"
+
+
+def analysis_key(storage_prefix: str, session_id: str, name: str) -> str:
+    return key_for(storage_prefix, session_id, f"{ANALYSIS_DIR}/{name}")
+
+
+def analysis_key_prefix(storage_prefix: str, session_id: str) -> str:
+    return session_key_prefix(storage_prefix, session_id) + ANALYSIS_DIR + "/"
 
 
 def client():
@@ -127,6 +137,70 @@ def chunk_url(storage_prefix: str, session_id: str, name: str) -> str | None:
     )
 
 
+def _analysis_content_type(name: str) -> str:
+    return "application/json" if name.endswith(".json") else "image/jpeg"
+
+
+def put_analysis_file(storage_prefix: str, session_id: str, name: str, body: bytes) -> None:
+    """Persist one extractor artifact (digest.json or a frame JPEG)."""
+    if not SAFE_ANALYSIS_FILE.match(name):
+        raise ValueError(f"not an analysis artifact: {name!r}")
+    if configured():
+        client().put_object(
+            Bucket=BUCKET,
+            Key=analysis_key(storage_prefix, session_id, name),
+            Body=body,
+            ContentType=_analysis_content_type(name),
+        )
+        return
+    from .fsutil import atomic_write_bytes
+
+    atomic_write_bytes(local_dir(storage_prefix, session_id) / ANALYSIS_DIR / name, body)
+
+
+def open_analysis_file(storage_prefix: str, session_id: str, name: str) -> bytes | None:
+    """S3 first, then local `.analysis/`. Same fallback as open_chunk."""
+    if not SAFE_ANALYSIS_FILE.match(name):
+        return None
+    if configured():
+        try:
+            return (
+                client()
+                .get_object(Bucket=BUCKET, Key=analysis_key(storage_prefix, session_id, name))[
+                    "Body"
+                ]
+                .read()
+            )
+        except Exception:
+            pass
+    path = local_dir(storage_prefix, session_id) / ANALYSIS_DIR / name
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def list_analysis_files(storage_prefix: str, session_id: str) -> list:
+    """Digest + frames for a session. S3 wins on a name that exists in both."""
+    found: dict = {}
+    for item in _list_analysis_local(storage_prefix, session_id):
+        found[item.name] = item
+    for item in _list_analysis_s3(storage_prefix, session_id):
+        found[item.name] = item
+    return sorted(found.values(), key=lambda c: c.name)
+
+
+def delete_analysis(storage_prefix: str, session_id: str) -> None:
+    """Drop the persisted digest. Local `.analysis/` is the caller's to remove."""
+    if not configured():
+        return
+    keys = [
+        {"Key": item["Key"]}
+        for item in _iter_s3_objects(analysis_key_prefix(storage_prefix, session_id))
+    ]
+    _delete_s3_keys(keys)
+
+
 def list_chunks(storage_prefix: str, session_id: str) -> list:
     """Every chunk for a session, newest last. Merges both backends during the
     migration so a partially-copied session still lists completely."""
@@ -149,37 +223,72 @@ def _list_local(storage_prefix: str, session_id: str) -> Iterable[Chunk]:
     ]
 
 
-def _list_s3(storage_prefix: str, session_id: str) -> Iterable[Chunk]:
-    if not configured():
+def _list_analysis_local(storage_prefix: str, session_id: str) -> Iterable[Chunk]:
+    directory = local_dir(storage_prefix, session_id) / ANALYSIS_DIR
+    if not directory.is_dir():
         return []
-    out = []
+    return [
+        Chunk(p.name, p.stat().st_size)
+        for p in directory.iterdir()
+        if p.is_file() and SAFE_ANALYSIS_FILE.match(p.name)
+    ]
+
+
+def _iter_s3_objects(prefix: str) -> Iterable[dict]:
+    if not configured():
+        return
     token = None
-    prefix = session_key_prefix(storage_prefix, session_id)
     while True:
         kwargs = {"Bucket": BUCKET, "Prefix": prefix}
         if token:
             kwargs["ContinuationToken"] = token
         page = client().list_objects_v2(**kwargs)
-        for item in page.get("Contents") or []:
-            name = item["Key"].rsplit("/", 1)[-1]
-            if SAFE_CHUNK.match(name):
-                out.append(Chunk(name, item["Size"]))
+        yield from page.get("Contents") or []
         if not page.get("IsTruncated"):
-            return out
+            return
         token = page.get("NextContinuationToken")
 
 
+def _list_s3(storage_prefix: str, session_id: str) -> Iterable[Chunk]:
+    out = []
+    for item in _iter_s3_objects(session_key_prefix(storage_prefix, session_id)):
+        name = item["Key"].rsplit("/", 1)[-1]
+        if SAFE_CHUNK.match(name):
+            out.append(Chunk(name, item["Size"]))
+    return out
+
+
+def _list_analysis_s3(storage_prefix: str, session_id: str) -> Iterable[Chunk]:
+    out = []
+    for item in _iter_s3_objects(analysis_key_prefix(storage_prefix, session_id)):
+        name = item["Key"].rsplit("/", 1)[-1]
+        if SAFE_ANALYSIS_FILE.match(name):
+            out.append(Chunk(name, item["Size"]))
+    return out
+
+
+def _delete_s3_keys(keys: list) -> None:
+    if not keys:
+        return
+    for batch in (keys[i : i + 1000] for i in range(0, len(keys), 1000)):
+        client().delete_objects(Bucket=BUCKET, Delete={"Objects": batch})
+
+
 def delete_session(storage_prefix: str, session_id: str) -> int:
-    """Drop a session from both backends. Returns bytes freed on disk."""
+    """Drop a session from both backends. Returns bytes freed on disk.
+
+    Every object under the session prefix goes, not just chunk-named keys —
+    otherwise a persisted digest would sit in the bucket with nothing pointing
+    at it after retention.
+    """
     import shutil
 
     freed = sum(c.size for c in _list_local(storage_prefix, session_id))
     shutil.rmtree(local_dir(storage_prefix, session_id), ignore_errors=True)
     if configured():
         keys = [
-            {"Key": key_for(storage_prefix, session_id, c.name)}
-            for c in _list_s3(storage_prefix, session_id)
+            {"Key": item["Key"]}
+            for item in _iter_s3_objects(session_key_prefix(storage_prefix, session_id))
         ]
-        for batch in (keys[i : i + 1000] for i in range(0, len(keys), 1000)):
-            client().delete_objects(Bucket=BUCKET, Delete={"Objects": batch})
+        _delete_s3_keys(keys)
     return freed

@@ -2,7 +2,7 @@
 
 Callers identify a tenant by its Postgres project UUID. Session write-ups and
 cohort state live in Postgres; Path appears only for recording files (chunks)
-and regenerable scratch under `.analysis/`.
+and extractor scratch under `.analysis/` (persisted to S3 beside the chunks).
 
 It is deliberately leaf-ward. Nothing here reads a name the tests patch -- no
 prompts, no model config, no `_gates` -- and nothing calls back into
@@ -16,10 +16,11 @@ import time
 from pathlib import Path
 
 from .. import projects
+from .. import storage as object_store
+from ..paths import ANALYSIS_DIR
 from . import store as analyze_store
 
 ANALYSIS_FILE = "analysis.json"
-ANALYSIS_DIR = ".analysis"
 # Scratch beside the sessions pool (Batch JSONL). Not live cohort state.
 COHORTS_DIR = "cohorts"
 # Cohort ids are ours to mint ("cohort-<ms>"), but they land in filenames, so
@@ -76,7 +77,8 @@ def clear_analysis(project_id: str, session_id: str, *, session_dir: Path | None
     """Drop a finished result so a re-analyze starts clean.
 
     Also clears local `.analysis` scratch (and best-effort legacy sidecars) when
-    the session directory exists on disk.
+    the session directory exists on disk, and the persisted digest in S3 so a
+    later stage cannot revive the reconstruction this call just discarded.
     """
     analyze_store.clear_analysis(analyze_store.connect(), project_id, session_id)
     root = session_dir
@@ -84,12 +86,16 @@ def clear_analysis(project_id: str, session_id: str, *, session_dir: Path | None
         try:
             root = sessions_root(project_id) / session_id
         except LookupError:
-            return
-    if not root.is_dir():
+            root = None
+    if root is not None and root.is_dir():
+        for legacy in (ANALYSIS_FILE, "analysis.insights.json", "analysis.qa.json"):
+            (root / legacy).unlink(missing_ok=True)
+        shutil.rmtree(root / ANALYSIS_DIR, ignore_errors=True)
+    if not object_store.configured():
         return
-    for legacy in (ANALYSIS_FILE, "analysis.insights.json", "analysis.qa.json"):
-        (root / legacy).unlink(missing_ok=True)
-    shutil.rmtree(root / ANALYSIS_DIR, ignore_errors=True)
+    project = projects.by_id(project_id)
+    if project is not None:
+        object_store.delete_analysis(project.storage_prefix, session_id)
 
 
 def cohorts_dir(pool: Path) -> Path:

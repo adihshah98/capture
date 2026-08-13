@@ -99,6 +99,7 @@ class TestSweepClearsBothBackends(unittest.TestCase):
 
         old = int((time.time() - 30 * 86400) * 1000)
         name = self.seed("stale", old)
+        self.fake.objects["sessions/cap_r/stale/.analysis/digest.json"] = b"{}"
 
         removed = self.retention.sweep_expired_sessions()
 

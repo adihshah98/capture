@@ -141,6 +141,24 @@ class TestCopier(unittest.TestCase):
         self.assertEqual(progress.sessions, 2)
         self.assertEqual(progress.uploaded, 2)
 
+    def test_a_local_digest_is_copied_next_to_the_chunks(self):
+        names = self.seed_local("s1", count=1)
+        analysis = self.storage.local_dir("cap_c", "s1") / self.storage.ANALYSIS_DIR
+        analysis.mkdir()
+        (analysis / "digest.json").write_bytes(b'{"frames":[]}')
+        (analysis / "f0000.jpg").write_bytes(b"jpeg")
+        progress = self.s3copy.copy_all(concurrency=2, verbose=False)
+        self.assertEqual(progress.uploaded, 3)
+        self.assertEqual(
+            self.fake.objects[f"sessions/cap_c/s1/{names[0]}"],
+            b"chunk\x00",
+        )
+        self.assertEqual(
+            self.fake.objects["sessions/cap_c/s1/.analysis/digest.json"],
+            b'{"frames":[]}',
+        )
+        self.assertEqual(self.fake.objects["sessions/cap_c/s1/.analysis/f0000.jpg"], b"jpeg")
+
 
 if __name__ == "__main__":
     unittest.main()

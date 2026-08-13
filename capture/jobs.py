@@ -11,10 +11,13 @@ Two things here are load-bearing and look incidental:
     to mark a job failed.
   * chunks_on_disk stages only what is missing and removes only what it staged. The
     analyser is a Node subprocess whose entire input contract is "a directory with
-    chunk files in it", while the chunks live in S3. Widening the cleanup to
-    "delete the directory's chunks" turns it into data loss for local installs, and
-    adopting files it did not create lets two overlapping cohort runs delete each
-    other's input mid-extraction. See docs/deep-dive/01-ingest-analyze-seam.md.
+    chunk files in it", while the chunks live in S3. The extractor digest is the
+    same shape: Playwright writes `.analysis/` locally, and this shim copies that
+    directory to S3 so a later run on a cold disk can skip reconstruction.
+    Widening the cleanup to "delete the directory's chunks" turns it into data
+    loss for local installs, and adopting files it did not create lets two
+    overlapping cohort runs delete each other's input mid-extraction. See
+    docs/deep-dive/01-ingest-analyze-seam.md.
 
 Everything is process-local, which is what keeps this server on one worker: a
 second one would hold its own registry and double-run every job.
@@ -69,7 +72,7 @@ def cohort_key(project: projects.Project, cohort_id: str) -> tuple:
     return (project.id, cohort_id)
 
 
-def _stage_chunks(project, session_ids: list) -> list:
+def _stage_session_files(project, session_ids: list) -> list:
     staged = []
     for session_id in session_ids:
         directory = project.pool / session_id
@@ -78,6 +81,16 @@ def _stage_chunks(project, session_ids: list) -> list:
             if path.exists():
                 continue
             body = storage.open_chunk(project.storage_prefix, session_id, chunk.name)
+            if body is None:
+                continue
+            atomic_write_bytes(path, body)
+            staged.append(path)
+        analysis_dir = directory / storage.ANALYSIS_DIR
+        for item in storage.list_analysis_files(project.storage_prefix, session_id):
+            path = analysis_dir / item.name
+            if path.exists():
+                continue
+            body = storage.open_analysis_file(project.storage_prefix, session_id, item.name)
             if body is None:
                 continue
             atomic_write_bytes(path, body)
@@ -93,19 +106,41 @@ def _unstage_chunks(paths: list) -> None:
             pass
 
 
+def _persist_analysis(project, session_ids: list) -> None:
+    """Copy extractor scratch to S3. digest.json goes last so a partial upload
+    cannot look like a complete reconstruction on the next stage."""
+    for session_id in session_ids:
+        directory = project.pool / session_id / storage.ANALYSIS_DIR
+        if not directory.is_dir():
+            continue
+        files = [
+            p
+            for p in directory.iterdir()
+            if p.is_file() and storage.SAFE_ANALYSIS_FILE.match(p.name)
+        ]
+        files.sort(key=lambda p: p.name == "digest.json")
+        for path in files:
+            storage.put_analysis_file(
+                project.storage_prefix, session_id, path.name, path.read_bytes()
+            )
+
+
 @asynccontextmanager
 async def chunks_on_disk(project, session_ids: list):
-    """analyze.py reads chunks as files, and writes analysis.json, the job status
-    and the frame cache back into the same directory. Staging into a temp dir
-    would carry those results off with it when the directory was cleaned up, so
-    chunks are fetched into the real session directory and only the files this
-    fetched are removed afterwards. A no-op when chunks are already local."""
+    """analyze.py reads chunks as files, and writes the frame cache back into
+    the same directory. Staging into a temp dir would carry those results off
+    with it when the directory was cleaned up, so files are fetched into the
+    real session directory and only the files this fetched are removed
+    afterwards. A successful run also copies `.analysis/` to S3 so the next
+    box does not have to reconstruct. A no-op when chunks are already local."""
     if not storage.configured():
         yield
         return
-    staged = await asyncio.to_thread(_stage_chunks, project, list(session_ids))
+    ids = list(session_ids)
+    staged = await asyncio.to_thread(_stage_session_files, project, ids)
     try:
         yield
+        await asyncio.to_thread(_persist_analysis, project, ids)
     finally:
         await asyncio.to_thread(_unstage_chunks, staged)
 
