@@ -201,5 +201,34 @@ class TestSubmitPreparedGeminiBatch(unittest.TestCase):
         self.assertIn("project_id", str(ctx.exception))
 
 
+class TestSessionMetadata(unittest.TestCase):
+    def _meta(self, entry, order):
+        with (
+            patch.object(gemini.analyze_store, "connect", return_value=object()),
+            patch.object(
+                gemini.analyze_store, "session_facts", return_value=(entry, order)
+            ),
+        ):
+            return gemini.session_metadata("proj", "s1")
+
+    def test_purchase_total_is_exposed_as_order_value(self):
+        meta = self._meta(
+            "https://shop.test/",
+            {"purchased_at": 1, "total": 59.5, "currency": "USD"},
+        )
+        self.assertEqual(meta["order_value"], 59.5)
+        self.assertEqual(meta["currency"], "USD")
+        self.assertEqual(meta["outcome"], "purchased")
+        self.assertNotIn("products", meta)
+        self.assertNotIn("total", meta)
+
+    def test_checkout_without_a_total_omits_order_fields(self):
+        meta = self._meta("https://shop.test/", {"checkout_started_at": 1})
+        self.assertEqual(meta["outcome"], "reached checkout")
+        self.assertNotIn("order_value", meta)
+        self.assertNotIn("currency", meta)
+        self.assertNotIn("products", meta)
+
+
 if __name__ == "__main__":
     unittest.main()

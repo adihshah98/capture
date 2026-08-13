@@ -71,9 +71,14 @@ def session_metadata(project_id: str, session_id: str) -> dict:
             meta["attribution"] = attribution
     meta["outcome"] = OUTCOME_LABELS[outcome_class(order)]
     if order:
-        for key in ("order_value", "currency", "products"):
-            if order.get(key) not in (None, "", [], {}):
-                meta[key] = order[key]
+        # Stored as orders.total; the prompt calls it order_value. Line items
+        # are never captured — the pixel sends order id, total, and currency.
+        value = order.get("order_value", order.get("total"))
+        if value not in (None, "", [], {}):
+            meta["order_value"] = value
+        currency = order.get("currency")
+        if currency not in (None, "", [], {}):
+            meta["currency"] = currency
     return meta
 
 
