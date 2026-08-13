@@ -93,6 +93,42 @@ class TestParseOrNone(unittest.TestCase):
         self.assertEqual(attribution.parse_or_none(url), attribution.parse(url))
 
 
+class TestIsMeta(unittest.TestCase):
+    def test_fbclid_counts(self):
+        self.assertTrue(attribution.is_meta_attribution({"fbclid": True}))
+
+    def test_known_sources_count(self):
+        for source in attribution.META_SOURCES:
+            with self.subTest(source=source):
+                self.assertTrue(attribution.is_meta_attribution({"utm_source": source}))
+
+    def test_google_and_empty_do_not(self):
+        self.assertFalse(attribution.is_meta_attribution({"utm_source": "google"}))
+        self.assertFalse(attribution.is_meta_attribution({}))
+        self.assertFalse(attribution.is_meta_attribution(None))
+
+
+class TestAttributionClasses(unittest.TestCase):
+    def test_lowercases_utm_and_sets_flags(self):
+        self.assertEqual(
+            attribution.attribution_classes({"utm_source": "Google", "fbclid": True}),
+            {
+                "utm_source": "google",
+                "utm_medium": None,
+                "utm_campaign": None,
+                "utm_content": None,
+                "has_fbclid": True,
+                "is_meta": True,
+            },
+        )
+
+    def test_utm_term_is_not_a_column(self):
+        classes = attribution.attribution_classes({"utm_term": "shoes", "utm_source": "google"})
+        self.assertNotIn("utm_term", classes)
+        self.assertEqual(classes["utm_source"], "google")
+        self.assertFalse(classes["is_meta"])
+
+
 class TestBothCallersAgree(unittest.TestCase):
     """The regression this module exists to prevent.
 

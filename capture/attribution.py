@@ -1,5 +1,10 @@
 """Where a visitor came from, read off their entry URL.
 
+`parse` extracts the campaign JSON stored on the session. `attribution_classes`
+is the index over that JSON (lowercased utm_* columns, has_fbclid, is_meta).
+Classify composes those with device and landing page; this module does not
+own those.
+
 One parser, deliberately. There were two: `server.parse_attribution` for the
 index and `gemini._session_attribution` for the prompt metadata, kept in step by
 a comment saying "change both together". They diverged anyway -- which is the
@@ -32,6 +37,11 @@ import urllib.parse
 # filters on it) but it is captured for everyone: the cost is one dict key, and
 # the alternative is a second key list that drifts from this one.
 UTM_PARAMS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term")
+# Denormalised onto `sessions`. utm_term stays in the JSON only.
+UTM_COLUMNS = ("utm_source", "utm_medium", "utm_campaign", "utm_content")
+
+# utm_source values that count as Meta even without an fbclid.
+META_SOURCES = frozenset({"facebook", "meta", "fb", "instagram", "ig"})
 
 # Some ad platforms hand back "#utm_source=..." rather than a query string, so the
 # fragment is parsed too -- but only when it looks like parameters rather than a
@@ -88,6 +98,36 @@ def parse(url: str | None) -> dict:
     if params.get("fbclid"):
         out["fbclid"] = True
     return out
+
+
+def is_meta_attribution(attribution: dict | None) -> bool:
+    """fbclid or a known Meta utm_source. The slice `utm_source=meta` uses this."""
+    attrs = attribution if isinstance(attribution, dict) else {}
+    if attrs.get("fbclid"):
+        return True
+    source = str(attrs.get("utm_source") or "").strip().lower()
+    return source in META_SOURCES
+
+
+def _utm_value(raw) -> str | None:
+    if raw is None or raw is False:
+        return None
+    text = str(raw).strip().lower()
+    return text or None
+
+
+def attribution_classes(attribution: dict | None) -> dict:
+    """Campaign columns for `sessions` (lowercased utm_* + flags).
+
+    `parse` is the JSON stored on the row; this is the index over it. Classify
+    composes these with device and page at ingest.
+    """
+    attrs = attribution if isinstance(attribution, dict) else {}
+    return {
+        **{key: _utm_value(attrs.get(key)) for key in UTM_COLUMNS},
+        "has_fbclid": bool(attrs.get("fbclid")),
+        "is_meta": is_meta_attribution(attrs),
+    }
 
 
 def parse_or_none(url: str | None) -> dict | None:

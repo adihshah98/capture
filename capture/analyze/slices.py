@@ -13,20 +13,20 @@ every accepted spelling onto one canonical form, which is what makes
 already-canonical spec. `slice_label_parts` is the one namer: cuts join it,
 cohort auto-names list it, and the Insights picker mirrors it.
 
-Classifiers live in `capture.classify` so ingest can write the same labels
-without importing the analyze package. This module re-exports them and owns
-the match/normalize/label surface.
+Classifiers live in `capture.classify` (device, page, outcome) and
+`capture.attribution` (campaign / Meta) so ingest can write the same
+labels without importing the analyze package. This module re-exports
+them and owns the match/normalize/label surface.
 """
 
 from typing import Any
 
+from capture.attribution import META_SOURCES, is_meta_attribution
 from capture.classify import (
     DEVICE_VALUES,
-    META_SOURCES,
     MOBILE_MAX_WIDTH,
     OUTCOME_VALUES,
     device_class,
-    is_meta_attribution,
     outcome_class,
     page_path,
 )

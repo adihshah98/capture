@@ -10,7 +10,7 @@ fields, and `sliceNameBits` must agree with `slice_label_parts`. When they
 disagree the live n= and the suggested name silently drift from the cut.
 */
 
-/** Same set as capture.classify.META_SOURCES. */
+/** Same set as capture.attribution.META_SOURCES. */
 const META_SOURCES = new Set(['facebook', 'meta', 'fb', 'instagram', 'ig']);
 
 /** Same map as capture.analyze.slices.OUTCOME_LABELS, plus create-dialog "all". */

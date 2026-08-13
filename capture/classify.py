@@ -4,8 +4,11 @@ Ingest materialises these onto `sessions` so sampling can filter in SQL.
 Analyze (cuts, facets, labels) reads the same functions so a cut never
 disagrees with the cohort that selected its rows.
 
-Keep this module a leaf: stdlib only. `capture.analyze.slices` re-exports the
-matchers that build on these classifiers.
+This module owns device, landing page, and outcome. Campaign columns come
+from `capture.attribution`; `session_classes` composes the two. Keep both
+free of analyze/db imports so ingest can write labels without importing
+the analyze package. `capture.analyze.slices` re-exports the matchers
+that build on these classifiers.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ from __future__ import annotations
 import re
 import urllib.parse
 
-META_SOURCES = frozenset({"facebook", "meta", "fb", "instagram", "ig"})
+from .attribution import attribution_classes
 
 # Same threshold the session detail panel uses, so one session is never called
 # mobile in one place and desktop in another.
@@ -23,8 +26,6 @@ DEVICE_VALUES = ("mobile", "desktop")
 # purchased ⊃ checkout: a purchase implies checkout was reached, so "checkout"
 # here means reached checkout and did NOT purchase — the three are disjoint.
 OUTCOME_VALUES = ("purchased", "checkout", "rest")
-
-UTM_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content")
 
 
 def device_class(device: dict | None) -> str | None:
@@ -46,14 +47,6 @@ def outcome_class(order: dict | None) -> str:
     if order.get("checkout_started_at"):
         return "checkout"
     return "rest"
-
-
-def is_meta_attribution(attribution: dict | None) -> bool:
-    attrs = attribution if isinstance(attribution, dict) else {}
-    if attrs.get("fbclid"):
-        return True
-    source = str(attrs.get("utm_source") or "").strip().lower()
-    return source in META_SOURCES
 
 
 # A hostname we would accept on an entry URL that arrived without a scheme.
@@ -117,26 +110,6 @@ def page_path(url: str | None) -> str | None:
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/")
     return path or None
-
-
-def _utm_value(raw) -> str | None:
-    if raw is None or raw is False:
-        return None
-    text = str(raw).strip().lower()
-    return text or None
-
-
-def attribution_classes(attribution: dict | None) -> dict:
-    """Denormalised campaign columns for `sessions` (lowercased utm_* + flags)."""
-    attrs = attribution if isinstance(attribution, dict) else {}
-    return {
-        "utm_source": _utm_value(attrs.get("utm_source")),
-        "utm_medium": _utm_value(attrs.get("utm_medium")),
-        "utm_campaign": _utm_value(attrs.get("utm_campaign")),
-        "utm_content": _utm_value(attrs.get("utm_content")),
-        "has_fbclid": bool(attrs.get("fbclid")),
-        "is_meta": is_meta_attribution(attrs),
-    }
 
 
 def session_classes(

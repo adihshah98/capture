@@ -10,7 +10,7 @@ reading another tenant's rows; the `project_id` predicate is still required so
 the planner can use the tenant indexes.
 
 **Slice filters are SQL.** `outcome`, `device_class`, `page`, and campaign
-columns are materialised at ingest (`capture.classify` via `sessionstore`).
+columns are materialised at ingest (`classify.session_classes` via `sessionstore`).
 Sampling pushes a normalised slice into `WHERE`, then `ORDER BY` + `LIMIT n`.
 A short cohort means the pool under those predicates is genuinely short —
 `{requested, matched, scanned, capped}` still records that; `capped` stays for

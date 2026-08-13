@@ -5,8 +5,9 @@ project, so a missing WHERE clause returns nothing rather than another
 customer's recordings.
 
 Class columns (`outcome`, `device_class`, `page`, utm_*, `is_meta`, …) are
-written here via `capture.classify` so sampling can filter in SQL without
-re-deriving labels.
+written here via `classify.session_classes` (campaign fields from
+`capture.attribution`) so sampling can filter in SQL without re-deriving
+labels.
 """
 
 import json
