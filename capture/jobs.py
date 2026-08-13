@@ -72,19 +72,20 @@ def cohort_key(project: projects.Project, cohort_id: str) -> tuple:
     return (project.id, cohort_id)
 
 
-def _stage_session_files(project, session_ids: list) -> list:
+def _stage_session_files(project, session_ids: list, analysis_only: bool = False) -> list:
     staged = []
     for session_id in session_ids:
         directory = project.pool / session_id
-        for chunk in storage.list_chunks(project.storage_prefix, session_id):
-            path = directory / chunk.name
-            if path.exists():
-                continue
-            body = storage.open_chunk(project.storage_prefix, session_id, chunk.name)
-            if body is None:
-                continue
-            atomic_write_bytes(path, body)
-            staged.append(path)
+        if not analysis_only:
+            for chunk in storage.list_chunks(project.storage_prefix, session_id):
+                path = directory / chunk.name
+                if path.exists():
+                    continue
+                body = storage.open_chunk(project.storage_prefix, session_id, chunk.name)
+                if body is None:
+                    continue
+                atomic_write_bytes(path, body)
+                staged.append(path)
         analysis_dir = directory / storage.ANALYSIS_DIR
         for item in storage.list_analysis_files(project.storage_prefix, session_id):
             path = analysis_dir / item.name
@@ -126,21 +127,26 @@ def _persist_analysis(project, session_ids: list) -> None:
 
 
 @asynccontextmanager
-async def chunks_on_disk(project, session_ids: list):
+async def chunks_on_disk(project, session_ids: list, *, analysis_only: bool = False):
     """analyze.py reads chunks as files, and writes the frame cache back into
     the same directory. Staging into a temp dir would carry those results off
     with it when the directory was cleaned up, so files are fetched into the
     real session directory and only the files this fetched are removed
     afterwards. A successful run also copies `.analysis/` to S3 so the next
-    box does not have to reconstruct. A no-op when chunks are already local."""
+    box does not have to reconstruct. A no-op when chunks are already local.
+
+    `analysis_only` is for Batch resume: that path reads digest.json, never
+    the rrweb chunks, so fetching them on startup was pure cost.
+    """
     if not storage.configured():
         yield
         return
     ids = list(session_ids)
-    staged = await asyncio.to_thread(_stage_session_files, project, ids)
+    staged = await asyncio.to_thread(_stage_session_files, project, ids, analysis_only)
     try:
         yield
-        await asyncio.to_thread(_persist_analysis, project, ids)
+        if not analysis_only:
+            await asyncio.to_thread(_persist_analysis, project, ids)
     finally:
         await asyncio.to_thread(_unstage_chunks, staged)
 
@@ -250,7 +256,7 @@ async def resume_cohort(project: projects.Project, cohort_id: str) -> None:
         cohort = ap.cohort(project, cohort_id)
         if not cohort:
             return
-        async with chunks_on_disk(project, cohort_session_ids(cohort)):
+        async with chunks_on_disk(project, cohort_session_ids(cohort), analysis_only=True):
             await ap.resume_cohort(project, cohort)
     finally:
         cohort_tasks.pop(key, None)

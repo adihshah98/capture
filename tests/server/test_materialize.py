@@ -158,6 +158,36 @@ class TestStaging(MaterializeCase):
         self.assertEqual(seen["digest"], b'{"frames":[]}')
         self.assertEqual(seen["frame"], b"jpeg")
 
+    def test_resume_staging_skips_chunks_and_still_fetches_the_digest(self):
+        """Batch resume reads digest.json. Fetching every rrweb chunk first is
+        why a 100-session cohort blocked boot on a full S3 download."""
+        name = chunk_name(1000)
+        self.put_remote(name, b'{"events":[]}')
+        self.put_remote(".analysis/digest.json", b'{"frames":[]}')
+        seen = {}
+
+        async def main():
+            async with self.jobs.chunks_on_disk(self.project, [self.session], analysis_only=True):
+                seen["chunk"] = (self.dir / name).exists()
+                seen["digest"] = (self.dir / ".analysis" / "digest.json").read_bytes()
+
+        asyncio.run(main())
+        self.assertFalse(seen["chunk"])
+        self.assertEqual(seen["digest"], b'{"frames":[]}')
+        self.assertFalse((self.dir / ".analysis" / "digest.json").exists())
+
+    def test_resume_staging_does_not_reupload_the_digest(self):
+        self.put_remote(".analysis/digest.json", b'{"frames":[]}')
+
+        async def main():
+            async with self.jobs.chunks_on_disk(self.project, [self.session], analysis_only=True):
+                (self.dir / ".analysis" / "digest.json").write_bytes(b'{"frames":[1]}')
+
+        asyncio.run(main())
+        self.assertEqual(
+            self.fake.objects["sessions/cap_a/s1/.analysis/digest.json"], b'{"frames":[]}'
+        )
+
     def test_fetched_digest_is_removed_afterwards(self):
         self.put_remote(".analysis/digest.json", b"{}")
         self.run_with_staging(lambda: None)
@@ -207,6 +237,35 @@ class TestCohortSessionIds(unittest.TestCase):
         from capture import jobs
 
         self.assertEqual(jobs.cohort_session_ids({}), [])
+
+
+class TestResumeCohortStaging(unittest.TestCase):
+    def test_resume_asks_for_analysis_files_only(self):
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, patch
+
+        from capture import jobs
+
+        seen = {}
+
+        @asynccontextmanager
+        async def fake_chunks(project, session_ids, *, analysis_only=False):
+            seen["analysis_only"] = analysis_only
+            seen["ids"] = list(session_ids)
+            yield
+
+        project = Project(Path("/unused"), "cap_a")
+        project.id = "project-1"
+        cohort = {"id": "c1", "sessions": [{"session_id": "s1"}]}
+        with (
+            patch.object(jobs, "chunks_on_disk", fake_chunks),
+            patch.object(jobs.ap, "cohort", return_value=cohort),
+            patch.object(jobs.ap, "resume_cohort", new_callable=AsyncMock),
+        ):
+            asyncio.run(jobs.resume_cohort(project, "c1"))
+
+        self.assertEqual(seen["analysis_only"], True)
+        self.assertEqual(seen["ids"], ["s1"])
 
 
 class TestLoadSessionDigest(unittest.TestCase):
