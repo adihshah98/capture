@@ -1,8 +1,11 @@
 /** Escaping and small formatters for the insights panels.
 
 Pure string in, pure string out. escapeHtml is the only thing between a model
-write-up and the DOM, so it is worth being able to test on its own.
+write-up and the DOM, so it is worth being able to test on its own. Facet
+wording lives in slices.js so a view chip and a suggested name cannot drift.
 */
+
+import { formatSliceValue } from './slices.js';
 
 export function escapeHtml(s) {
   return String(s)
@@ -33,13 +36,7 @@ export function formatViewClock(ms) {
 }
 
 export function formatViewFacet(field, value) {
-  if (!value) return '';
-  if (field === 'outcome') {
-    if (value === 'all') return 'did not purchase';
-    if (value === 'purchased') return 'purchased';
-    if (value === 'checkout') return 'reached checkout';
-  }
-  return String(value);
+  return formatSliceValue(field, value);
 }
 
 export function progressText(body) {

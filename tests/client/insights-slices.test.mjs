@@ -8,7 +8,7 @@ const {
   emptySlice,
   sliceIsEmpty,
   rowMatches,
-  formatCreateOutcome,
+  formatOutcome,
   sliceNameBits,
   suggestCohortName,
 } = await import('../../src/replay/insights/slices.js');
@@ -40,9 +40,11 @@ test('a missing device never matches a device filter', () => {
   assert.equal(rowMatches({ device: null }, spec), false);
 });
 
-test('utm matching is case and whitespace insensitive on the row side', () => {
+test('utm_source=meta matches known Meta sources and fbclid, like the server', () => {
   const spec = { ...emptySlice(), utm_source: 'meta' };
   assert.equal(rowMatches({ attribution: { utm_source: '  Meta ' } }, spec), true);
+  assert.equal(rowMatches({ attribution: { utm_source: 'facebook' } }, spec), true);
+  assert.equal(rowMatches({ attribution: { fbclid: true } }, spec), true);
   assert.equal(rowMatches({ attribution: { utm_source: 'google' } }, spec), false);
   assert.equal(rowMatches({ attribution: null }, spec), false);
 });
@@ -53,18 +55,28 @@ test('every field in a slice must match, not any', () => {
   assert.equal(rowMatches({ outcome: 'purchased', device: 'desktop' }, spec), false);
 });
 
-test('outcome labels are human before they are shown', () => {
-  assert.equal(typeof formatCreateOutcome('purchased'), 'string');
-  assert.ok(formatCreateOutcome('purchased').length > 0);
+test('outcome labels match the server', () => {
+  assert.equal(formatOutcome('purchased'), 'purchased');
+  assert.equal(formatOutcome('checkout'), 'reached checkout');
+  assert.equal(formatOutcome('rest'), 'did not reach checkout');
+  assert.equal(formatOutcome('all'), 'did not purchase');
 });
 
-test('a name is suggested from the fields that are set', () => {
-  const bits = sliceNameBits({ ...emptySlice(), device: 'mobile', outcome: 'purchased' });
-  assert.ok(Array.isArray(bits));
-  const name = suggestCohortName({ ...emptySlice(), device: 'mobile' }, null);
+test('a name is suggested from the same tokens the server uses', () => {
+  assert.deepEqual(
+    sliceNameBits({ ...emptySlice(), device: 'mobile', outcome: 'purchased' }),
+    ['purchased', 'mobile']
+  );
+  assert.deepEqual(sliceNameBits({ ...emptySlice(), outcome: 'all' }), ['did not purchase']);
+  assert.deepEqual(sliceNameBits({ ...emptySlice(), utm_source: 'meta' }), ['Meta']);
+  assert.deepEqual(sliceNameBits({ ...emptySlice(), utm_campaign: 'spring' }), [
+    'campaign=spring',
+  ]);
+  const name = suggestCohortName({ sliceA: { ...emptySlice(), device: 'mobile' } });
   assert.equal(typeof name, 'string');
+  assert.match(name, /mobile/);
 });
 
 test('an unfiltered cohort still gets a name', () => {
-  assert.equal(typeof suggestCohortName(emptySlice(), null), 'string');
+  assert.equal(typeof suggestCohortName({ sliceA: emptySlice() }), 'string');
 });

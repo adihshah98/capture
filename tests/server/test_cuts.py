@@ -252,6 +252,26 @@ class TestSliceLabel(unittest.TestCase):
         )
         self.assertEqual(self.label({}), "everyone else")
 
+    def test_slice_label_is_the_joined_parts(self):
+        spec = slices.normalize_slice({"outcome": ["checkout"], "device": ["mobile"], "page": "/p"})
+        self.assertEqual(slices.slice_label(spec), " · ".join(slices.slice_label_parts(spec)))
+        self.assertEqual(slices.slice_label_parts({}), [])
+
+    def test_cohort_auto_name_uses_the_same_tokens(self):
+        from capture.analyze.labels import _auto_cohort_label
+        from capture.analyze.spec import CohortSpec
+
+        label = _auto_cohort_label(
+            CohortSpec(
+                any_n=10,
+                slice_spec={"outcome": ["checkout", "rest"], "device": ["mobile"]},
+            ),
+            stamp="Jan 1",
+        )
+        self.assertIn("did not purchase", label)
+        self.assertIn("mobile", label)
+        self.assertNotIn("non-purchase", label)
+
 
 class TestSelectRowsByCut(unittest.TestCase):
     def test_an_empty_filter_selects_the_whole_cohort(self):

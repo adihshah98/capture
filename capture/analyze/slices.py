@@ -10,7 +10,8 @@ So normalisation is the contract, not a convenience. `normalize_slice` maps
 every accepted spelling onto one canonical form, which is what makes
 `cut_key` stable across value order and letter case, and what lets
 `row_matches_slice` / `_slice_where` be plain predicates over an
-already-canonical spec.
+already-canonical spec. `slice_label_parts` is the one namer: cuts join it,
+cohort auto-names list it, and the Insights picker mirrors it.
 
 Classifiers live in `capture.classify` so ingest can write the same labels
 without importing the analyze package. This module re-exports them and owns
@@ -44,6 +45,7 @@ __all__ = [
     "row_matches_slice",
     "slice_is_empty",
     "slice_label",
+    "slice_label_parts",
 ]
 
 
@@ -157,14 +159,9 @@ def row_matches_slice(row: dict, spec: dict) -> bool:
         if want_source == "meta":
             if not is_meta_attribution(attrs):
                 return False
-        elif want_source in ("google", "non_meta"):
-            if want_source == "non_meta":
-                if is_meta_attribution(attrs):
-                    return False
-            else:
-                got = str(attrs.get("utm_source") or "").strip().lower()
-                if got != want_source:
-                    return False
+        elif want_source == "non_meta":
+            if is_meta_attribution(attrs):
+                return False
         else:
             got = str(attrs.get("utm_source") or "").strip().lower()
             if got != want_source:
@@ -179,9 +176,14 @@ OUTCOME_LABELS = {
 }
 
 
-def slice_label(spec: dict) -> str:
+def slice_label_parts(spec: dict) -> list:
+    """Human tokens for a normalised slice. Empty means nothing to name.
+
+    Cuts, cohort auto-names, and the Insights picker all join or list these.
+    Changing a wording here is the one place that changes every surface.
+    """
     if not spec:
-        return "everyone else"
+        return []
     parts = []
 
     outcome = spec.get("outcome") or []
@@ -217,6 +219,11 @@ def slice_label(spec: dict) -> str:
     ):
         if spec.get(key):
             parts.append(f"{label}={spec[key]}")
-    if not parts:
-        return "all sessions"
-    return " · ".join(parts)
+    return parts
+
+
+def slice_label(spec: dict) -> str:
+    if not spec:
+        return "everyone else"
+    parts = slice_label_parts(spec)
+    return " · ".join(parts) if parts else "all sessions"

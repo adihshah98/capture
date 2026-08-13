@@ -8,7 +8,6 @@ import { chatInline, chatMarkdown } from './markdown.js';
 import {
   SLICE_FIELDS,
   emptySlice,
-  formatCreateOutcome,
   rowMatches,
   sliceIsEmpty,
   sliceNameBits,
