@@ -116,15 +116,13 @@ class TestSessionFilters(ServerCase):
 
 
 class TestIndexRebuild(ServerCase):
-    def test_index_rebuilds_from_disk_on_startup(self):
+    def test_sessions_survive_a_server_restart(self):
         ids = [f"reb{i}" + "x" * 28 for i in range(3)]
         for sid in ids:
             self.assertEqual(self.ingest(sid), 200)
 
         self.proc.terminate()
         self.proc.wait(timeout=10)
-        for name in ("index.db", "index.db-wal", "index.db-shm"):
-            (self.data_dir / name).unlink(missing_ok=True)
         type(self).start_server()
 
         deadline = time.time() + 10

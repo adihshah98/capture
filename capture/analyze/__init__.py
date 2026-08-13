@@ -9,9 +9,8 @@ Cohort lifecycle (sample, Batch/sync job, resume) lives in `cohorts.py`. A
 cohort is immutable once sampled, so a "cut" across it can be analysed once and
 cached against it (`refresh=1` busts that cache).
 
-Cohort state lives in Postgres (`0003_cohorts.sql`); the `cohorts/<id>.json`
-layout this package used to write is read only by the migration in store.py.
-Sampling defaults are in spec.py, not here.
+Cohort state lives in Postgres (`0003_cohorts.sql`). Sampling defaults are in
+spec.py, not here.
 
 The web layer reaches this package through `capture.analysis_port`. Tests import
 owner modules (`gemini`, `session`, `cuts`, `cohorts`, `runtime`, `storage`, …)

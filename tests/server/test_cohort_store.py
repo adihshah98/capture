@@ -1,12 +1,11 @@
-"""Cohort state in SQLite: the guarantees the JSON documents could not make.
+"""Cohort state in Postgres: the guarantees the JSON documents could not make.
 
 Cohort membership, per-session status and the cut cache used to be JSON files
 rewritten in full by concurrent writers. These pin what the move bought —
-concurrent writers that do not drop each other, reads that never see a torn
-cohort — and the one-time import of the files left over from that layout.
+concurrent writers that do not drop each other, and reads that never see a torn
+cohort.
 """
 
-import json
 import shutil
 import sys
 import tempfile
@@ -189,8 +188,9 @@ class TestConcurrency(StoreCase):
         self.assertEqual({k: v["n"] for k, v in cuts.items()}, {f"key-{i}": i for i in range(40)})
 
     def test_a_read_never_sees_a_torn_cohort(self):
-        """A truncated JSON write made _read_cohort_file return None, so the
-        cohort vanished from the UI along with its in-flight batch job name."""
+        """A truncated JSON write used to make a cohort vanish from the UI
+        along with its in-flight batch job name. Every read is now all 50
+        members or nothing in between — never None, never a partial membership."""
         storage.write_cohort(self.project_id, cohort(n=50))
         stop = threading.Event()
         seen, errors = [], []
@@ -220,74 +220,7 @@ class TestConcurrency(StoreCase):
 
         self.assertEqual(errors, [])
         self.assertTrue(seen, "reader never ran")
-        # Every read is all 50 members or nothing in between — never None,
-        # never a partial membership.
         self.assertEqual(set(seen), {50})
-
-
-class TestMigration(StoreCase):
-    def write_legacy(self, data, cuts=None):
-        directory = self.pool.parent / "cohorts"
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / f"{data['id']}.json").write_text(json.dumps(data))
-        if cuts is not None:
-            (directory / f"{data['id']}.cuts.json").write_text(json.dumps(cuts))
-        return directory
-
-    def import_json(self, directory):
-        return analyze_store.migrate_json_cohorts(
-            analyze_store.connect(), self.project_id, directory, storage.CUTS_SUFFIX
-        )
-
-    def test_json_cohorts_and_cuts_are_imported_then_removed(self):
-        directory = self.write_legacy(
-            cohort(purchased_n=5, label="Old", progress={"total": 3, "done": 3}),
-            cuts={"cut-key": {"headline": "cached"}},
-        )
-        self.import_json(directory)
-        got = storage.read_cohort(self.project_id, "cohort-1")
-        self.assertEqual(got["label"], "Old")
-        self.assertEqual(got["purchased_n"], 5)
-        self.assertEqual(len(got["sessions"]), 3)
-        # The persisted view-only tally does not come along.
-        self.assertNotIn("progress", got)
-        self.assertEqual(
-            storage.read_cut(self.project_id, "cohort-1", "cut-key"), {"headline": "cached"}
-        )
-        # Nothing is left that a later reader could mistake for live state.
-        self.assertFalse(directory.exists())
-
-    def test_import_does_not_roll_back_newer_state(self):
-        """A file that outlived its import must not overwrite the table."""
-        directory = self.write_legacy(cohort(status="idle", label="stale"))
-        self.import_json(directory)
-        storage.write_cohort(
-            self.project_id, {**storage.read_cohort(self.project_id, "cohort-1"), "status": "done"}
-        )
-        # Put the stale file back and import again — existing rows win.
-        directory = self.write_legacy(cohort(status="idle", label="stale"))
-        self.import_json(directory)
-        self.assertEqual(storage.read_cohort(self.project_id, "cohort-1")["status"], "done")
-
-    def test_an_unreadable_cohort_file_is_kept_not_deleted(self):
-        directory = self.pool.parent / "cohorts"
-        directory.mkdir(parents=True, exist_ok=True)
-        broken = directory / "cohort-broken.json"
-        broken.write_text("{ truncated")
-        self.import_json(directory)
-        self.assertEqual(storage.list_cohorts(self.project_id), [])
-        # Deleting it would destroy the only copy of state we failed to import.
-        self.assertTrue(broken.is_file())
-
-    def test_the_pre_multi_cohort_file_still_migrates(self):
-        legacy = self.pool.parent / "cohort.json"
-        legacy.write_text(json.dumps(cohort("cohort-1700000000000", label="Legacy")))
-        storage.migrate_legacy_cohort(self.pool)
-        self.import_json(storage.cohorts_dir(self.pool))
-        got = storage.read_cohort(self.project_id, "cohort-1700000000000")
-        self.assertIsNotNone(got)
-        self.assertEqual(got["label"], "Legacy")
-        self.assertFalse(legacy.exists())
 
 
 class TestSessionDeletion(StoreCase):
@@ -487,22 +420,6 @@ class TestConcurrentMarks(StoreCase):
         self.assertEqual(errors, [])
         got = [s["status"] for s in storage.read_cohort(self.project_id, "c")["sessions"]]
         self.assertEqual(got, ["done"] * 30)
-
-
-class TestPoolLayout(pgfixture.CohortStoreMixin, unittest.TestCase):
-    """data_root_for and pool_key must agree on where a pool sits, or a cohort
-    is written under one key and read under another."""
-
-    def test_default_and_project_pools(self):
-        self.assertEqual(storage.data_root_for(Path("/data/sessions")), Path("/data"))
-        self.assertEqual(storage.pool_key(Path("/data/sessions")), "")
-        self.assertEqual(storage.data_root_for(Path("/data/projects/acme/sessions")), Path("/data"))
-        self.assertEqual(storage.pool_key(Path("/data/projects/acme/sessions")), "acme")
-
-    def test_a_data_root_named_projects_is_not_mistaken_for_one(self):
-        pool = Path("/projects/sessions")
-        self.assertEqual(storage.data_root_for(pool), Path("/projects"))
-        self.assertEqual(storage.pool_key(pool), "")
 
 
 class TestResume(StoreCase):

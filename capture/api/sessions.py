@@ -136,14 +136,28 @@ def session_chunk(
     )
 
 
+def _analysis_session_info(found: projects.Project, session_id: str) -> dict | None:
+    """Order/attribution for a write-up. The index is the record; the directory
+    is only a pre-Postgres fallback. Analysis must not require a local folder —
+    staging is S3-backed and never ingested onto this disk."""
+    info = sessionstore.get(found.id, session_id)
+    if info:
+        return info
+    directory = found.pool / session_id
+    if directory.is_dir():
+        return legacy_sessions.session_info(directory)
+    return None
+
+
 @router.get("/api/sessions/{session_id}/analysis")
 def get_analysis(session_id: str, found: projects.Project = Depends(readable_project)):
-    directory = session_dir(found, session_id)
+    if not SAFE_ID.match(session_id):
+        raise ApiError(400, "invalid session_id")
     cached = ap.session_analysis(found, session_id)
     if cached:
         if "status" not in cached:
             cached = {**cached, "status": "done"}
-        info = legacy_sessions.session_info(directory)
+        info = _analysis_session_info(found, session_id)
         if info:
             if info.get("order"):
                 cached = {**cached, "order": info["order"]}
@@ -167,7 +181,10 @@ async def create_analysis(
     found: projects.Project = Depends(readable_project),
 ):
     jobs.require_runtime()
-    session_dir(found, session_id)
+    if not SAFE_ID.match(session_id):
+        raise ApiError(400, "invalid session_id")
+    # Chunks live in S3 on the staging box; jobs.start_session stages them.
+    # A local-directory 404 here made Analyze unusable on a read-only mirror.
     result = await jobs.start_session(found, session_id, force=force)
     if result.get("accepted"):
         return JSONResponse({"status": "running"}, status_code=202)

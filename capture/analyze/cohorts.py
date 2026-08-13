@@ -23,7 +23,6 @@ from .sampling import sample_cohort
 from .slices import normalize_slice
 from .storage import (
     ANALYSIS_FILE,
-    PROJECTS_DIR,
     clear_analysis,
     clear_job,
     cohorts_dir,
@@ -438,21 +437,6 @@ async def _cohort_sync_model(
         *(one(entry, digest) for entry, digest in prepared),
         return_exceptions=True,
     )
-
-
-def iter_session_pools(data_root: Path) -> list:
-    """Session directories that may own a cohorts/ sibling."""
-    pools = []
-    legacy = data_root / "sessions"
-    if legacy.is_dir():
-        pools.append(legacy)
-    named = data_root / PROJECTS_DIR
-    if named.is_dir():
-        for path in named.iterdir():
-            sessions = path / "sessions"
-            if sessions.is_dir():
-                pools.append(sessions)
-    return pools
 
 
 def cohorts_needing_batch_resume(data_root: Path | None = None) -> list:

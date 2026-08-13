@@ -963,9 +963,7 @@ class TestCutCache(pgfixture.CohortStoreMixin, unittest.TestCase):
         storage.write_cut(self.project_id, "cohort-1", key, {"n": 1})
         self.assertIsNone(storage.read_cut(self.project_id, "cohort-2", key))
 
-    def test_a_bad_cohort_id_never_reaches_the_filesystem(self):
-        with self.assertRaises(ValueError):
-            storage.cuts_path(self.pool, "../../etc/passwd")
+    def test_a_bad_cohort_id_is_refused(self):
         self.assertEqual(storage.read_cuts(self.project_id, "../../etc/passwd"), {})
 
     def test_clearing_a_cut_frees_it_to_be_asked_again(self):

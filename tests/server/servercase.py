@@ -192,9 +192,8 @@ class ServerCase(unittest.TestCase):
     def cohort_store(self):
         """A fresh connection to the cohort tables the server process writes.
 
-        Tests assert on durable state, which used to mean reading
-        cohorts/<id>.json and then index.db. The server owns its own pool in
-        another process; this is the test process's own handle on the same
+        Tests assert on durable state in Postgres. The server owns its own pool
+        in another process; this is the test process's own handle on the same
         database.
         """
         return analyze_store.connect()

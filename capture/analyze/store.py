@@ -16,9 +16,8 @@ than model ones:
   * The per-connection lock is gone. It guarded a `sqlite3.Connection`'s single
     transaction state, not the data; a pooled connection per transaction has no
     such thing to protect.
-  * The transaction is still reentrant, because migrate_json_cohorts calls
-    write_cohort inside its own and the inner call must join it rather than
-    deadlock waiting on a row its own caller holds.
+  * The transaction is still reentrant: a nested call joins the outer
+    transaction instead of waiting on a row its own caller already holds.
 
 `connect()` returns a handle rather than a connection. Callers only ever pass
 it back into this module, and each entry point opens a pooled connection scoped
@@ -27,7 +26,6 @@ sessions.
 """
 
 import json
-import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -444,150 +442,6 @@ def clear_cut(store: Store, project_id: str, cohort_id: str, key: str) -> bool:
             (project_id, cohort_id, key),
         )
     return cur.rowcount > 0
-
-
-def migrate_json_cohorts(store: Store, project_id: str, cohorts_dir: Path, cuts_suffix: str) -> int:
-    """Import cohorts/*.json and *.cuts.json, then delete them.
-
-    Migrate once and leave nothing behind that a later reader could mistake for
-    live state. A cohort already stored wins — a re-run must not roll back
-    newer state from a file that was never cleaned up.
-    """
-    directory = Path(cohorts_dir)
-    if not directory.is_dir():
-        return 0
-
-    # One transaction for the whole import, so two servers starting together
-    # cannot both read "not present" and double-write. The nested write_cohort
-    # and write_cut calls join it rather than opening their own.
-    with store.tx(project_id):
-        moved = _import_dir(store, project_id, directory, cuts_suffix)
-
-    # Non-empty (an unreadable file deliberately kept) means rmdir fails, which
-    # is the correct outcome.
-    try:
-        directory.rmdir()
-    except OSError:
-        pass
-    return moved
-
-
-def _import_dir(store: Store, project_id: str, directory: Path, cuts_suffix: str) -> int:
-    moved = 0
-    for path in sorted(directory.glob("*.json")):
-        if path.name.endswith(cuts_suffix):
-            continue
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, ValueError) as exc:
-            # Leave an unreadable file in place: deleting it would destroy the
-            # only copy of state we failed to import.
-            print(f"cohort migration: skipping {path.name}: {exc}")
-            continue
-        if not isinstance(data, dict) or not isinstance(data.get("id"), str):
-            continue
-        cohort_id = data["id"]
-        if not read_cohort(store, project_id, cohort_id):
-            # `progress` is a tally of `sessions` older writers persisted; it is
-            # view-only now and _split_cohort drops it.
-            write_cohort(store, project_id, data)
-            moved += 1
-
-        cuts_file = directory / f"{cohort_id}{cuts_suffix}"
-        if cuts_file.is_file():
-            try:
-                cuts = json.loads(cuts_file.read_text())
-            except (OSError, ValueError) as exc:
-                print(f"cohort migration: skipping {cuts_file.name}: {exc}")
-                cuts = None
-            if isinstance(cuts, dict):
-                for key, cut in cuts.items():
-                    if isinstance(cut, dict) and not read_cut(store, project_id, cohort_id, key):
-                        write_cut(store, project_id, cohort_id, key, cut)
-                cuts_file.unlink(missing_ok=True)
-        path.unlink(missing_ok=True)
-    return moved
-
-
-def migrate_sqlite_cohorts(sqlite_path: Path) -> dict:
-    """Import cohort state written by the SQLite version of this module.
-
-    The intermediate step: cohorts moved out of JSON documents into
-    <data_root>/index.db before they moved here. Existing rows win, so this is
-    safe to re-run and cannot roll back newer state.
-    """
-    counts = {"cohorts": 0, "sessions": 0, "cuts": 0, "skipped_pools": 0}
-    path = Path(sqlite_path)
-    if not path.is_file():
-        return counts
-
-    legacy = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    legacy.row_factory = sqlite3.Row
-    try:
-        names = {
-            r[0] for r in legacy.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
-        if "cohorts" not in names:
-            return counts
-
-        for row in legacy.execute("SELECT * FROM cohorts").fetchall():
-            handle = row["pool"]
-            project = projects.by_handle(handle)
-            if project is None:
-                counts["skipped_pools"] += 1
-                continue
-            project_id = project.id
-            cohort = dict(json.loads(row["fields"] or "{}"))
-            cohort.update(
-                id=row["id"],
-                status=row["status"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
-            if row["label"] is not None:
-                cohort["label"] = row["label"]
-            if row["batch"]:
-                cohort["batch"] = json.loads(row["batch"])
-            sessions = []
-            for s in legacy.execute(
-                "SELECT * FROM cohort_sessions WHERE pool = ? AND cohort_id = ?"
-                " ORDER BY position",
-                (handle, row["id"]),
-            ).fetchall():
-                entry = dict(json.loads(s["fields"] or "{}"))
-                entry["session_id"] = s["session_id"]
-                for col in ("status", "analysis", "error"):
-                    if s[col] is not None:
-                        entry[col] = s[col]
-                sessions.append(entry)
-            cohort["sessions"] = sessions
-
-            if read_cohort(_store, project_id, row["id"]):
-                continue
-            write_cohort(_store, project_id, cohort)
-            counts["cohorts"] += 1
-            counts["sessions"] += len(sessions)
-
-        if "cohort_cuts" in names:
-            for row in legacy.execute("SELECT * FROM cohort_cuts").fetchall():
-                handle = row["pool"]
-                project = projects.by_handle(handle)
-                if project is None:
-                    continue
-                project_id = project.id
-                try:
-                    cut = json.loads(row["cut"])
-                except (TypeError, ValueError):
-                    continue
-                if not isinstance(cut, dict):
-                    continue
-                if read_cut(_store, project_id, row["cohort_id"], row["key"]):
-                    continue
-                write_cut(_store, project_id, row["cohort_id"], row["key"], cut)
-                counts["cuts"] += 1
-    finally:
-        legacy.close()
-    return counts
 
 
 # --- per-session analysis results and job status ------------------------------

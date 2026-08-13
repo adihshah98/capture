@@ -139,24 +139,6 @@ def latest_cohort(project: Project) -> dict | None:
     return storage.latest_cohort(project.id)
 
 
-def import_legacy_cohorts(project: Project) -> None:
-    """One-time import of the pre-Postgres cohort files. Bridge code.
-
-    Moves cohort.json → cohorts/<id>.json, then imports that directory into
-    Postgres and deletes the files. Safe to call on every list/read: existing
-    stored cohorts win.
-    """
-    from .analyze import store as analyze_store
-
-    storage.migrate_legacy_cohort(project.pool)
-    analyze_store.migrate_json_cohorts(
-        analyze_store.connect(),
-        project.id,
-        storage.cohorts_dir(project.pool),
-        storage.CUTS_SUFFIX,
-    )
-
-
 def rename_cohort(project: Project, cohort_id: str, label: str) -> dict | None:
     return cohort_jobs.rename_cohort(project.id, cohort_id, label)
 

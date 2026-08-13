@@ -34,7 +34,6 @@ def _resolve_cohort_or_404(project: projects.Project, cohort_id: str | None) -> 
         if not cohort:
             raise ApiError(404, "no such cohort")
         return cohort
-    ap.import_legacy_cohorts(project)
     cohort = ap.latest_cohort(project)
     if not cohort:
         raise ApiError(404, "no cohort yet")
@@ -44,7 +43,6 @@ def _resolve_cohort_or_404(project: projects.Project, cohort_id: str | None) -> 
 @router.get("/api/cohorts")
 def list_cohorts(found: projects.Project = Depends(readable_project)):
     """Every cohort in this pool, newest first — membership counts only."""
-    ap.import_legacy_cohorts(found)
     out = []
     for cohort in ap.cohorts(found):
         live = ap.cohort_view(found, cohort)

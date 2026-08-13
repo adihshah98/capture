@@ -1,4 +1,4 @@
-"""Cohorts over HTTP: sampling, listing, rename, delete, retry, and migration."""
+"""Cohorts over HTTP: sampling, listing, rename, delete, and retry."""
 
 import json
 import sys
@@ -439,29 +439,6 @@ class TestCohort(ServerCase):
 
         status, body = request(f"{self.base}/api/cohorts/{cohort_id}", method="DELETE")
         self.assertEqual(status, 404, body)
-
-    def test_legacy_cohort_file_is_migrated_on_read(self):
-        sid = "legacy" + "x" * 26
-        self.assertEqual(self.ingest(sid), 200)
-        self.seed_analysis(sid)
-        legacy = {
-            "id": "cohort-1700000000000",
-            "label": "Sample 1+0",
-            "created_at": 1700000000000,
-            "status": "done",
-            "purchased_n": 1,
-            "all_n": 0,
-            "sessions": [{"session_id": sid, "filter": "purchased", "status": "done"}],
-        }
-        (self.data_dir / "cohort.json").write_text(json.dumps(legacy))
-
-        self.assertIn("cohort-1700000000000", [c["id"] for c in self.cohorts()])
-        migrated = self.stored_cohort("cohort-1700000000000")
-        self.assertEqual(migrated["label"], "Sample 1+0")
-        self.assertEqual([s["session_id"] for s in migrated["sessions"]], [sid])
-        # Both legacy files are consumed, so the migration runs exactly once.
-        self.assertFalse((self.data_dir / "cohort.json").exists())
-        self.assertFalse((self.data_dir / "cohorts" / "cohort-1700000000000.json").exists())
 
     def _cohort_of_one(self, sid):
         """A settled one-session cohort, with cached analysis so it lands done."""
