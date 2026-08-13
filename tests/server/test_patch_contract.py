@@ -10,19 +10,15 @@ single-session path live in `capture.analyze.session`. Cut and chat live in
 `capture.analyze.cohorts`. Tests patch those modules with `unittest.mock.patch`
 (or `patch.object`) at the definition site.
 
-Nothing in the suite still rebinds pipeline edges by assignment on the package
-namespace. PATCHABLE is empty; the AST check below stays so a regression that
-reintroduces package-assignment patching is caught when the name is listed again.
+The package itself is not a facade: production goes through
+`capture.analysis_port`, which imports owner modules, and tests do the same.
+Nothing rebinds pipeline edges by assignment on the package namespace.
 """
 
 import ast
 import asyncio
-import importlib
-import pkgutil
-import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 PACKAGE = Path(__file__).resolve().parent.parent.parent / "capture" / "analyze"
 
@@ -30,68 +26,15 @@ PACKAGE = Path(__file__).resolve().parent.parent.parent / "capture" / "analyze"
 # plausibly rebind later via assignment). A `from .x import <one of these>` is
 # the bug this file exists to catch for that style.
 #
-# Gemini I/O, session extraction, cut/chat, and cohort orchestration moved to
+# Gemini I/O, session extraction, cut/chat, and cohort orchestration live on
 # owner modules; tests patch `capture.analyze.gemini` / `session` / `cuts` /
 # `cohorts` rather than the package. ANALYSIS_ENABLED / ANALYZE_BATCH live on
 # runtime.py for the same reason.
 PATCHABLE = frozenset()
 
 
-# The private hooks the suite reaches that `__all__` deliberately does not list.
-# Underscore-prefixed and not public, but test modules depend on them:
-# `_undeclared_transitions` is cleared between cases,
-# `_gate_loop` is rebound on analyze.runtime to reset the semaphores, and the
-# rest are called directly. They are named here so dropping one is a failure
-# rather than a surprise somewhere downstream.
-EXPECTED_PRIVATE_SURFACE = frozenset(
-    {
-        "_auto_cohort_label",
-        "_batch_jsonl_path",
-        "_batch_response_text",
-        "_batch_state_name",
-        "_clock",
-        "_cohort_sync_model",
-        "_collect_cohort_batch",
-        "_cut_side_text",
-        "_extract_gate",
-        "_gate_loop",
-        "_gates",
-        "_given_facts",
-        "_is_project_pool",
-        "_mark_prepared_still_running",
-        "_model_gate",
-        "_parse_json_object",
-        "_read_cohort_file",
-        "_seconds",
-        "_session_attribution",
-        "_session_model_config",
-        "_session_model_parts",
-        "_undeclared_transitions",
-        "_usable_frames",
-    }
-)
-
-
 def _package_sources():
     return sorted(p for p in PACKAGE.rglob("*.py") if "__pycache__" not in p.parts)
-
-
-def _module_level_names(source: Path) -> set:
-    """Names a module defines at top level: def, async def, class, assignment.
-
-    Imports are excluded on purpose — `json` and `Path` are import plumbing, not
-    surface. Read from the AST rather than from a live module so the answer does
-    not change with whatever ran first.
-    """
-    names = set()
-    for node in ast.parse(source.read_text(), filename=str(source)).body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.Assign):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
-    return names
 
 
 class TestPatchableNamesAreNotBoundAtImport(unittest.TestCase):
@@ -114,183 +57,57 @@ class TestPatchableNamesAreNotBoundAtImport(unittest.TestCase):
                         )
         self.assertEqual(offenders, [], "\n".join(offenders))
 
-    def test_the_package_still_defines_the_patchable_names(self):
-        """Guards the list itself. If a name here is renamed or moved out of the
-        package, this test goes stale silently and stops protecting anything."""
-        from capture import analyze
-
-        missing = [name for name in PATCHABLE if not hasattr(analyze, name)]
-        self.assertEqual(
-            missing,
-            [],
-            f"PATCHABLE lists names the package no longer has: {missing}. "
-            "Update the list, or restore the name.",
-        )
-
 
 class TestPatchingReachesTheCallSite(unittest.TestCase):
     """The contract, demonstrated end to end rather than only asserted."""
 
-    def test_gemini_patches_reach_orchestration_via_the_owner_module(self):
-        """Definition-site patch: orchestrators call gemini.call_gemini through
-        the module object, so mock.patch on that path redirects the pipeline."""
-        from capture import analyze
-
-        async def fake(*a, **k):
-            return "fake"
-
-        with patch.object(analyze.gemini, "call_gemini", fake):
-            self.assertIs(analyze.gemini.call_gemini, fake)
-            # Package re-export tracks the owner module.
-            self.assertIs(analyze.call_gemini, fake)
-
-    def test_session_extractor_patches_reach_digest_via_the_owner_module(self):
-        """Definition-site patch: extract_session_digest looks up run_extractor
-        in session.py, so mock.patch there redirects reconstruction."""
-        from capture import analyze
-
-        async def fake(*a, **k):
-            return {"frames": [], "warnings": []}
-
-        with patch.object(analyze.session, "run_extractor", fake):
-            self.assertIs(analyze.session.run_extractor, fake)
-            self.assertIs(analyze.run_extractor, fake)
-
-    def test_cuts_patches_reach_build_via_the_owner_module(self):
-        """Definition-site patch: build_cut_analysis looks up call_gemini_cut
-        in cuts.py, so mock.patch there redirects the model edge."""
-        from capture import analyze
-
-        async def fake(*a, **k):
-            return analyze.empty_cut_analysis(), {}
-
-        with patch.object(analyze.cuts, "call_gemini_cut", fake):
-            self.assertIs(analyze.cuts.call_gemini_cut, fake)
-            self.assertIs(analyze.call_gemini_cut, fake)
-
-    def test_cohorts_patches_reach_job_via_the_owner_module(self):
-        """Definition-site patch: run_cohort_job looks up _cohort_sync_model
-        in cohorts.py, so mock.patch there redirects the sync fallback."""
-        from capture import analyze
-
-        async def fake(*a, **k):
-            return None
-
-        with patch.object(analyze.cohorts, "_cohort_sync_model", fake):
-            self.assertIs(analyze.cohorts._cohort_sync_model, fake)
-            self.assertIs(analyze._cohort_sync_model, fake)
-
-    def test_submodules_do_not_shadow_the_package_namespace(self):
-        """No submodule may hold a patchable name in its own globals.
-
-        Discovered rather than listed. This named `slices` and `stats` while they
-        were the only leaves, which meant every module extracted afterwards was
-        unchecked until someone remembered to add it — backwards for a test whose
-        whole job is to police new modules.
-        """
-        import capture.analyze
-
-        offenders = {}
-        for info in pkgutil.iter_modules(capture.analyze.__path__):
-            module = importlib.import_module(f"capture.analyze.{info.name}")
-            shared = PATCHABLE & set(vars(module))
-            if shared:
-                offenders[module.__name__] = sorted(shared)
-        self.assertEqual(offenders, {}, f"submodules hold patchable names: {offenders}")
-
     def test_the_gate_loop_is_rebindable_from_runtime(self):
         """`_gates` must read `_gate_loop` out of the namespace tests assign to.
 
-        Test sites reset the gates with `analyze.runtime._gate_loop = None` so a
+        Test sites reset the gates with `runtime._gate_loop = None` so a
         new event loop gets fresh semaphores. That is a *rebind*, not a mutation,
         so it only works while `_gates` resolves the name in the same module the
         assignment lands in (`runtime.py`).
         """
-        from capture import analyze
+        from capture.analyze import runtime
 
         async def gates():
-            return analyze.runtime._gates()
+            return runtime._gates()
 
-        previous = analyze.runtime._gate_loop
+        previous = runtime._gate_loop
         try:
-            analyze.runtime._gate_loop = None
+            runtime._gate_loop = None
             first = asyncio.run(gates())
-            analyze.runtime._gate_loop = None
+            runtime._gate_loop = None
             second = asyncio.run(gates())
             # Fresh objects, or the rebind did not reach the reader.
             self.assertIsNot(first[0], second[0])
             self.assertIsNot(first[1], second[1])
         finally:
-            analyze.runtime._gate_loop = previous
+            runtime._gate_loop = previous
 
 
-class TestThePackageSurfaceIsDeclared(unittest.TestCase):
-    """What the package exposes, pinned.
+class TestThePackageIsNotAFacade(unittest.TestCase):
+    """Owner names live on owner modules. The package does not re-export them."""
 
-    Thirteen test modules and `capture/analysis_port.py` reach names off the
-    package rather than off the module that defines them, so a re-export dropped
-    during a refactor breaks callers far from the edit. Without this, that shows
-    up as a confusing AttributeError somewhere downstream; with it, as one diff
-    naming exactly what went missing.
-
-    The public half is checked against the package's own `__all__` rather than a
-    copy of it -- a second hand-maintained list would just drift from the first.
-    What `__all__` cannot cover is the private hooks the suite reaches, so those
-    are listed above.
-    """
-
-    def test_every_public_name_resolves(self):
-        """`__all__` promises these; a stale entry is a broken `import *`."""
+    def test_the_package_does_not_forward_or_reexport_pipeline_names(self):
         from capture import analyze
 
-        missing = sorted(name for name in analyze.__all__ if not hasattr(analyze, name))
-        self.assertEqual(missing, [], f"__all__ names the package does not have: {missing}")
-
-    def test_all_is_free_of_duplicates(self):
-        from capture import analyze
-
-        duplicated = sorted({n for n in analyze.__all__ if analyze.__all__.count(n) > 1})
-        self.assertEqual(duplicated, [], f"__all__ lists these twice: {duplicated}")
-
-    def test_the_private_hooks_the_suite_reaches_are_present(self):
-        from capture import analyze
-
-        missing = sorted(name for name in EXPECTED_PRIVATE_SURFACE if not hasattr(analyze, name))
-        self.assertEqual(
-            missing,
-            [],
-            f"private names the suite depends on are gone: {missing}. Restore the "
-            "re-export, or drop them from EXPECTED_PRIVATE_SURFACE and from the "
-            "tests that use them.",
-        )
-
-    def test_no_public_definition_is_left_out_of_all(self):
-        """The direction that actually rots: a name added to a submodule, wired
-        into `__init__` and never declared. Read from the AST rather than
-        `vars()` so it does not depend on what has already run -- `_extract_gate`
-        holds None until the first `_gates()` call swaps in a Semaphore.
-        """
-        from capture import analyze
-
-        declared = set()
-        for source in _package_sources():
-            if source.parent == PACKAGE:
-                declared |= _module_level_names(source)
-
-        public = {
+        self.assertFalse(hasattr(analyze, "__getattr__"))
+        leaked = [
             name
-            for name, value in vars(analyze).items()
-            if not name.startswith("_")
-            and not isinstance(value, types.ModuleType)
-            and name in declared
-        }
-        undeclared = sorted(public - set(analyze.__all__))
-        self.assertEqual(
-            undeclared,
-            [],
-            f"reachable off the package but not in __all__: {undeclared}. Add them, "
-            "or make them private.",
-        )
+            for name in (
+                "call_gemini",
+                "run_extractor",
+                "build_cohort",
+                "ANALYSIS_ENABLED",
+                "write_cohort",
+                "CUT_PROMPT",
+                "sample_cohort_rows",
+            )
+            if name in vars(analyze)
+        ]
+        self.assertEqual(leaked, [], f"package still re-exports: {leaked}")
 
 
 if __name__ == "__main__":

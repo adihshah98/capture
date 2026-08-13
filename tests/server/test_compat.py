@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pgfixture
 import psycopg
 
-from capture import analyze, db
+from capture import db
+from capture.analyze import cohorts, sampling
 from capture.analyze.spec import CohortSpec
 
 
@@ -97,7 +98,7 @@ class SamplingCase(unittest.TestCase):
 class TestAnalyzeOnPublicSchema(SamplingCase):
     def test_pool_facets_reads_this_project(self):
         with db.connection(self.alpha) as conn:
-            facets = analyze.pool_facets(conn, str(self.alpha))
+            facets = sampling.pool_facets(conn, str(self.alpha))
         self.assertIn("outcome", facets)
         flat = json.dumps(facets)
         self.assertIn("meta", flat)
@@ -105,7 +106,7 @@ class TestAnalyzeOnPublicSchema(SamplingCase):
 
     def test_sample_cohort_rows_returns_this_project_only(self):
         with db.connection(self.alpha) as conn:
-            rows = analyze.sample_cohort_rows(
+            rows = sampling.sample_cohort_rows(
                 conn, str(self.alpha), CohortSpec(any_n=10, url_contains="")
             )
         ids = sorted(r["session_id"] for r in rows)
@@ -113,7 +114,7 @@ class TestAnalyzeOnPublicSchema(SamplingCase):
 
     def test_a_purchase_is_classified_from_sessions_outcome(self):
         with db.connection(self.alpha) as conn:
-            rows = analyze.sample_cohort_rows(
+            rows = sampling.sample_cohort_rows(
                 conn, str(self.alpha), CohortSpec(any_n=10, url_contains="")
             )
         classified = {r["session_id"]: r["filter"] for r in rows}
@@ -122,7 +123,7 @@ class TestAnalyzeOnPublicSchema(SamplingCase):
 
     def test_build_cohort_composes_a_group(self):
         with db.connection(self.alpha) as conn:
-            cohort = analyze.build_cohort(
+            cohort = cohorts.build_cohort(
                 conn, str(self.alpha), CohortSpec(any_n=2, url_contains="")
             )
         ids = sorted(s["session_id"] for s in cohort["sessions"])
@@ -139,9 +140,7 @@ class TestAnalyzeOnPublicSchema(SamplingCase):
 
     def test_compat_schema_is_gone_after_migrate(self):
         with psycopg.connect(self.admin_url) as conn:
-            row = conn.execute(
-                "SELECT 1 FROM pg_namespace WHERE nspname = 'compat'"
-            ).fetchone()
+            row = conn.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'compat'").fetchone()
         self.assertIsNone(row)
 
     def test_compat_module_is_gone(self):
@@ -164,7 +163,7 @@ class TestSamplingKeepsTenantsApart(SamplingCase):
 
     def test_analyze_cannot_sample_another_project(self):
         with db.connection(self.alpha) as conn:
-            rows = analyze.sample_cohort_rows(
+            rows = sampling.sample_cohort_rows(
                 conn, str(self.beta), CohortSpec(any_n=10, url_contains="")
             )
         self.assertEqual(rows, [])

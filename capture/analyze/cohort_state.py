@@ -8,7 +8,7 @@ actually show, and `project_cohort_status` is the projection that does it.
 Split from `__init__.py` on the same rule as `storage.py`: nothing here reads a
 name the tests patch, and nothing calls back into orchestration. It reads results
 through the storage facade and describes cohorts through `labels.py`, both of
-which sit below it. See the patching contract at the foot of `__init__.py`.
+which sit below it. See `tests/server/test_patch_contract.py`.
 
 `persistable_cohort` is the counterpart to `enrich_cohort_status` and they must
 be read together: enrich lays a view over the stored cohort, persistable strips

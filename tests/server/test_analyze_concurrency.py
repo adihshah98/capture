@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
 
-from capture import analyze
+from capture.analyze import gemini, runtime, session, storage
 
 
 class GateProbe:
@@ -35,26 +35,26 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self._saved = {
-            "ANALYSIS_ENABLED": analyze.runtime.ANALYSIS_ENABLED,
-            "extract": analyze.runtime.ANALYZE_EXTRACT_CONCURRENCY,
-            "model": analyze.runtime.ANALYZE_MODEL_CONCURRENCY,
+            "ANALYSIS_ENABLED": runtime.ANALYSIS_ENABLED,
+            "extract": runtime.ANALYZE_EXTRACT_CONCURRENCY,
+            "model": runtime.ANALYZE_MODEL_CONCURRENCY,
         }
-        analyze.runtime.ANALYSIS_ENABLED = True
+        runtime.ANALYSIS_ENABLED = True
         # Force fresh semaphores bound to this test's loop.
-        analyze.runtime._gate_loop = None
+        runtime._gate_loop = None
         self.addCleanup(self.restore)
 
     def restore(self):
-        analyze.runtime.ANALYSIS_ENABLED = self._saved["ANALYSIS_ENABLED"]
-        analyze.runtime.ANALYZE_EXTRACT_CONCURRENCY = self._saved["extract"]
-        analyze.runtime.ANALYZE_MODEL_CONCURRENCY = self._saved["model"]
-        analyze.runtime._gate_loop = None
+        runtime.ANALYSIS_ENABLED = self._saved["ANALYSIS_ENABLED"]
+        runtime.ANALYZE_EXTRACT_CONCURRENCY = self._saved["extract"]
+        runtime.ANALYZE_MODEL_CONCURRENCY = self._saved["model"]
+        runtime._gate_loop = None
         self.tmp.cleanup()
 
     def run_cohort(self, n=4, extract_n=1, model_n=3):
-        analyze.runtime.ANALYZE_EXTRACT_CONCURRENCY = extract_n
-        analyze.runtime.ANALYZE_MODEL_CONCURRENCY = model_n
-        analyze.runtime._gate_loop = None
+        runtime.ANALYZE_EXTRACT_CONCURRENCY = extract_n
+        runtime.ANALYZE_MODEL_CONCURRENCY = model_n
+        runtime._gate_loop = None
 
         # Mirrors production: a model call outlasts the next extraction, which
         # is the only condition under which overlapping them buys anything.
@@ -78,15 +78,12 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
 
         async def main():
             await asyncio.gather(
-                *(
-                    analyze.analyze_session(project_id, d, ["chunk.json"], force=True)
-                    for d in dirs
-                )
+                *(session.analyze_session(project_id, d, ["chunk.json"], force=True) for d in dirs)
             )
 
         with (
-            patch.object(analyze.session, "run_extractor", fake_extract),
-            patch.object(analyze.gemini, "call_gemini", fake_gemini),
+            patch.object(session, "run_extractor", fake_extract),
+            patch.object(gemini, "call_gemini", fake_gemini),
         ):
             asyncio.run(main())
         return extract_probe, model_probe, dirs
@@ -104,7 +101,7 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
     def test_each_session_still_writes_its_results(self):
         _, _, dirs = self.run_cohort(n=3)
         for d in dirs:
-            saved = analyze.read_analysis(self._pg_project, d.name)
+            saved = storage.read_analysis(self._pg_project, d.name)
             self.assertEqual(saved["status"], "done")
             self.assertIn("What stands out", saved["text"])
 

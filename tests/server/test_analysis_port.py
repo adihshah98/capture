@@ -36,15 +36,30 @@ NAMED = Project(
     is_default=False,
 )
 
+# Owner modules the port calls through. Patching them here means a test that
+# reaches the real analysis package fails loudly instead of doing work.
+_PORT_MODULES = (
+    "storage",
+    "runtime",
+    "sampling",
+    "session",
+    "cohort_jobs",
+    "cohort_state",
+    "cuts",
+    "gemini",
+    "labels",
+)
+
 
 class PortCase(unittest.TestCase):
-    """Every test swaps capture.analyze for a MagicMock, so a call that reaches
-    the real analysis package fails loudly instead of doing work."""
-
     def setUp(self):
-        patcher = mock.patch.object(port, "analyze")
-        self.analyze = patcher.start()
-        self.addCleanup(patcher.stop)
+        for name in _PORT_MODULES:
+            mock.patch.object(port, name).start()
+        self.addCleanup(mock.patch.stopall)
+        self.storage = port.storage
+        self.runtime = port.runtime
+        self.sampling = port.sampling
+        self.cuts = port.cuts
 
 
 class TestProjectIsTheIdentity(PortCase):
@@ -52,28 +67,27 @@ class TestProjectIsTheIdentity(PortCase):
 
     def test_cohort_calls_are_addressed_by_project_id(self):
         port.cohort(NAMED, "c1")
-        self.analyze.read_cohort.assert_called_once_with(NAMED.id, "c1")
+        self.storage.read_cohort.assert_called_once_with(NAMED.id, "c1")
 
     def test_the_default_project_uses_its_uuid(self):
         port.cohort(DEFAULT, "c1")
-        self.analyze.read_cohort.assert_called_once_with(DEFAULT.id, "c1")
+        self.storage.read_cohort.assert_called_once_with(DEFAULT.id, "c1")
 
     def test_sampling_calls_are_addressed_by_project_id(self):
         conn = object()
         port.pool_facets(conn, NAMED, min_duration_ms=5000)
-        self.analyze.pool_facets.assert_called_once_with(conn, NAMED.id, min_duration_ms=5000)
+        self.sampling.pool_facets.assert_called_once_with(conn, NAMED.id, min_duration_ms=5000)
 
     def test_session_jobs_are_addressed_by_project_id(self):
         port.job(NAMED, "sess1")
-        self.analyze.read_job.assert_called_once_with(NAMED.id, "sess1")
+        self.storage.read_job.assert_called_once_with(NAMED.id, "sess1")
 
     def test_two_projects_never_share_a_job_key(self):
         port.job(DEFAULT, "sess1")
         port.job(NAMED, "sess1")
-        first, second = (c[0][:2] for c in self.analyze.read_job.call_args_list)
+        first, second = (c[0][:2] for c in self.storage.read_job.call_args_list)
         self.assertNotEqual(first, second)
         self.assertEqual(first[1], second[1])  # same session_id
-
 
 
 class TestReadAtCallTime(PortCase):
@@ -81,28 +95,28 @@ class TestReadAtCallTime(PortCase):
     ANALYSIS_ENABLED and 5 replace stream_gemini_chat."""
 
     def test_enabled_follows_a_patched_flag(self):
-        self.analyze.ANALYSIS_ENABLED = False
+        self.runtime.ANALYSIS_ENABLED = False
         self.assertFalse(port.enabled())
-        self.analyze.ANALYSIS_ENABLED = True
+        self.runtime.ANALYSIS_ENABLED = True
         self.assertTrue(port.enabled())
 
     def test_enabled_is_a_bool_even_when_the_flag_is_a_key(self):
-        self.analyze.ANALYSIS_ENABLED = "some-api-key"
+        self.runtime.ANALYSIS_ENABLED = "some-api-key"
         self.assertIs(port.enabled(), True)
 
     def test_stream_chat_resolves_the_replaced_function(self):
         sentinel = object()
-        self.analyze.stream_gemini_chat.return_value = sentinel
+        self.cuts.stream_gemini_chat.return_value = sentinel
         got = port.stream_chat(["row"], "label", "given", [{"role": "user"}])
         self.assertIs(got, sentinel)
-        self.analyze.stream_gemini_chat.assert_called_once_with(
+        self.cuts.stream_gemini_chat.assert_called_once_with(
             ["row"], "label", "given", [{"role": "user"}], None
         )
 
 
 class TestPrivateAccessIsContained(PortCase):
     def test_model_gate_takes_the_second_gate(self):
-        self.analyze._gates.return_value = (3, 7)
+        self.runtime._gates.return_value = (3, 7)
         self.assertEqual(port.model_gate(), 7)
 
     def test_gates_is_the_only_private_the_port_reaches_for(self):
@@ -110,23 +124,22 @@ class TestPrivateAccessIsContained(PortCase):
         not count as a second use. A new name here means the boundary leaked."""
         tree = ast.parse(Path(port.__file__).read_text())
         privates = sorted(
-            node.attr
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "analyze"
-            and node.attr.startswith("_")
+            {
+                node.attr
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in {*_PORT_MODULES, "runtime"}
+                and node.attr.startswith("_")
+            }
         )
         self.assertEqual(privates, ["_gates"])
 
 
-class TestClassify(PortCase):
+class TestClassify(unittest.TestCase):
     def test_it_returns_the_three_columns_a_cut_slices_on(self):
-        self.analyze.device_class.return_value = "mobile"
-        self.analyze.outcome_class.return_value = "purchased"
-        self.analyze.page_path.return_value = "/pages/x"
         self.assertEqual(
-            port.classify({"type": "mobile"}, {"purchased_at": 1}, "https://x/pages/x?a=b"),
+            port.classify({"width": 375}, {"purchased_at": 1}, "https://x/pages/x?a=b"),
             {"device": "mobile", "outcome": "purchased", "page": "/pages/x"},
         )
 

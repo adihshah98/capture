@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from servercase import ServerCase, request
 
-from capture import analyze
+from capture.analyze import storage
 
 
 class TestAnalysisStatus(ServerCase):
@@ -19,7 +19,7 @@ class TestAnalysisStatus(ServerCase):
     def test_get_returns_cached_analysis(self):
         sid = "a" * 32
         self.assertEqual(self.ingest(sid), 200)
-        analyze.write_analysis(
+        storage.write_analysis(
             self.project_id,
             sid,
             {"text": "hello", "model": "test", "frame_count": 1, "warnings": []},
@@ -33,7 +33,7 @@ class TestAnalysisStatus(ServerCase):
     def test_get_returns_running_job(self):
         sid = "b" * 32
         self.assertEqual(self.ingest(sid), 200)
-        analyze.write_job(self.project_id, sid, "running")
+        storage.write_job(self.project_id, sid, "running")
         status, body = request(f"{self.base}/api/sessions/{sid}/analysis")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["status"], "running")

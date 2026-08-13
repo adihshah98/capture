@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from servercase import ServerCase, request
 
-from capture import analyze
+from capture.analyze import cuts, slices, storage
 
 
 class TestCutEndpoint(ServerCase):
@@ -24,7 +24,7 @@ class TestCutEndpoint(ServerCase):
         self.assertEqual(self.ingest(sid), 200)
         if purchased:
             self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-        analyze.write_analysis(
+        storage.write_analysis(
             self.project_id,
             sid,
             {"text": f"write-up for {sid[:6]}", "model": "test", "warnings": []},
@@ -67,11 +67,9 @@ class TestCutEndpoint(ServerCase):
         self.assertEqual(self.stored_cuts(cohort_id), {})
 
     def test_a_cached_cut_is_served_without_run(self):
-        from capture import analyze
-
         cohort_id = self.a_cohort()
-        key = analyze.cut_key({"outcome": "purchased"})
-        analyze.write_cut(
+        key = cuts.cut_key({"outcome": "purchased"})
+        storage.write_cut(
             self.project_id,
             cohort_id,
             key,
@@ -100,15 +98,13 @@ class TestCutEndpoint(ServerCase):
 
         A key without the prompt hash is exactly what a pre-fix cut looks like.
         """
-        from capture import analyze
-
         cohort_id = self.a_cohort()
         stale_key = json.dumps(
-            {"filter": analyze.normalize_slice({"outcome": "purchased"})},
+            {"filter": slices.normalize_slice({"outcome": "purchased"})},
             sort_keys=True,
             separators=(",", ":"),
         )
-        analyze.write_cut(
+        storage.write_cut(
             self.project_id,
             cohort_id,
             stale_key,
@@ -122,20 +118,15 @@ class TestCutEndpoint(ServerCase):
         self.assertNotEqual(json.loads(body)["cut"], stale_key)
 
     def test_the_served_cut_key_carries_the_prompt_version(self):
-        from capture import analyze
-
         cohort_id = self.a_cohort()
         _, body = request(f"{self.base}/api/cohorts/{cohort_id}/cut?outcome=purchased")
         served = json.loads(json.loads(body)["cut"])
-        self.assertEqual(served["prompt"], analyze.prompt_version(analyze.CUT_PROMPT))
+        self.assertEqual(served["prompt"], cuts.prompt_version(cuts.CUT_PROMPT))
 
     def test_each_filter_is_cached_separately(self):
-        from capture import analyze
-
         cohort_id = self.a_cohort()
-        key = analyze.cut_key({"outcome": "purchased"})
-        analyze.write_cut(
-            self.project_id, cohort_id, key, {"cut": key, "analysis": {}})
+        key = cuts.cut_key({"outcome": "purchased"})
+        storage.write_cut(self.project_id, cohort_id, key, {"cut": key, "analysis": {}})
         # A different filter is a different key, so it is still a miss.
         status, _ = request(f"{self.base}/api/cohorts/{cohort_id}/cut?utm_source=google")
         self.assertEqual(status, 404)
@@ -146,10 +137,8 @@ class TestCutEndpoint(ServerCase):
         self.assertIn("no such cohort", json.loads(body)["error"])
 
     def _cache_a_cut(self, cohort_id):
-        from capture import analyze
-
-        key = analyze.cut_key({"outcome": "purchased"})
-        analyze.write_cut(
+        key = cuts.cut_key({"outcome": "purchased"})
+        storage.write_cut(
             self.project_id,
             cohort_id,
             key,
@@ -158,8 +147,6 @@ class TestCutEndpoint(ServerCase):
         return key
 
     def test_refresh_drops_the_cached_answer_and_queues_a_new_call(self):
-        from capture import analyze
-
         cohort_id = self.a_cohort()
         key = self._cache_a_cut(cohort_id)
         status, body = request(
@@ -169,7 +156,7 @@ class TestCutEndpoint(ServerCase):
         self.assertEqual(json.loads(body)["status"], "running")
         # The stale answer is gone, so nothing can serve it while the run is in
         # flight — the point of the refresh.
-        self.assertIsNone(analyze.read_cut(self.project_id, cohort_id, key))
+        self.assertIsNone(storage.read_cut(self.project_id, cohort_id, key))
 
     def test_refresh_on_a_cut_that_was_never_cached_just_runs(self):
         cohort_id = self.a_cohort()
@@ -212,7 +199,7 @@ class TestCutSlices(ServerCase):
                 self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
             elif outcome == "checkout":
                 self.assertEqual(self.order(sid, {"event": "checkout_started"}), 200)
-            analyze.write_analysis(
+            storage.write_analysis(
                 self.project_id,
                 sid,
                 {"text": f"write-up {outcome}", "model": "test", "warnings": []},
@@ -334,10 +321,8 @@ class TestCutSlices(ServerCase):
         self.assertNotEqual(json.loads(page_a)["cut"], json.loads(page_b)["cut"])
 
     def test_an_empty_filter_is_the_whole_cohort_cut(self):
-        from capture import analyze
-
         _, body = self.cut("")
-        self.assertEqual(json.loads(body)["cut"], analyze.cut_key(None))
+        self.assertEqual(json.loads(body)["cut"], cuts.cut_key(None))
 
     def test_bad_slice_values_are_rejected(self):
         for query, word in (

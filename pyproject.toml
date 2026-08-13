@@ -41,10 +41,6 @@ ignore = [
     # isinstance(x, int | float) is slower than the tuple form in CPython, and
     # every site here is on the ingest path. Not worth throughput for syntax.
     "UP038",
-    # capture/analyze's __all__ is grouped by concern (persistence, cuts, batch,
-    # orchestration) with a comment per group, which is how a reader finds the
-    # name they want. Alphabetising it would interleave the groups and lose that.
-    "RUF022",
 ]
 
 [tool.ruff.lint.per-file-ignores]

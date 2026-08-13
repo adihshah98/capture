@@ -200,7 +200,7 @@ class ServerCase(unittest.TestCase):
         return analyze_store.connect()
 
     def stored_cohort(self, cohort_id, project_id=None):
-        """The cohort as persisted, or None. Mirrors analyze.read_cohort."""
+        """The cohort as persisted, or None. Mirrors storage.read_cohort."""
         pid = project_id if project_id is not None else self.project_id
         return analyze_store.read_cohort(self.cohort_store(), pid, cohort_id)
 

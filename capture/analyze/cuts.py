@@ -2,8 +2,8 @@
 
 Owns cache keys (`cut_key`), the shared evidence block (`cut_context`), the
 cut write-up (`call_gemini_cut` / `build_cut_analysis`), and the follow-up chat
-(`stream_gemini_chat` / `chat_context`). Orchestrators and the package re-export
-call through this module so tests can
+(`stream_gemini_chat` / `chat_context`). Orchestrators call through this module
+so tests can
 `mock.patch("capture.analyze.cuts.call_gemini_cut", ...)` at the definition site.
 """
 

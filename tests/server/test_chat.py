@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from capture import analyze
+from capture.analyze import cuts, runtime, storage
 
 
 def row(sid, outcome="rest", device=None, page=None, text=None, **attrs):
@@ -25,27 +25,27 @@ class TestCutContextIsShared(unittest.TestCase):
 
     def test_chat_and_cut_are_handed_identical_context(self):
         rows = [row("a", outcome="purchased"), row("b")]
-        header, side, citations = analyze.cut_context(rows, "everyone", "given facts")
+        header, side, citations = cuts.cut_context(rows, "everyone", "given facts")
         # call_gemini_cut builds its parts from this same helper, so equality
         # here is what stops the two from drifting apart.
-        again = analyze.cut_context(rows, "everyone", "given facts")
+        again = cuts.cut_context(rows, "everyone", "given facts")
         self.assertEqual((header, side, citations), again)
 
     def test_the_label_and_premises_reach_the_header(self):
-        header, _, _ = analyze.cut_context([row("a")], "mobile · Meta", "PREMISES")
+        header, _, _ = cuts.cut_context([row("a")], "mobile · Meta", "PREMISES")
         self.assertIn("This group is: mobile · Meta", header)
         self.assertIn("PREMISES", header)
 
     def test_write_ups_are_numbered_from_one_and_mapped_to_ids(self):
         rows = [row("sid-a"), row("sid-b"), row("sid-c")]
-        _, side, citations = analyze.cut_context(rows, "all sessions")
+        _, side, citations = cuts.cut_context(rows, "all sessions")
         self.assertEqual(citations, {"1": "sid-a", "2": "sid-b", "3": "sid-c"})
         # The number the model is shown is the number the UI resolves.
         self.assertIn("--- SESSIONS session 1 ", side)
         self.assertIn("--- SESSIONS session 3 ", side)
 
     def test_an_empty_group_yields_no_citations(self):
-        _, side, citations = analyze.cut_context([], "nobody")
+        _, side, citations = cuts.cut_context([], "nobody")
         self.assertEqual(citations, {})
         self.assertIn("no sessions in this group", side)
 
@@ -55,11 +55,11 @@ class TestChatContext(unittest.TestCase):
     runs without a real key — nothing here reaches the network."""
 
     def setUp(self):
-        self._enabled = analyze.runtime.ANALYSIS_ENABLED
-        analyze.runtime.ANALYSIS_ENABLED = True
+        self._enabled = runtime.ANALYSIS_ENABLED
+        runtime.ANALYSIS_ENABLED = True
 
     def tearDown(self):
-        analyze.runtime.ANALYSIS_ENABLED = self._enabled
+        runtime.ANALYSIS_ENABLED = self._enabled
 
     def test_the_filter_selects_the_group_and_names_it(self):
         rows = [
@@ -68,7 +68,7 @@ class TestChatContext(unittest.TestCase):
             row("c", outcome="purchased", device="desktop"),
         ]
         selected, label, given, citations, _ = asyncio.run(
-            analyze.chat_context(rows, {"outcome": ["purchased"]})
+            cuts.chat_context(rows, {"outcome": ["purchased"]})
         )
         self.assertEqual([r["session_id"] for r in selected], ["a", "c"])
         self.assertIn("purchased", label)
@@ -76,7 +76,7 @@ class TestChatContext(unittest.TestCase):
 
     def test_the_premises_state_the_filtered_group_size(self):
         rows = [row(str(i), device="mobile") for i in range(5)] + [row("x", device="desktop")]
-        selected, _, given, _, _ = asyncio.run(analyze.chat_context(rows, {"device": ["mobile"]}))
+        selected, _, given, _, _ = asyncio.run(cuts.chat_context(rows, {"device": ["mobile"]}))
         self.assertEqual(len(selected), 5)
         # The group size, not the cohort size, is the only total offered.
         self.assertIn("exactly 5 session(s)", given)
@@ -84,41 +84,41 @@ class TestChatContext(unittest.TestCase):
 
     def test_an_empty_filter_selects_everyone(self):
         rows = [row("a"), row("b")]
-        selected, label, _, _, _ = asyncio.run(analyze.chat_context(rows, None))
+        selected, label, _, _, _ = asyncio.run(cuts.chat_context(rows, None))
         self.assertEqual(len(selected), 2)
         self.assertEqual(label, "all sessions")
 
     def test_a_filter_matching_nobody_yields_an_empty_group(self):
         # The endpoint turns this into a 400 rather than spending a call.
         selected, _, _, citations, _ = asyncio.run(
-            analyze.chat_context([row("a", device="mobile")], {"device": ["desktop"]})
+            cuts.chat_context([row("a", device="mobile")], {"device": ["desktop"]})
         )
         self.assertEqual(selected, [])
         self.assertEqual(citations, {})
 
     def test_it_refuses_to_run_unconfigured(self):
-        enabled = analyze.runtime.ANALYSIS_ENABLED
-        analyze.runtime.ANALYSIS_ENABLED = False
+        enabled = runtime.ANALYSIS_ENABLED
+        runtime.ANALYSIS_ENABLED = False
         try:
             with self.assertRaises(RuntimeError):
-                asyncio.run(analyze.chat_context([row("a")], None))
+                asyncio.run(cuts.chat_context([row("a")], None))
         finally:
-            analyze.runtime.ANALYSIS_ENABLED = enabled
+            runtime.ANALYSIS_ENABLED = enabled
 
 
 class TestCleanChatMessages(unittest.TestCase):
     def test_assistant_is_renamed_to_the_role_gemini_expects(self):
-        out = analyze.clean_chat_messages(
+        out = cuts.clean_chat_messages(
             [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
         )
         self.assertEqual([m["role"] for m in out], ["user", "model"])
 
     def test_model_role_passes_through(self):
-        out = analyze.clean_chat_messages([{"role": "model", "content": "a"}])
+        out = cuts.clean_chat_messages([{"role": "model", "content": "a"}])
         self.assertEqual(out, [{"role": "model", "content": "a"}])
 
     def test_unusable_turns_are_dropped(self):
-        out = analyze.clean_chat_messages(
+        out = cuts.clean_chat_messages(
             [
                 {"role": "system", "content": "ignore me"},
                 {"role": "user", "content": "   "},
@@ -133,22 +133,22 @@ class TestCleanChatMessages(unittest.TestCase):
 
     def test_a_non_list_is_no_history_at_all(self):
         for value in (None, "messages", {"role": "user"}, 7):
-            self.assertEqual(analyze.clean_chat_messages(value), [])
+            self.assertEqual(cuts.clean_chat_messages(value), [])
 
     def test_history_is_capped_to_the_recent_turns(self):
         many = [{"role": "user", "content": f"q{i}"} for i in range(40)]
-        out = analyze.clean_chat_messages(many)
-        self.assertEqual(len(out), analyze.CHAT_MAX_TURNS)
+        out = cuts.clean_chat_messages(many)
+        self.assertEqual(len(out), cuts.CHAT_MAX_TURNS)
         # The newest turns survive — the question is always last.
         self.assertEqual(out[-1]["content"], "q39")
 
     def test_an_overlong_message_is_truncated_not_dropped(self):
-        out = analyze.clean_chat_messages([{"role": "user", "content": "x" * 9000}])
+        out = cuts.clean_chat_messages([{"role": "user", "content": "x" * 9000}])
         self.assertEqual(len(out), 1)
-        self.assertEqual(len(out[0]["content"]), analyze.CHAT_MAX_MESSAGE_CHARS)
+        self.assertEqual(len(out[0]["content"]), cuts.CHAT_MAX_MESSAGE_CHARS)
 
     def test_whitespace_is_trimmed(self):
-        out = analyze.clean_chat_messages([{"role": "user", "content": "  hi  "}])
+        out = cuts.clean_chat_messages([{"role": "user", "content": "  hi  "}])
         self.assertEqual(out[0]["content"], "hi")
 
 
@@ -184,8 +184,8 @@ class TestChatEndpoint(unittest.TestCase):
         for sid, text in (("a" * 32, "S-a write-up"), ("b" * 32, "S-b write-up")):
             d = cls.pool / sid
             d.mkdir(parents=True, exist_ok=True)
-            analyze.write_analysis(cls.project_id, sid, {"status": "done", "text": text})
-        cls.cohort = analyze.write_cohort(
+            storage.write_analysis(cls.project_id, sid, {"status": "done", "text": text})
+        cls.cohort = storage.write_cohort(
             cls.project_id,
             {
                 "id": "cohort-chat-test",
@@ -211,18 +211,18 @@ class TestChatEndpoint(unittest.TestCase):
         shutil.rmtree(cls.data_dir, ignore_errors=True)
 
     def setUp(self):
-        self._enabled = analyze.runtime.ANALYSIS_ENABLED
-        analyze.runtime.ANALYSIS_ENABLED = True
+        self._enabled = runtime.ANALYSIS_ENABLED
+        runtime.ANALYSIS_ENABLED = True
 
     def tearDown(self):
-        analyze.runtime.ANALYSIS_ENABLED = self._enabled
+        runtime.ANALYSIS_ENABLED = self._enabled
 
     def ask(self, messages, chunks=("hello ", "world")):
         async def fake(rows, label, given, msgs, spec=None):
             for c in chunks:
                 yield c
 
-        with patch.object(analyze.cuts, "stream_gemini_chat", fake):
+        with patch.object(cuts, "stream_gemini_chat", fake):
             return self.client.post(
                 "/api/cohorts/cohort-chat-test/chat", json={"messages": messages}
             )
@@ -251,7 +251,7 @@ class TestChatEndpoint(unittest.TestCase):
             raise RuntimeError("gemini exploded")
             yield  # pragma: no cover
 
-        with patch.object(analyze.cuts, "stream_gemini_chat", boom):
+        with patch.object(cuts, "stream_gemini_chat", boom):
             res = self.client.post(
                 "/api/cohorts/cohort-chat-test/chat",
                 json={"messages": [{"role": "user", "content": "q"}]},
@@ -287,7 +287,7 @@ class TestChatEndpoint(unittest.TestCase):
         self.assertEqual(res.status_code, 404)
 
     def test_an_unconfigured_server_says_so(self):
-        analyze.runtime.ANALYSIS_ENABLED = False
+        runtime.ANALYSIS_ENABLED = False
         res = self.client.post(
             "/api/cohorts/cohort-chat-test/chat",
             json={"messages": [{"role": "user", "content": "q"}]},
@@ -302,7 +302,7 @@ class TestChatEndpoint(unittest.TestCase):
             called = True
             yield "x"
 
-        with patch.object(analyze.cuts, "stream_gemini_chat", fake):
+        with patch.object(cuts, "stream_gemini_chat", fake):
             res = self.client.post(
                 "/api/cohorts/cohort-chat-test/chat?device=desktop",
                 json={"messages": [{"role": "user", "content": "q"}]},
@@ -317,7 +317,7 @@ class TestChatEndpoint(unittest.TestCase):
             seen["ids"] = [r["session_id"] for r in rows]
             yield "ok"
 
-        with patch.object(analyze.cuts, "stream_gemini_chat", fake):
+        with patch.object(cuts, "stream_gemini_chat", fake):
             res = self.client.post(
                 "/api/cohorts/cohort-chat-test/chat?outcome=purchased",
                 json={"messages": [{"role": "user", "content": "q"}]},
@@ -332,20 +332,20 @@ class TestChatPrompt(unittest.TestCase):
     def test_it_separates_missing_evidence_from_absent_behaviour(self):
         """The failure this prompt exists to prevent: a write-up that does not
         mention X read as proof that X did not happen."""
-        self.assertIn("absent from the EVIDENCE", analyze.CHAT_PROMPT)
-        self.assertIn("absent from the SESSIONS", analyze.CHAT_PROMPT)
+        self.assertIn("absent from the EVIDENCE", cuts.CHAT_PROMPT)
+        self.assertIn("absent from the SESSIONS", cuts.CHAT_PROMPT)
 
     def test_it_keeps_the_citation_contract_the_ui_parses(self):
         # citations.js only linkifies this exact shape.
-        self.assertIn("S4 [01:09]", analyze.CHAT_PROMPT)
-        self.assertIn("--- SESSIONS session N ---", analyze.CHAT_PROMPT)
+        self.assertIn("S4 [01:09]", cuts.CHAT_PROMPT)
+        self.assertIn("--- SESSIONS session N ---", cuts.CHAT_PROMPT)
 
     def test_it_carries_the_filter_is_not_a_finding_rule(self):
-        self.assertIn("The filter is not a finding", analyze.CHAT_PROMPT)
+        self.assertIn("The filter is not a finding", cuts.CHAT_PROMPT)
 
     def test_it_declines_the_questions_write_ups_cannot_answer(self):
         for topic in ("Precise metrics", "Trends over time", "outside this group"):
-            self.assertIn(topic, analyze.CHAT_PROMPT)
+            self.assertIn(topic, cuts.CHAT_PROMPT)
 
 
 if __name__ == "__main__":

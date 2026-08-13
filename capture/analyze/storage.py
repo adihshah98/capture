@@ -5,9 +5,8 @@ cohort state live in Postgres; Path appears only for recording files (chunks)
 and regenerable scratch under `.analysis/`.
 
 It is deliberately leaf-ward. Nothing here reads a name the tests patch -- no
-prompts, no model config, no `_gates` -- and nothing calls back into the
-orchestration in `__init__.py`. That is what makes it separable at all; see the
-patching contract at the foot of `__init__.py` and
+prompts, no model config, no `_gates` -- and nothing calls back into
+orchestration. That is what makes it separable at all; see
 `tests/server/test_patch_contract.py`.
 
 The legacy JSON layouts (`cohort.json`, `cohorts/*.json`) are read only by the
@@ -83,9 +82,7 @@ def clear_job(project_id: str, session_id: str) -> None:
     analyze_store.clear_job(analyze_store.connect(), project_id, session_id)
 
 
-def clear_analysis(
-    project_id: str, session_id: str, *, session_dir: Path | None = None
-) -> None:
+def clear_analysis(project_id: str, session_id: str, *, session_dir: Path | None = None) -> None:
     """Drop a finished result so a re-analyze starts clean.
 
     Also clears local `.analysis` scratch (and best-effort legacy sidecars) when

@@ -1,7 +1,7 @@
 """Where a visitor came from, read off their entry URL.
 
 One parser, deliberately. There were two: `server.parse_attribution` for the
-index and `analyze._session_attribution` for the prompt metadata, kept in step by
+index and `gemini._session_attribution` for the prompt metadata, kept in step by
 a comment saying "change both together". They diverged anyway -- which is the
 whole argument for this module existing rather than the comment being reworded.
 

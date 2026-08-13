@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pgfixture
 
-from capture import analyze
+from capture.analyze import cohort_state, storage
 from capture.analyze import store as analyze_store
 
 BASELINE = json.loads(
@@ -49,7 +49,7 @@ def cohort_of(stored, done, error, queued, *, writeups=True, project_id=None):
         sid = f"d{i}"
         sessions.append({"session_id": sid, "status": "done"})
         if writeups and project_id is not None:
-            analyze.write_analysis(project_id, sid, {"text": "write-up"})
+            storage.write_analysis(project_id, sid, {"text": "write-up"})
     sessions += [{"session_id": f"e{i}", "status": "error"} for i in range(error)]
     sessions += [{"session_id": f"q{i}", "status": "queued"} for i in range(queued)]
     cohort = {"id": "c", "sessions": sessions}
@@ -78,7 +78,7 @@ class TestStatusBaseline(pgfixture.CohortStoreMixin, unittest.TestCase):
             shutil.rmtree(path, ignore_errors=True)
         # Write-ups live in the store now, so clearing directories no longer
         # resets them and a case with writeups=False would inherit the last one.
-        analyze.forget_analyses(self.project_id)
+        storage.forget_analyses(self.project_id)
         return cohort_of(
             case["stored"],
             case["done"],
@@ -92,7 +92,7 @@ class TestStatusBaseline(pgfixture.CohortStoreMixin, unittest.TestCase):
         mismatches = []
         for case in BASELINE:
             key = (case["writeups"], case["stored"], case["done"], case["error"], case["queued"])
-            got = analyze.enrich_cohort_status(self.project_id, self.build(case))["status"]
+            got = cohort_state.enrich_cohort_status(self.project_id, self.build(case))["status"]
             expect = KNOWN_DIVERGENCES.get(key, (case["expect"], None))[0]
             if got != expect:
                 mismatches.append(f"{key}: expected {expect}, got {got}")
@@ -101,7 +101,7 @@ class TestStatusBaseline(pgfixture.CohortStoreMixin, unittest.TestCase):
     def test_progress_tallies_are_unchanged(self):
         for case in BASELINE:
             key = (case["writeups"], case["stored"], case["done"], case["error"], case["queued"])
-            got = analyze.enrich_cohort_status(self.project_id, self.build(case))["progress"]
+            got = cohort_state.enrich_cohort_status(self.project_id, self.build(case))["progress"]
             self.assertEqual(got, case["progress"], f"progress changed for {key}")
 
     def test_the_baseline_covers_both_the_write_up_and_stale_cases(self):
@@ -140,7 +140,7 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
     def cohort(self, n=1, status="done"):
-        analyze.write_cohort(
+        storage.write_cohort(
             self.project_id,
             {
                 "id": "c",
@@ -155,32 +155,34 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
         for i in range(n):
             directory = self.pool / f"s{i}"
             directory.mkdir(exist_ok=True)
-            analyze.write_analysis(self.project_id, directory.name, {"text": "write-up"})
+            storage.write_analysis(self.project_id, directory.name, {"text": "write-up"})
         self.addCleanup(analyze_store.close_all)
-        return analyze.read_cohort(self.project_id, "c")
+        return storage.read_cohort(self.project_id, "c")
 
     def live(self):
-        return analyze.enrich_cohort_status(self.project_id, analyze.read_cohort(self.project_id, "c"))
+        return cohort_state.enrich_cohort_status(
+            self.project_id, storage.read_cohort(self.project_id, "c")
+        )
 
     def test_a_missing_write_up_is_not_counted_as_done(self):
         self.cohort(n=1)
         self.assertEqual(self.live()["progress"]["done"], 1)
-        analyze.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
         live = self.live()
         self.assertEqual(live["progress"]["done"], 0)
         self.assertEqual(live["progress"]["stale"], 1)
-        self.assertEqual(live["sessions"][0]["status"], analyze.SESSION_STALE)
+        self.assertEqual(live["sessions"][0]["status"], cohort_state.SESSION_STALE)
 
     def test_the_cohort_stops_reporting_done(self):
         """The whole point: no claiming a result that cannot be shown."""
         self.cohort(n=1)
         self.assertEqual(self.live()["status"], "done")
-        analyze.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
         self.assertNotEqual(self.live()["status"], "done")
 
     def test_one_stale_row_among_finished_ones_still_blocks_done(self):
         self.cohort(n=3)
-        analyze.clear_analysis(self.project_id, "s1", session_dir=self.pool / "s1")
+        storage.clear_analysis(self.project_id, "s1", session_dir=self.pool / "s1")
         live = self.live()
         self.assertEqual(live["progress"]["done"], 2)
         self.assertEqual(live["progress"]["stale"], 1)
@@ -188,14 +190,14 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
 
     def test_a_stale_row_explains_itself(self):
         self.cohort(n=1)
-        analyze.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
         self.assertIn("re-analyze", self.live()["sessions"][0]["error"])
 
     def test_restoring_the_write_up_restores_done(self):
         self.cohort(n=1)
-        analyze.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
         self.assertNotEqual(self.live()["status"], "done")
-        analyze.write_analysis(self.project_id, "s0", {"text": "back"})
+        storage.write_analysis(self.project_id, "s0", {"text": "back"})
         live = self.live()
         self.assertEqual(live["status"], "done")
         self.assertEqual(live["progress"]["stale"], 0)
@@ -204,8 +206,8 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
         """The normal re-analyze path clears the write-up and immediately
         writes a running job, so it must read as running, not stale."""
         self.cohort(n=1)
-        analyze.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
-        analyze.write_job(self.project_id, "s0", "running")
+        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        storage.write_job(self.project_id, "s0", "running")
         live = self.live()
         self.assertEqual(live["sessions"][0]["status"], "running")
         self.assertEqual(live["progress"]["stale"], 0)
@@ -213,15 +215,16 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
     def test_a_stale_row_is_never_persisted(self):
         """It is a read-time observation about the disk, not durable state."""
         self.cohort(n=1)
-        analyze.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
         live = self.live()
-        analyze.write_cohort(
-            self.project_id, analyze.persistable_cohort(live, analyze.read_cohort(self.project_id, "c"))
+        storage.write_cohort(
+            self.project_id,
+            cohort_state.persistable_cohort(live, storage.read_cohort(self.project_id, "c")),
         )
-        stored = analyze.read_cohort(self.project_id, "c")
-        self.assertEqual(stored["sessions"][0]["status"], analyze.SESSION_STALE)
+        stored = storage.read_cohort(self.project_id, "c")
+        self.assertEqual(stored["sessions"][0]["status"], cohort_state.SESSION_STALE)
         # Restoring the file must clear it again with no manual intervention.
-        analyze.write_analysis(self.project_id, "s0", {"text": "back"})
+        storage.write_analysis(self.project_id, "s0", {"text": "back"})
         self.assertEqual(self.live()["sessions"][0]["status"], "done")
 
 
@@ -240,17 +243,17 @@ class TestTransitionTable(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.pool.mkdir(parents=True)
         self.project_id = self._pg_project
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        analyze._undeclared_transitions.clear()
-        self.addCleanup(analyze._undeclared_transitions.clear)
+        cohort_state._undeclared_transitions.clear()
+        self.addCleanup(cohort_state._undeclared_transitions.clear)
 
     def test_every_declared_state_is_a_real_state(self):
-        for state, allowed in analyze.COHORT_TRANSITIONS.items():
-            self.assertIn(state, analyze.COHORT_STATES)
+        for state, allowed in cohort_state.COHORT_TRANSITIONS.items():
+            self.assertIn(state, cohort_state.COHORT_STATES)
             for target in allowed:
-                self.assertIn(target, analyze.COHORT_STATES, f"{state} -> {target}")
+                self.assertIn(target, cohort_state.COHORT_STATES, f"{state} -> {target}")
 
     def test_every_state_has_a_row(self):
-        self.assertEqual(set(analyze.COHORT_TRANSITIONS), set(analyze.COHORT_STATES))
+        self.assertEqual(set(cohort_state.COHORT_TRANSITIONS), set(cohort_state.COHORT_STATES))
 
     def test_the_whole_baseline_makes_only_declared_transitions(self):
         """Replaying every case the old engine could produce must not trip the
@@ -258,7 +261,8 @@ class TestTransitionTable(pgfixture.CohortStoreMixin, unittest.TestCase):
         for case in BASELINE:
             for path in self.pool.iterdir():
                 shutil.rmtree(path, ignore_errors=True)
-            analyze.enrich_cohort_status(self.project_id,
+            cohort_state.enrich_cohort_status(
+                self.project_id,
                 cohort_of(
                     case["stored"],
                     case["done"],
@@ -268,23 +272,23 @@ class TestTransitionTable(pgfixture.CohortStoreMixin, unittest.TestCase):
                     project_id=self.project_id,
                 ),
             )
-        self.assertEqual(analyze._undeclared_transitions, [])
+        self.assertEqual(cohort_state._undeclared_transitions, [])
 
     def test_an_undeclared_move_is_reported_and_still_applied(self):
         # idle -> paused is declared; idle -> a state it cannot reach is not.
         self.assertEqual(
-            analyze.cohort_transition(
-                analyze.CohortState.DONE, analyze.CohortState.IDLE, why="test"
+            cohort_state.cohort_transition(
+                cohort_state.CohortState.DONE, cohort_state.CohortState.IDLE, why="test"
             ),
-            analyze.CohortState.IDLE,
+            cohort_state.CohortState.IDLE,
             "an undeclared transition must still be applied, not swallowed",
         )
-        self.assertEqual(len(analyze._undeclared_transitions), 1)
+        self.assertEqual(len(cohort_state._undeclared_transitions), 1)
 
     def test_an_unknown_current_state_is_not_reported(self):
         """A status from a future version should not spam the log."""
-        analyze.cohort_transition("some-new-state", analyze.CohortState.DONE, why="test")
-        self.assertEqual(analyze._undeclared_transitions, [])
+        cohort_state.cohort_transition("some-new-state", cohort_state.CohortState.DONE, why="test")
+        self.assertEqual(cohort_state._undeclared_transitions, [])
 
 
 class TestTerminalRecompute(pgfixture.CohortStoreMixin, unittest.TestCase):
@@ -309,8 +313,8 @@ class TestTerminalRecompute(pgfixture.CohortStoreMixin, unittest.TestCase):
             shutil.rmtree(path, ignore_errors=True)
         # Write-ups live in the store now, so clearing directories no longer
         # resets them and a case with writeups=False would inherit the last one.
-        analyze.forget_analyses(self.project_id)
-        return analyze.enrich_cohort_status(
+        storage.forget_analyses(self.project_id)
+        return cohort_state.enrich_cohort_status(
             self.project_id,
             cohort_of(stored, done, error, queued, project_id=self.project_id),
         )["status"]

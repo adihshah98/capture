@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from servercase import ServerCase, request
 
-from capture import analyze
+from capture.analyze import cuts, storage
 from capture.analyze import store as analyze_store
 
 
@@ -23,7 +23,7 @@ class TestCohort(ServerCase):
     }
 
     def seed_analysis(self, sid):
-        analyze.write_analysis(
+        storage.write_analysis(
             self.project_id,
             sid,
             {
@@ -423,8 +423,10 @@ class TestCohort(ServerCase):
     def test_delete_removes_cohort_and_keeps_session_writeups(self):
         sid = "delcoh" + "x" * 26
         cohort_id = self._cohort_of_one(sid)
-        analyze_store.write_cut(self.cohort_store(), self.project_id, cohort_id, "some-cut", {"label": "x"})
-        self.assertIsNotNone(analyze.read_analysis(self.project_id, sid))
+        analyze_store.write_cut(
+            self.cohort_store(), self.project_id, cohort_id, "some-cut", {"label": "x"}
+        )
+        self.assertIsNotNone(storage.read_analysis(self.project_id, sid))
 
         status, body = request(f"{self.base}/api/cohorts/{cohort_id}", method="DELETE")
         self.assertEqual(status, 200, body)
@@ -433,7 +435,7 @@ class TestCohort(ServerCase):
         self.assertIsNone(self.stored_cohort(cohort_id))
         self.assertEqual(self.stored_cuts(cohort_id), {})
         # Deleting a cohort must not take the write-ups of its members with it.
-        self.assertIsNotNone(analyze.read_analysis(self.project_id, sid))
+        self.assertIsNotNone(storage.read_analysis(self.project_id, sid))
 
         status, body = request(f"{self.base}/api/cohorts/{cohort_id}", method="DELETE")
         self.assertEqual(status, 404, body)
@@ -477,10 +479,8 @@ class TestCohort(ServerCase):
 
         # Simulate a row that failed during the run: status is re-derived from
         # store, so the cached analysis has to go along with the error marker.
-        analyze.clear_analysis(self.project_id, sid)
-        analyze.write_job(
-            self.project_id, sid, "error", error="page reconstruction timed out"
-        )
+        storage.clear_analysis(self.project_id, sid)
+        storage.write_job(self.project_id, sid, "error", error="page reconstruction timed out")
         saved = self.stored_cohort(cohort_id)
         saved["sessions"][0]["status"] = "error"
         saved["sessions"][0]["error"] = "page reconstruction timed out"
@@ -556,14 +556,12 @@ class TestCohortUnavailable(ServerCase):
     def test_a_refusable_refresh_keeps_the_cached_answer(self):
         """Without a key the refresh cannot be served — it must leave the good
         answer standing rather than delete what it cannot replace."""
-        from capture import analyze
-
-        cohort = analyze.write_cohort(
+        cohort = storage.write_cohort(
             self.project_id,
             {"id": "cohort-keyless", "status": "done", "sessions": []},
         )
-        key = analyze.cut_key({"outcome": "purchased"})
-        analyze.write_cut(
+        key = cuts.cut_key({"outcome": "purchased"})
+        storage.write_cut(
             self.project_id,
             cohort["id"],
             key,
@@ -573,7 +571,7 @@ class TestCohortUnavailable(ServerCase):
             f"{self.base}/api/cohorts/{cohort['id']}/cut?outcome=purchased&refresh=1"
         )
         self.assertEqual(status, 503)
-        still = analyze.read_cut(self.project_id, cohort["id"], key)
+        still = storage.read_cut(self.project_id, cohort["id"], key)
         self.assertEqual(still["analysis"]["headline"], "old")
 
 

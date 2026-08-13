@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from capture import analyze
+from capture.analyze import gemini
 
 
 class TestBatchJsonlPath(unittest.TestCase):
@@ -27,7 +27,7 @@ class TestBatchJsonlPath(unittest.TestCase):
         """
         with TemporaryDirectory() as tmp:
             work_dir = Path(tmp)
-            paths = [analyze._batch_jsonl_path(work_dir) for _ in range(1000)]
+            paths = [gemini._batch_jsonl_path(work_dir) for _ in range(1000)]
 
         self.assertEqual(len(set(paths)), len(paths), "batch scratch paths collided")
 
@@ -35,7 +35,7 @@ class TestBatchJsonlPath(unittest.TestCase):
         """0600, because the default base is a shared world-readable directory
         and each line carries a session's frames and campaign metadata."""
         with TemporaryDirectory() as tmp:
-            path = analyze._batch_jsonl_path(Path(tmp))
+            path = gemini._batch_jsonl_path(Path(tmp))
 
             self.assertTrue(path.is_file(), "mkstemp should have created the file")
             mode = stat.S_IMODE(path.stat().st_mode)
@@ -51,7 +51,7 @@ class TestBatchJsonlPath(unittest.TestCase):
         pins that the pre-created file does not turn into an append or a refusal.
         """
         with TemporaryDirectory() as tmp:
-            path = analyze._batch_jsonl_path(Path(tmp))
+            path = gemini._batch_jsonl_path(Path(tmp))
             path.write_text("first\n")
             with path.open("w") as out:
                 out.write("second\n")
@@ -61,7 +61,7 @@ class TestBatchJsonlPath(unittest.TestCase):
     def test_a_missing_work_dir_is_created(self):
         with TemporaryDirectory() as tmp:
             nested = Path(tmp) / "cohorts" / "scratch"
-            path = analyze._batch_jsonl_path(nested)
+            path = gemini._batch_jsonl_path(nested)
 
             self.assertTrue(path.is_file())
             self.assertEqual(path.parent, nested)

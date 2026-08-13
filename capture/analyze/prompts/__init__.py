@@ -5,7 +5,7 @@ in a 4,000-line Python file cannot be diffed without the diff being buried in
 code, cannot be reviewed by anyone who does not read Python, and cannot be
 swapped for an A/B variant without an edit to the module that uses it.
 
-The loader returns a plain `str`, deliberately. `analyze.CUT_PROMPT` is a
+The loader returns a plain `str`, deliberately. `cuts.CUT_PROMPT` is a
 module-level name that tests reassign to check cache invalidation, and
 `prompt_version` hashes whatever it is handed. A lazy or wrapper object would
 break both, so the files are read once at import and become ordinary strings.

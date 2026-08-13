@@ -2,8 +2,7 @@
 
 Owns sampling into a stored cohort (`build_cohort` / rename / delete), pause and
 Batch resume, and `run_cohort_job` (extract → Batch submit/collect, with sync
-Gemini fallback). Orchestrators and the package re-export call through this
-module so tests can
+Gemini fallback). Orchestrators call through this module so tests can
 `mock.patch("capture.analyze.cohorts._cohort_sync_model", ...)` at the
 definition site.
 """
@@ -140,9 +139,7 @@ def mark_cohort_paused(project_id: str, cohort: dict) -> dict:
     return enrich_cohort_status(project_id, cohort)
 
 
-async def resume_cohort_batch(
-    project_id: str, cohort: dict, *, sessions_root: Path
-) -> dict:
+async def resume_cohort_batch(project_id: str, cohort: dict, *, sessions_root: Path) -> dict:
     """Finish a cohort that already has a Gemini Batch job name persisted."""
     batch = cohort.get("batch") or {}
     job_name = batch.get("name")
@@ -175,9 +172,7 @@ async def resume_cohort_batch(
         if not await _collect_cohort_batch(
             project_id, cohort, prepared, job_name, sessions_root=sessions_root
         ):
-            return enrich_cohort_status(
-                project_id, read_cohort(project_id, cohort["id"]) or cohort
-            )
+            return enrich_cohort_status(project_id, read_cohort(project_id, cohort["id"]) or cohort)
     live = read_cohort(project_id, cohort["id"]) or cohort
     live.pop("batch", None)
     final = enrich_cohort_status(project_id, live)
@@ -198,9 +193,7 @@ async def run_cohort_job(
     """
     try:
         if (cohort.get("batch") or {}).get("name") and not force:
-            return await resume_cohort_batch(
-                project_id, cohort, sessions_root=sessions_root
-            )
+            return await resume_cohort_batch(project_id, cohort, sessions_root=sessions_root)
 
         cohort = {**cohort, "status": "running"}
         cohort.pop("batch", None)
@@ -220,9 +213,7 @@ async def run_cohort_job(
         write_cohort(project_id, cohort)
 
         if not pending_entries:
-            return enrich_cohort_status(
-                project_id, read_cohort(project_id, cohort["id"]) or cohort
-            )
+            return enrich_cohort_status(project_id, read_cohort(project_id, cohort["id"]) or cohort)
 
         prepared = []  # (entry, digest)
 
@@ -261,9 +252,7 @@ async def run_cohort_job(
         await asyncio.gather(*(extract_one(e) for e in pending_entries), return_exceptions=True)
 
         if not prepared:
-            return enrich_cohort_status(
-                project_id, read_cohort(project_id, cohort["id"]) or cohort
-            )
+            return enrich_cohort_status(project_id, read_cohort(project_id, cohort["id"]) or cohort)
 
         use_batch = runtime.ANALYZE_BATCH and runtime.ANALYSIS_ENABLED
         job_name = None
@@ -286,9 +275,7 @@ async def run_cohort_job(
                 print(f"cohort batch submit failed ({exc}); falling back to sync Gemini")
                 cohort.pop("batch", None)
                 write_cohort(project_id, cohort)
-                await _cohort_sync_model(
-                    project_id, cohort, prepared, sessions_root=sessions_root
-                )
+                await _cohort_sync_model(project_id, cohort, prepared, sessions_root=sessions_root)
 
         if job_name:
             cohort["batch"] = {
@@ -307,9 +294,7 @@ async def run_cohort_job(
                     project_id, read_cohort(project_id, cohort["id"]) or cohort
                 )
         elif not use_batch:
-            await _cohort_sync_model(
-                project_id, cohort, prepared, sessions_root=sessions_root
-            )
+            await _cohort_sync_model(project_id, cohort, prepared, sessions_root=sessions_root)
 
         live = read_cohort(project_id, cohort["id"]) or cohort
         live.pop("batch", None)
