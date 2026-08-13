@@ -19,6 +19,7 @@ from .. import attribution
 from . import prompts, runtime
 from . import store as analyze_store
 from .slices import OUTCOME_LABELS, outcome_class, page_path
+
 SYSTEM_PROMPT = prompts.load("session.md")
 
 
@@ -55,9 +56,7 @@ def session_metadata(project_id: str, session_id: str) -> dict:
     meta: dict = {}
 
     try:
-        entry, order = analyze_store.session_facts(
-            analyze_store.connect(), project_id, session_id
-        )
+        entry, order = analyze_store.session_facts(analyze_store.connect(), project_id, session_id)
     except Exception as exc:
         print(f"session metadata unavailable for {session_id}: {exc}")
         entry, order = None, None
@@ -279,13 +278,12 @@ async def submit_prepared_gemini_batch(
     client = genai.Client(api_key=runtime.GEMINI_API_KEY)
     config = types.CreateBatchJobConfig(display_name=display_name[:128])
     tmp = _batch_jsonl_path(work_dir)
+    uploaded = None
     try:
         with tmp.open("w") as out:
             for entry, digest in prepared:
                 sid = entry["session_id"]
-                meta = (
-                    session_metadata(project_id, sid) if project_id is not None else None
-                )
+                meta = session_metadata(project_id, sid) if project_id is not None else None
                 req = build_inlined_session_request(sid, digest, digest.get("frames") or [], meta)
                 key, payload = _batch_file_request(req)
                 del req
@@ -301,14 +299,28 @@ async def submit_prepared_gemini_batch(
     finally:
         tmp.unlink(missing_ok=True)
 
-    job = await client.aio.batches.create(
-        model=runtime.GEMINI_MODEL,
-        src=types.BatchJobSource(file_name=uploaded.name),
-        config=config,
-    )
-    if not job.name:
-        raise RuntimeError("Gemini batch create returned no job name")
-    return job.name
+    if uploaded is None or not uploaded.name:
+        raise RuntimeError("Gemini batch upload returned no file name")
+
+    try:
+        job = await client.aio.batches.create(
+            model=runtime.GEMINI_MODEL,
+            src=types.BatchJobSource(file_name=uploaded.name),
+            config=config,
+        )
+        if not job.name:
+            raise RuntimeError("Gemini batch create returned no job name")
+        return job.name
+    finally:
+        await _delete_uploaded_file(client, uploaded.name)
+
+
+async def _delete_uploaded_file(client, name: str) -> None:
+    """Drop the JSONL from the Files API. The job has already copied it."""
+    try:
+        await client.aio.files.delete(name=name)
+    except Exception as exc:
+        print(f"batch input file delete {name}: {exc}")
 
 
 def _batch_state_name(job) -> str:

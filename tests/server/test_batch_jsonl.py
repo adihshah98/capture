@@ -99,6 +99,9 @@ class TestSubmitPreparedGeminiBatch(unittest.TestCase):
                 captured["line"] = Path(file).read_text().splitlines()[0]
                 return SimpleNamespace(name="files/in")
 
+            async def delete(_self, *, name):
+                captured.setdefault("deleted", []).append(name)
+
         class Batches:
             async def create(_self, *, model, src, config=None):
                 return SimpleNamespace(name="batches/j")
@@ -141,6 +144,39 @@ class TestSubmitPreparedGeminiBatch(unittest.TestCase):
         inline = [p for p in parts if "inlineData" in p]
         self.assertEqual(len(inline), 1)
         self.assertEqual(inline[0]["inlineData"]["mimeType"], "image/jpeg")
+        self.assertEqual(captured.get("deleted"), ["files/in"])
+
+    def test_the_uploaded_file_is_deleted_even_when_create_fails(self):
+        deleted = []
+
+        class Files:
+            async def upload(_self, *, file, config=None):
+                return SimpleNamespace(name="files/in")
+
+            async def delete(_self, *, name):
+                deleted.append(name)
+
+        class Batches:
+            async def create(_self, *, model, src, config=None):
+                raise RuntimeError("batch create 400")
+
+        class Client:
+            def __init__(self, **kwargs):
+                self.aio = SimpleNamespace(files=Files(), batches=Batches())
+
+        self.genai.Client = Client
+        digest = {"frames": [], "warnings": [], "session": {}}
+        with patch.object(gemini, "session_metadata", return_value={}):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(
+                    gemini.submit_prepared_gemini_batch(
+                        [({"session_id": "s1"}, digest)],
+                        display_name="capture-c",
+                        work_dir=Path(self.tmp.name),
+                        project_id="proj",
+                    )
+                )
+        self.assertEqual(deleted, ["files/in"])
 
 
 if __name__ == "__main__":
