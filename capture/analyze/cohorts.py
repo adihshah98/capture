@@ -17,7 +17,7 @@ from pathlib import Path
 from .. import projects
 from . import gemini, runtime, session, spec
 from . import store as analyze_store
-from .cohort_state import enrich_cohort_status, persistable_cohort
+from .cohort_state import enrich_cohort_status
 from .labels import _auto_cohort_label, clean_cohort_label, cohort_selection_text
 from .sampling import sample_cohort
 from .slices import normalize_slice
@@ -27,11 +27,13 @@ from .storage import (
     clear_job,
     cohorts_dir,
     mark_cohort_session,
-    read_analysis,
+    persist_cohort_refresh,
+    read_analyses,
     read_cohort,
-    read_job,
+    read_jobs,
     safe_cohort_id,
-    write_cohort,
+    set_cohort_label,
+    set_cohort_status,
     write_job,
 )
 
@@ -104,7 +106,9 @@ def rename_cohort(project_id: str, cohort_id: str, label: str) -> dict | None:
     clean = clean_cohort_label(label)
     if not clean:
         raise ValueError("label cannot be empty")
-    return write_cohort(project_id, {**cohort, "label": clean})
+    if not set_cohort_label(project_id, cohort_id, clean):
+        return None
+    return {**cohort, "label": clean}
 
 
 def delete_cohort(project_id: str, cohort_id: str) -> bool:
@@ -116,25 +120,46 @@ def delete_cohort(project_id: str, cohort_id: str) -> bool:
     return analyze_store.delete_cohort(analyze_store.connect(), project_id, cohort_id)
 
 
+def _session_snapshot(cohort: dict) -> list:
+    """Comparable session rows taken before in-place mutation."""
+    return [dict(e) for e in (cohort.get("sessions") or [])]
+
+
+def _persist_session_edits(project_id: str, cohort: dict, before: list) -> None:
+    persist_cohort_refresh(project_id, {**cohort, "sessions": before}, cohort)
+
+
+def _persist_finished(project_id: str, live: dict) -> dict:
+    """Write enrich's durable status and drop the batch name. Membership stays."""
+    live.pop("batch", None)
+    final = enrich_cohort_status(project_id, live)
+    set_cohort_status(project_id, final, final.get("status") or "idle", clear_batch=True)
+    persist_cohort_refresh(project_id, live, final)
+    return final
+
+
 def mark_cohort_paused(project_id: str, cohort: dict) -> dict:
     """Persist paused status and return in-flight session rows to queued."""
+    before = _session_snapshot(cohort)
+    ids = [e["session_id"] for e in before if e.get("session_id")]
+    analyses = read_analyses(project_id, ids)
+    jobs = read_jobs(project_id, ids)
     for entry in cohort.get("sessions") or []:
         sid = entry["session_id"]
-        if read_analysis(project_id, sid):
+        if analyses.get(sid):
             entry["status"] = "done"
             entry["analysis"] = ANALYSIS_FILE
             entry.pop("error", None)
             continue
         if (
             entry.get("status") in ("running", "queued")
-            or (read_job(project_id, sid) or {}).get("status") == "running"
+            or (jobs.get(sid) or {}).get("status") == "running"
         ):
             entry["status"] = "queued"
             entry.pop("error", None)
             clear_job(project_id, sid)
-    cohort = {**cohort, "status": "paused"}
-    cohort.pop("batch", None)
-    write_cohort(project_id, cohort)
+    set_cohort_status(project_id, cohort, "paused", clear_batch=True)
+    _persist_session_edits(project_id, cohort, before)
     return enrich_cohort_status(project_id, cohort)
 
 
@@ -147,12 +172,14 @@ async def resume_cohort_batch(project_id: str, cohort: dict, *, sessions_root: P
 
     prepared = []
     wanted = set(batch.get("session_ids") or [])
+    before = _session_snapshot(cohort)
+    analyses = read_analyses(project_id, [e.get("session_id") for e in before])
     for entry in cohort.get("sessions") or []:
         sid = entry.get("session_id")
         if wanted and sid not in wanted:
             continue
         session_path = sessions_root / sid
-        if read_analysis(project_id, sid):
+        if analyses.get(sid):
             entry["status"] = "done"
             entry["analysis"] = ANALYSIS_FILE
             entry.pop("error", None)
@@ -161,7 +188,7 @@ async def resume_cohort_batch(project_id: str, cohort: dict, *, sessions_root: P
         entry["status"] = "running"
         write_job(project_id, sid, "running")
         prepared.append((entry, digest))
-    write_cohort(project_id, cohort)
+    _persist_session_edits(project_id, cohort, before)
 
     if prepared:
         # Same rule as the first attempt: a batch we could not collect keeps
@@ -173,10 +200,7 @@ async def resume_cohort_batch(project_id: str, cohort: dict, *, sessions_root: P
         ):
             return enrich_cohort_status(project_id, read_cohort(project_id, cohort["id"]) or cohort)
     live = read_cohort(project_id, cohort["id"]) or cohort
-    live.pop("batch", None)
-    final = enrich_cohort_status(project_id, live)
-    write_cohort(project_id, persistable_cohort(final, live))
-    return final
+    return _persist_finished(project_id, live)
 
 
 async def run_cohort_job(
@@ -194,14 +218,14 @@ async def run_cohort_job(
         if (cohort.get("batch") or {}).get("name") and not force:
             return await resume_cohort_batch(project_id, cohort, sessions_root=sessions_root)
 
-        cohort = {**cohort, "status": "running"}
-        cohort.pop("batch", None)
-        write_cohort(project_id, cohort)
+        set_cohort_status(project_id, cohort, "running", clear_batch=True)
 
+        before = _session_snapshot(cohort)
         pending_entries = []
+        analyses = {} if force else read_analyses(project_id, [e.get("session_id") for e in before])
         for entry in cohort.get("sessions") or []:
             sid = entry["session_id"]
-            if not force and read_analysis(project_id, sid):
+            if not force and analyses.get(sid):
                 entry["status"] = "done"
                 entry["analysis"] = ANALYSIS_FILE
                 entry.pop("error", None)
@@ -209,7 +233,7 @@ async def run_cohort_job(
             entry["status"] = "queued"
             entry.pop("error", None)
             pending_entries.append(entry)
-        write_cohort(project_id, cohort)
+        _persist_session_edits(project_id, cohort, before)
 
         if not pending_entries:
             return enrich_cohort_status(project_id, read_cohort(project_id, cohort["id"]) or cohort)
@@ -272,17 +296,21 @@ async def run_cohort_job(
                 # No job was created, so nothing has been paid for: falling
                 # back keeps a Batch outage from stranding an extracted cohort.
                 print(f"cohort batch submit failed ({exc}); falling back to sync Gemini")
-                cohort.pop("batch", None)
-                write_cohort(project_id, cohort)
+                set_cohort_status(
+                    project_id,
+                    cohort,
+                    cohort.get("status") or "running",
+                    clear_batch=True,
+                )
                 await _cohort_sync_model(project_id, cohort, prepared, sessions_root=sessions_root)
 
         if job_name:
-            cohort["batch"] = {
+            batch = {
                 "name": job_name,
                 "submitted_at": int(time.time() * 1000),
                 "session_ids": [e["session_id"] for e, _ in prepared],
             }
-            write_cohort(project_id, cohort)
+            set_cohort_status(project_id, cohort, cohort.get("status") or "running", batch=batch)
             if not await _collect_cohort_batch(
                 project_id, cohort, prepared, job_name, sessions_root=sessions_root
             ):
@@ -296,10 +324,7 @@ async def run_cohort_job(
             await _cohort_sync_model(project_id, cohort, prepared, sessions_root=sessions_root)
 
         live = read_cohort(project_id, cohort["id"]) or cohort
-        live.pop("batch", None)
-        final = enrich_cohort_status(project_id, live)
-        write_cohort(project_id, persistable_cohort(final, live))
-        return final
+        return _persist_finished(project_id, live)
     except asyncio.CancelledError:
         live = read_cohort(project_id, cohort["id"]) or cohort
         batch_name = (live.get("batch") or {}).get("name")

@@ -48,6 +48,11 @@ def read_analysis(project_id: str, session_id: str) -> dict | None:
     return analyze_store.read_analysis(analyze_store.connect(), project_id, session_id)
 
 
+def read_analyses(project_id: str, session_ids) -> dict:
+    """session_id → write-up for the ids that have one. One query, not N."""
+    return analyze_store.read_analyses(analyze_store.connect(), project_id, session_ids)
+
+
 def write_analysis(project_id: str, session_id: str, result: dict) -> dict:
     return analyze_store.write_analysis(analyze_store.connect(), project_id, session_id, result)
 
@@ -60,6 +65,11 @@ def forget_analyses(project_id: str) -> int:
 def read_job(project_id: str, session_id: str) -> dict | None:
     """In-progress or failed async analysis job, if any."""
     return analyze_store.read_job(analyze_store.connect(), project_id, session_id)
+
+
+def read_jobs(project_id: str, session_ids) -> dict:
+    """session_id → job row for the ids that have one. One query, not N."""
+    return analyze_store.read_jobs(analyze_store.connect(), project_id, session_ids)
 
 
 def write_job(project_id: str, session_id: str, status: str, error: str | None = None) -> dict:
@@ -122,6 +132,43 @@ def read_cohort(project_id: str, cohort_id: str) -> dict | None:
 def write_cohort(project_id: str, cohort: dict) -> dict:
     return analyze_store.write_cohort(
         analyze_store.connect(), project_id, {**cohort, "id": safe_cohort_id(cohort["id"])}
+    )
+
+
+def set_cohort_status(
+    project_id: str,
+    cohort: dict,
+    status: str,
+    *,
+    batch: dict | None = None,
+    clear_batch: bool = False,
+) -> None:
+    """Move a cohort's own status (and batch handle) without rewriting membership.
+
+    Updates `cohort` in place so callers that keep the dict stay in step,
+    matching `mark_cohort_session`. Sampling fields and session rows are
+    left alone — those belong to `write_cohort` (create) and
+    `update_session_status` (per-row marks).
+    """
+    cohort["status"] = status
+    if clear_batch:
+        cohort.pop("batch", None)
+    elif batch is not None:
+        cohort["batch"] = batch
+    analyze_store.set_cohort_status(
+        analyze_store.connect(),
+        project_id,
+        safe_cohort_id(str(cohort["id"])),
+        status,
+        batch=batch,
+        clear_batch=clear_batch,
+    )
+
+
+def set_cohort_label(project_id: str, cohort_id: str, label: str) -> bool:
+    """Set a cohort's display name without rewriting its membership."""
+    return analyze_store.set_cohort_label(
+        analyze_store.connect(), project_id, safe_cohort_id(cohort_id), label
     )
 
 

@@ -91,6 +91,11 @@ def session_analysis(project: Project, session_id: str) -> dict | None:
     return storage.read_analysis(project.id, session_id)
 
 
+def session_analyses(project: Project, session_ids) -> dict:
+    """session_id → write-up for the ids that have one. One query, not N."""
+    return storage.read_analyses(project.id, session_ids)
+
+
 def clear_session_analysis(project: Project, session_id: str) -> None:
     storage.clear_analysis(project.id, session_id, session_dir=_session_dir(project, session_id))
 
@@ -128,7 +133,32 @@ def cohort(project: Project, cohort_id: str) -> dict | None:
 
 
 def save_cohort(project: Project, cohort: dict) -> dict:
+    """Create a cohort. Status and batch updates go through set_cohort_status."""
     return storage.write_cohort(project.id, cohort)
+
+
+def set_cohort_status(
+    project: Project,
+    cohort: dict,
+    status: str,
+    *,
+    batch: dict | None = None,
+    clear_batch: bool = False,
+) -> None:
+    """Move a cohort's own status without replacing membership."""
+    storage.set_cohort_status(project.id, cohort, status, batch=batch, clear_batch=clear_batch)
+
+
+def mark_cohort_session(
+    project: Project,
+    cohort: dict,
+    entry: dict,
+    status: str,
+    *,
+    analysis: str | None = None,
+    error: str | None = None,
+) -> None:
+    storage.mark_cohort_session(project.id, cohort, entry, status, analysis=analysis, error=error)
 
 
 def persist_cohort_refresh(project: Project, stored: dict, live: dict) -> bool:
@@ -154,8 +184,8 @@ def delete_cohort(project: Project, cohort_id: str) -> bool:
 
 def cohort_view(project: Project, cohort: dict) -> dict:
     """The cohort as the API reports it: stored fields plus derived status and
-    progress. Called on nearly every cohort response, and the result is a view —
-    persistable_cohort() is what strips the derived fields back off before a write."""
+    progress. Durable bits of this view go back through persist_cohort_refresh
+    (and set_cohort_status for the batch handle), not write_cohort."""
     return cohort_state.enrich_cohort_status(project.id, cohort)
 
 

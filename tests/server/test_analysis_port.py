@@ -69,6 +69,13 @@ class TestProjectIsTheIdentity(PortCase):
         port.cohort(NAMED, "c1")
         self.storage.read_cohort.assert_called_once_with(NAMED.id, "c1")
 
+    def test_status_updates_are_addressed_by_project_id(self):
+        cohort = {"id": "c1", "status": "idle"}
+        port.set_cohort_status(NAMED, cohort, "running")
+        self.storage.set_cohort_status.assert_called_once_with(
+            NAMED.id, cohort, "running", batch=None, clear_batch=False
+        )
+
     def test_the_default_project_uses_its_uuid(self):
         port.cohort(DEFAULT, "c1")
         self.storage.read_cohort.assert_called_once_with(DEFAULT.id, "c1")

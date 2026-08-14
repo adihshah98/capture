@@ -179,15 +179,17 @@ def _read_sessions(conn, project_id, cohort_id: str) -> list:
 
 
 def write_cohort(store: Store, project_id: str, cohort: dict) -> dict:
-    """Upsert a cohort and its membership. Returns the stored dict.
+    """Create (or fully replace) a cohort and its membership. Returns the stored dict.
 
-    Sessions are replaced wholesale because callers hand back a full list. The
-    delete and insert share a transaction, so a reader never sees the cohort
-    without its members.
+    This is the sampling write: a new frozen set of members. Sessions are
+    replaced wholesale because the caller hands back a full list. The delete
+    and insert share a transaction, so a reader never sees the cohort without
+    its members.
 
-    A status refresh must not go through here. DELETE+INSERT of membership
-    races `update_session_status`: a poll's snapshot reinserts stale queued
-    rows over in-flight running/done marks. Use `persist_cohort_refresh`.
+    A later status, batch, or per-session mark must not go through here.
+    DELETE+INSERT of membership races `update_session_status`: a snapshot
+    reinserts stale queued rows over in-flight running/done marks. Use
+    `set_cohort_status`, `persist_cohort_refresh`, or `update_session_status`.
     """
     cols, fields, sessions = _split_cohort(cohort)
     updated = _now()
@@ -315,6 +317,17 @@ def persist_cohort_refresh(
             )
 
 
+def set_cohort_label(store: Store, project_id: str, cohort_id: str, label: str) -> bool:
+    """Set a cohort's display name without rewriting its membership."""
+    with store.tx(project_id) as (conn, project_id):
+        cur = conn.execute(
+            "UPDATE cohorts SET label = %s, updated_at = %s"
+            " WHERE project_id = %s AND cohort_id = %s",
+            (label, _now(), project_id, cohort_id),
+        )
+        return cur.rowcount > 0
+
+
 def set_cohort_status(
     store: Store,
     project_id: str,
@@ -324,7 +337,7 @@ def set_cohort_status(
     batch: dict | None = None,
     clear_batch: bool = False,
 ) -> None:
-    """Move a cohort's own status without rewriting its membership."""
+    """Move a cohort's own status (and batch handle) without rewriting membership."""
     with store.tx(project_id) as (conn, project_id):
         if clear_batch:
             conn.execute(
@@ -497,6 +510,10 @@ def clear_cut(store: Store, project_id: str, cohort_id: str, key: str) -> bool:
 # S3 next to the chunks so a later box can skip Playwright.
 
 
+def _id_list(session_ids) -> list:
+    return [str(sid) for sid in session_ids if sid]
+
+
 def read_analysis(store: Store, project_id: str, session_id: str) -> dict | None:
     with store.tx(project_id) as (conn, project_id):
         row = conn.execute(
@@ -506,6 +523,21 @@ def read_analysis(store: Store, project_id: str, session_id: str) -> dict | None
     if row is None:
         return None
     return row[0] if isinstance(row[0], dict) else None
+
+
+def read_analyses(store: Store, project_id: str, session_ids) -> dict:
+    """session_id → write-up for the ids that have one. Missing ids are omitted."""
+    ids = _id_list(session_ids)
+    if not ids:
+        return {}
+    placeholders = ", ".join("%s" for _ in ids)
+    with store.tx(project_id) as (conn, project_id):
+        rows = conn.execute(
+            f"SELECT session_id, body FROM analyses"
+            f" WHERE project_id = %s AND session_id IN ({placeholders})",
+            (project_id, *ids),
+        ).fetchall()
+    return {sid: body for sid, body in rows if isinstance(body, dict)}
 
 
 def write_analysis(store: Store, project_id: str, session_id: str, result: dict) -> dict:
@@ -559,6 +591,31 @@ def read_job(store: Store, project_id: str, session_id: str) -> dict | None:
     if row["error"]:
         job["error"] = row["error"]
     return job
+
+
+def read_jobs(store: Store, project_id: str, session_ids) -> dict:
+    """session_id → job row for the ids that have one. Missing ids are omitted."""
+    ids = _id_list(session_ids)
+    if not ids:
+        return {}
+    placeholders = ", ".join("%s" for _ in ids)
+    with store.tx(project_id) as (conn, project_id):
+        rows = (
+            _rows(conn)
+            .execute(
+                f"SELECT session_id, status, error, updated_at FROM analysis_jobs"
+                f" WHERE project_id = %s AND session_id IN ({placeholders})",
+                (project_id, *ids),
+            )
+            .fetchall()
+        )
+    out = {}
+    for row in rows:
+        job = {"status": row["status"], "updated_at": row["updated_at"]}
+        if row["error"]:
+            job["error"] = row["error"]
+        out[row["session_id"]] = job
+    return out
 
 
 def write_job(store: Store, project_id: str, session_id: str, job: dict) -> dict:

@@ -297,7 +297,7 @@ async def start_cohort_analysis(
             status_code=202,
         )
 
-    ap.save_cohort(found, {**cohort, "status": "running"})
+    ap.set_cohort_status(found, cohort, "running")
     task = asyncio.create_task(jobs.run_cohort(found, cohort["id"], force=force))
     jobs.cohort_tasks[key] = task
     live = ap.cohort(found, cohort["id"]) or cohort
@@ -352,11 +352,11 @@ async def retry_cohort_session(
 
     session_dir(found, session_id)
     # Drop the recorded failure first, so a poll landing mid-retry does not
-    # re-read the old error back over the running status.
-    entry["status"] = "queued"
-    entry.pop("error", None)
+    # re-read the old error back over the running status. One row, not the
+    # whole membership: write_cohort would DELETE+INSERT everyone else.
+    ap.mark_cohort_session(found, cohort, entry, "queued")
     ap.clear_job(found, session_id)
-    ap.save_cohort(found, {**cohort, "status": "running"})
+    ap.set_cohort_status(found, cohort, "running")
 
     key = jobs.cohort_key(found, cohort["id"])
     existing = jobs.cohort_tasks.get(key)
@@ -386,20 +386,22 @@ async def _retry_cohort_session_job(
         )
         if row is None:
             return
-        row["status"] = "running"
-        row.pop("error", None)
-        ap.save_cohort(found, cohort)
+        ap.mark_cohort_session(found, cohort, row, "running")
         try:
             # Not forced: a failed row has nothing cached to bust, and if it
             # succeeded meanwhile the retry should settle on that result.
             await jobs.await_session(found, session_id)
-            row["status"] = "done"
-            row["analysis"] = ap.ANALYSIS_FILE
-            row.pop("error", None)
+            ap.mark_cohort_session(found, cohort, row, "done", analysis=ap.ANALYSIS_FILE)
         except Exception as exc:
-            row["status"] = "error"
-            row["error"] = getattr(exc, "message", None) or str(exc) or "analysis failed"
-        ap.save_cohort(found, ap.storable_cohort(ap.cohort_view(found, cohort), cohort))
+            ap.mark_cohort_session(
+                found,
+                cohort,
+                row,
+                "error",
+                error=getattr(exc, "message", None) or str(exc) or "analysis failed",
+            )
+        live = ap.cohort_view(found, cohort)
+        ap.persist_cohort_refresh(found, cohort, live)
     finally:
         jobs.cohort_tasks.pop(key, None)
 
@@ -673,10 +675,13 @@ def _session_facts(found: projects.Project, cohort: dict) -> dict:
 def _cut_rows(found: projects.Project, cohort: dict) -> list:
     """Analyzed sessions in this cohort, with the write-up a cut reasons over."""
     facts = _session_facts(found, cohort)
+    analyses = ap.session_analyses(
+        found, [e["session_id"] for e in cohort.get("sessions") or [] if e.get("session_id")]
+    )
     rows = []
     for entry in cohort.get("sessions") or []:
         sid = entry["session_id"]
-        cached = ap.session_analysis(found, sid)
+        cached = analyses.get(sid)
         text = (cached or {}).get("text")
         if not isinstance(text, str) or not text.strip():
             continue

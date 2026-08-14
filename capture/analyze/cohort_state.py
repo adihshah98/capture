@@ -191,10 +191,17 @@ def project_cohort_status(stored: str, tally: dict, *, total: int) -> str:
     return current
 
 
+def _member_ids(cohort: dict) -> list:
+    return [e["session_id"] for e in cohort.get("sessions") or [] if e.get("session_id")]
+
+
 def enrich_cohort_status(project_id: str, cohort: dict) -> dict:
     """Refresh per-session status from analyses / analysis_jobs in Postgres."""
     sessions = []
     done = running = queued = errors = stale = 0
+    ids = _member_ids(cohort)
+    analyses = storage.read_analyses(project_id, ids)
+    jobs = storage.read_jobs(project_id, ids)
     for entry in cohort.get("sessions") or []:
         row = dict(entry)
         # Insights text is attached on read for the API — never persist it here.
@@ -207,8 +214,8 @@ def enrich_cohort_status(project_id: str, cohort: dict) -> dict:
         row.pop("device", None)
         row.pop("outcome", None)
         sid = row["session_id"]
-        cached = storage.read_analysis(project_id, sid)
-        job = storage.read_job(project_id, sid)
+        cached = analyses.get(sid)
+        job = jobs.get(sid)
         if cached:
             row["status"] = "done"
             row["analysis"] = ANALYSIS_FILE
@@ -285,10 +292,10 @@ def persistable_cohort(enriched: dict, stored: dict | None = None) -> dict:
 
     The status refresh itself is a durable fact — a crashed runner leaves rows
     saying "running" that only a re-read of analysis.json corrects — so callers
-    do need to write it back. GET does that through `persist_cohort_refresh`
+    do need to write it back. GET and the pipeline finish that through
+    `persist_cohort_refresh` (and `set_cohort_status` for the batch handle)
     rather than `write_cohort`, so a poll cannot DELETE+INSERT membership over
-    in-flight marks. Pipeline finish still goes through this function, then
-    `write_cohort`. What they must not write is the view laid over it.
+    in-flight marks. What they must not write is the view laid over it.
 
     `selection` is the trap. enrich backfills it from whatever sampling fields
     are present, so for a cohort sampled by any_n / a_n (where purchased_n and
@@ -339,11 +346,18 @@ def standout_line(text: str) -> str:
 
 def attach_cohort_insights(project_id: str, cohort: dict) -> dict:
     """Attach analysis write-ups — response-only, never written to the cohort file."""
+    members = cohort.get("sessions") or []
+    done_ids = [
+        row["session_id"]
+        for row in members
+        if row.get("status") == "done" and row.get("session_id")
+    ]
+    analyses = storage.read_analyses(project_id, done_ids)
     sessions = []
-    for entry in cohort.get("sessions") or []:
+    for entry in members:
         row = dict(entry)
         if row.get("status") == "done":
-            cached = storage.read_analysis(project_id, row["session_id"])
+            cached = analyses.get(row["session_id"])
             if cached and isinstance(cached.get("text"), str) and cached["text"].strip():
                 row["text"] = cached["text"]
                 row["standout"] = standout_line(cached["text"])

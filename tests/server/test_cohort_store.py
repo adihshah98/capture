@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -137,6 +138,102 @@ class TestRoundTrip(StoreCase):
         self.assertEqual(
             storage.read_cohort(self.project_id, "cohort-1")["created_at"], 1700000000000
         )
+
+
+class TestRowLevelUpdates(StoreCase):
+    """Status, batch and label are columns. Updating them must not replace membership."""
+
+    def seed(self, **extra):
+        storage.write_cohort(
+            self.project_id,
+            cohort(
+                sessions=[
+                    {"session_id": "s0", "status": "queued", "filter": "purchased"},
+                    {"session_id": "s1", "status": "queued", "filter": "all"},
+                ],
+                **extra,
+            ),
+        )
+        return storage.read_cohort(self.project_id, "cohort-1")
+
+    def test_set_cohort_status_does_not_rewrite_membership(self):
+        stored = self.seed()
+        storage.mark_cohort_session(
+            self.project_id, stored, stored["sessions"][0], "done", analysis="analysis.json"
+        )
+        storage.set_cohort_status(self.project_id, stored, "running")
+        got = storage.read_cohort(self.project_id, "cohort-1")
+        self.assertEqual(got["status"], "running")
+        self.assertEqual(got["sessions"][0]["status"], "done")
+        self.assertEqual(got["sessions"][0]["filter"], "purchased")
+        self.assertEqual(got["sessions"][1]["status"], "queued")
+
+    def test_set_cohort_status_keeps_the_callers_dict_in_step(self):
+        stored = self.seed()
+        storage.set_cohort_status(self.project_id, stored, "running", batch={"name": "batches/J1"})
+        self.assertEqual(stored["status"], "running")
+        self.assertEqual(stored["batch"]["name"], "batches/J1")
+        storage.set_cohort_status(self.project_id, stored, "paused", clear_batch=True)
+        self.assertEqual(stored["status"], "paused")
+        self.assertNotIn("batch", stored)
+        self.assertNotIn("batch", storage.read_cohort(self.project_id, "cohort-1"))
+
+    def test_status_only_leaves_the_batch_handle_in_place(self):
+        stored = self.seed(batch={"name": "batches/J1"})
+        storage.set_cohort_status(self.project_id, stored, "running")
+        self.assertEqual(
+            storage.read_cohort(self.project_id, "cohort-1")["batch"]["name"], "batches/J1"
+        )
+
+    def test_rename_does_not_clobber_in_flight_marks(self):
+        stored = self.seed()
+        storage.mark_cohort_session(self.project_id, stored, stored["sessions"][1], "running")
+        self.assertEqual(
+            cohorts.rename_cohort(self.project_id, "cohort-1", "Spring")["label"], "Spring"
+        )
+        got = storage.read_cohort(self.project_id, "cohort-1")
+        self.assertEqual(got["label"], "Spring")
+        self.assertEqual(got["sessions"][1]["status"], "running")
+        self.assertEqual(got["sessions"][0]["filter"], "purchased")
+
+
+class TestBulkReads(StoreCase):
+    def test_analyses_and_jobs_are_read_in_one_query_each(self):
+        for i in range(4):
+            storage.write_analysis(self.project_id, f"s{i}", {"text": f"up-{i}"})
+        storage.write_job(self.project_id, "s1", "running")
+        storage.write_job(self.project_id, "s2", "error", error="boom")
+        analyses = storage.read_analyses(self.project_id, ["s0", "s1", "s2", "s3", "missing"])
+        jobs = storage.read_jobs(self.project_id, ["s0", "s1", "s2", "missing"])
+        self.assertEqual(
+            {sid: a["text"] for sid, a in analyses.items()},
+            {"s0": "up-0", "s1": "up-1", "s2": "up-2", "s3": "up-3"},
+        )
+        self.assertNotIn("missing", analyses)
+        self.assertNotIn("s0", jobs)
+        self.assertEqual(jobs["s1"]["status"], "running")
+        self.assertEqual(jobs["s2"]["error"], "boom")
+
+    def test_empty_id_list_is_a_no_op(self):
+        self.assertEqual(storage.read_analyses(self.project_id, []), {})
+        self.assertEqual(storage.read_jobs(self.project_id, []), {})
+
+    def test_enrich_does_not_round_trip_per_session(self):
+        storage.write_cohort(self.project_id, cohort(n=5))
+        for i in range(5):
+            storage.write_analysis(self.project_id, f"s{i}", {"text": "write-up"})
+        with (
+            patch.object(
+                storage, "read_analysis", side_effect=AssertionError("per-session analysis")
+            ),
+            patch.object(storage, "read_job", side_effect=AssertionError("per-session job")),
+        ):
+            live = cohort_state.enrich_cohort_status(
+                self.project_id, storage.read_cohort(self.project_id, "cohort-1")
+            )
+            insights = cohort_state.attach_cohort_insights(self.project_id, live)
+        self.assertEqual(live["progress"]["done"], 5)
+        self.assertEqual(insights["sessions"][0]["text"], "write-up")
 
 
 class TestConcurrency(StoreCase):
