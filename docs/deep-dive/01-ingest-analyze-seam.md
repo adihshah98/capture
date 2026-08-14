@@ -84,9 +84,9 @@ Three call sites, and they are the complete set:
 
 | Site | Path |
 | --- | --- |
-| [server.py:1076](../../capture/server.py#L1076) | single-session `Analyze` |
-| [server.py:1155](../../capture/server.py#L1155) | cohort run |
-| [server.py:1176](../../capture/server.py#L1176) | cohort batch resume |
+| [`jobs._run_analysis_job`](../../capture/jobs.py) | single-session `Analyze` |
+| [`jobs.run_cohort`](../../capture/jobs.py) | cohort run (full stage, or `analysis_only` when collecting an existing Batch) |
+| [`jobs.resume_cohort`](../../capture/jobs.py) | cohort batch resume (`analysis_only`) |
 
 **Failure mode:** call `analyze.run_cohort_job` without wrapping it and
 `session_chunk_names` returns `[]`, which
@@ -96,25 +96,22 @@ errored, no indication that the cause was a missing context manager. The pipelin
 does not distinguish "this session was never recorded" from "its chunks are in S3
 and nobody fetched them."
 
-### The leak: resume does not need chunks, but stages them anyway
+### Resume does not need chunks
 
-[`_resume_cohort_batch`](../../capture/server.py#L1169) wraps
-`analyze.resume_cohort_batch` in `chunks_on_disk`. But the resume path never
-re-extracts — it reads a digest that a prior run already wrote to disk:
+[`jobs.resume_cohort`](../../capture/jobs.py) and a Start on a cohort that already
+has a Batch name wrap `resume_cohort_batch` in `chunks_on_disk(..., analysis_only=True)`.
+Resume never re-extracts — it reads a digest that a prior run already wrote:
 
 > ```python
 > digest = load_session_digest(session_dir) or {"frames": [], "warnings": []}
 > ```
-> — [__init__.py:2561](../../capture/analyze/__init__.py#L2561)
+> — [`cohorts.py`](../../capture/analyze/cohorts.py)
 
-So on resume the staging is pure cost: a full S3 fetch of every chunk in the cohort,
-on process startup, to satisfy a code path that reads none of them. For a 100-session
-cohort that is 100 sessions × N chunks of needless download before the server is
-usefully up.
-
-It is *harmless* — which is why it has survived — but it is the kind of thing that
-looks load-bearing to the next reader. It is not: `resume_cohort_batch` reads
-`.analysis/digest.json`, which `_unstage_chunks` never touches.
+Staging rrweb chunks on that path is pure cost: a full S3 fetch of every session
+in the cohort, on process startup (or on Start), for a code path that reads none
+of them. `analysis_only` still fetches `.analysis/` (`digest.json` + frames) so a
+cold box can collect; it skips `list_chunks` / `open_chunk`. A first extract, or
+`force=True`, still stages the chunks.
 
 ---
 

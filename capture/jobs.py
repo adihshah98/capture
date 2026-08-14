@@ -135,8 +135,9 @@ async def chunks_on_disk(project, session_ids: list, *, analysis_only: bool = Fa
     afterwards. A successful run also copies `.analysis/` to S3 so the next
     box does not have to reconstruct. A no-op when chunks are already local.
 
-    `analysis_only` is for Batch resume: that path reads digest.json, never
-    the rrweb chunks, so fetching them on startup was pure cost.
+    `analysis_only` is for Batch resume (startup, or Start on a cohort that
+    already has a job name): that path reads digest.json, never the rrweb
+    chunks, so fetching them was pure cost.
     """
     if not storage.configured():
         yield
@@ -235,7 +236,13 @@ async def run_cohort(project: projects.Project, cohort_id: str, force: bool = Fa
         cohort = ap.cohort(project, cohort_id)
         if not cohort:
             return
-        async with chunks_on_disk(project, cohort_session_ids(cohort)):
+        # Same condition as run_cohort_job: an existing Batch name means
+        # collect from digest.json, not re-extract. Staging rrweb chunks
+        # here would be a full S3 fetch the resume path never reads.
+        analysis_only = bool((cohort.get("batch") or {}).get("name")) and not force
+        async with chunks_on_disk(
+            project, cohort_session_ids(cohort), analysis_only=analysis_only
+        ):
             await ap.run_cohort(project, cohort, force=force)
     except asyncio.CancelledError:
         cohort = ap.cohort(project, cohort_id)

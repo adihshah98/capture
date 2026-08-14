@@ -267,6 +267,50 @@ class TestResumeCohortStaging(unittest.TestCase):
         self.assertEqual(seen["analysis_only"], True)
         self.assertEqual(seen["ids"], ["s1"])
 
+    def _run_staging_flag(self, cohort, *, force=False):
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock, patch
+
+        from capture import jobs
+
+        seen = {}
+
+        @asynccontextmanager
+        async def fake_chunks(project, session_ids, *, analysis_only=False):
+            seen["analysis_only"] = analysis_only
+            yield
+
+        project = Project(Path("/unused"), "cap_a")
+        project.id = "project-1"
+        with (
+            patch.object(jobs, "chunks_on_disk", fake_chunks),
+            patch.object(jobs.ap, "cohort", return_value=cohort),
+            patch.object(jobs.ap, "run_cohort", new_callable=AsyncMock),
+        ):
+            asyncio.run(jobs.run_cohort(project, "c1", force=force))
+        return seen.get("analysis_only")
+
+    def test_run_skips_chunks_when_collecting_an_existing_batch(self):
+        """Start on a resumable cohort must not fetch rrweb chunks first."""
+        cohort = {
+            "id": "c1",
+            "sessions": [{"session_id": "s1"}],
+            "batch": {"name": "batches/x"},
+        }
+        self.assertTrue(self._run_staging_flag(cohort))
+
+    def test_run_stages_chunks_for_a_fresh_extract(self):
+        cohort = {"id": "c1", "sessions": [{"session_id": "s1"}]}
+        self.assertFalse(self._run_staging_flag(cohort))
+
+    def test_force_run_stages_chunks_even_with_a_batch(self):
+        cohort = {
+            "id": "c1",
+            "sessions": [{"session_id": "s1"}],
+            "batch": {"name": "batches/x"},
+        }
+        self.assertFalse(self._run_staging_flag(cohort, force=True))
+
 
 class TestLoadSessionDigest(unittest.TestCase):
     def test_frame_paths_are_rewritten_to_this_directory(self):
