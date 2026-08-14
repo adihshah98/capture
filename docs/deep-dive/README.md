@@ -3,11 +3,15 @@
 A companion series to [analyze-design-review.md](../analyze-design-review.md), one
 aspect per document.
 
-**Read the design review first.** It is the map: what the package is, how it is
-decomposed, and where that decomposition is wrong. These documents are the terrain
-underneath it — for each subsystem, the constraint that forced the design, the
-failure mode the design prevents, and the invariant you would break by "cleaning it
-up."
+**Read the design review first** (it is a point-in-time map; `__init__.py` is now a
+19-line docstring, sampling is SQL, there is no compat layer). These documents are
+the terrain underneath it — for each subsystem, the constraint that forced the
+design, the failure mode the design prevents, and the invariant you would break by
+"cleaning it up."
+
+05 (compat sampling) and 07 (patch forwarding) describe mechanisms that have been
+deleted; their banners say so. The invariant in 07 still holds: patch at the
+definition site, never `from .owner import patched_name`.
 
 The split in one line: **the design review says what the design is; a deep dive says
 what happens when you get it wrong.**

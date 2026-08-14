@@ -1,7 +1,8 @@
 # 05 — Sampling and the compat layer
 
-How a cohort's members are chosen, why five functions still emit SQLite SQL against
-a Postgres database, and where the silent wrong answers come from.
+> **Historical.** Sampling is SQL on materialised class columns (`sessions.outcome`,
+> `device_class`, `page`, UTM). `compat.py` and the SQLite-shaped view are gone.
+> Kept as the record of why the compat layer existed and what it was protecting.
 
 ---
 

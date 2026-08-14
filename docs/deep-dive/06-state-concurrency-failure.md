@@ -2,6 +2,9 @@
 
 Six statuses, two semaphores, and what survives a process dying mid-batch.
 
+Line citations into `__init__.py` below are historical — status projection is
+`cohort_state.py`, gates are `runtime.py`, batch resume is `cohorts.py`.
+
 ---
 
 ## The constraint: the stored status goes stale

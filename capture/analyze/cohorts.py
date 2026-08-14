@@ -14,7 +14,6 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from .. import projects
 from . import gemini, runtime, session, spec
 from . import store as analyze_store
 from .cohort_state import enrich_cohort_status
@@ -257,9 +256,7 @@ async def run_cohort_job(
                     raise RuntimeError("no chunks to analyze")
                 if force:
                     clear_analysis(project_id, sid, session_dir=session_path)
-                digest = await session.extract_session_digest(
-                    session_path, chunks, project_id=project_id, force=True
-                )
+                digest = await session.extract_session_digest(session_path, chunks)
                 prepared.append((entry, digest))
             except asyncio.CancelledError:
                 raise
@@ -460,18 +457,10 @@ async def _cohort_sync_model(
     )
 
 
-def cohorts_needing_batch_resume(data_root: Path | None = None) -> list:
+def cohorts_needing_batch_resume() -> list:
     """(project_id, cohort) pairs with an in-flight Batch job name.
 
-    An index lookup over every project. `data_root` is accepted and ignored —
-    identity is the project UUID, and sessions_root is `project.pool` when a
-    caller needs the filesystem.
+    An index lookup over every project. Identity is the project UUID;
+    sessions_root is `project.pool` when a caller needs the filesystem.
     """
-    del data_root  # identity is project_id; kept for call-site compatibility
-    known = {p.id for p in projects.all_projects(fresh=True)}
-    conn = analyze_store.connect()
-    out = []
-    for project_id, cohort in analyze_store.resumable_cohorts(conn):
-        if project_id in known:
-            out.append((project_id, cohort))
-    return out
+    return analyze_store.resumable_cohorts(analyze_store.connect())

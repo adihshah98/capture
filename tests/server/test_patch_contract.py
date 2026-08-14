@@ -22,15 +22,26 @@ from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parent.parent.parent / "capture" / "analyze"
 
-# Names the suite still rebinds on the package (or that a submodule could
-# plausibly rebind later via assignment). A `from .x import <one of these>` is
-# the bug this file exists to catch for that style.
+# Names tests patch on owner modules. A `from .gemini import call_gemini` (or
+# the equivalent for any of these) copies the function into the importer's
+# globals at import time, so a later `patch.object(gemini, "call_gemini", fake)`
+# never reaches the call site — a green suite that bills Gemini.
 #
-# Gemini I/O, session extraction, cut/chat, and cohort orchestration live on
-# owner modules; tests patch `capture.analyze.gemini` / `session` / `cuts` /
-# `cohorts` rather than the package. ANALYSIS_ENABLED / ANALYZE_BATCH live on
-# runtime.py for the same reason.
-PATCHABLE = frozenset()
+# Import the module and call through it: `gemini.call_gemini(...)`.
+# Keep this set in lockstep with the patch.object targets in tests/server.
+PATCHABLE = frozenset(
+    {
+        "run_extractor",
+        "call_gemini",
+        "submit_prepared_gemini_batch",
+        "wait_gemini_batch",
+        "parse_batch_results",
+        "session_metadata",
+        "call_gemini_cut",
+        "stream_gemini_chat",
+        "_cohort_sync_model",
+    }
+)
 
 
 def _package_sources():
@@ -41,6 +52,7 @@ class TestPatchableNamesAreNotBoundAtImport(unittest.TestCase):
     """A patchable name must be reached through its module, not copied in."""
 
     def test_no_relative_import_binds_a_patchable_name(self):
+        self.assertTrue(PATCHABLE, "an empty PATCHABLE makes this test vacuous")
         offenders = []
         for source in _package_sources():
             tree = ast.parse(source.read_text(), filename=str(source))

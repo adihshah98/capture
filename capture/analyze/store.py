@@ -29,11 +29,10 @@ import json
 import threading
 import time
 from contextlib import contextmanager
-from pathlib import Path
 
 from psycopg.rows import dict_row
 
-from .. import db, projects
+from .. import db
 
 # Columns promoted out of the cohort blob. Everything else in a cohort dict
 # (purchased_n, all_n, slice, selection, url_contains, ...) rides in `fields`.
@@ -74,14 +73,9 @@ class Store:
 _store = Store()
 
 
-def connect(data_root: Path | None = None) -> Store:
-    """The handle analyze.py threads through. data_root is accepted and ignored:
-    cohorts are no longer addressed by where the pool sits on disk."""
+def connect() -> Store:
+    """The handle analyze threads through. Cohorts are addressed by project_id."""
     return _store
-
-
-def close_all() -> None:
-    """The connection pool is db.py's; nothing per-store to close."""
 
 
 def _rows(conn):
@@ -379,8 +373,8 @@ def resumable_cohorts(store: Store) -> list:
 
     Spans projects, so it runs with admin scope — it is the startup path
     deciding what to re-attach to, before any request has named a project.
+    Callers that need a live Project (startup resume) resolve the id once.
     """
-    known = {p.id for p in projects.all_projects(fresh=True)}
     out = []
     with store.admin_tx() as conn:
         rows = (
@@ -392,8 +386,6 @@ def resumable_cohorts(store: Store) -> list:
             if not (row.get("batch") or {}).get("name"):
                 continue
             pid = str(row["project_id"])
-            if pid not in known:
-                continue
             sessions = _read_sessions(conn, row["project_id"], row["cohort_id"])
             out.append((pid, _row_to_cohort(row, sessions)))
     return out

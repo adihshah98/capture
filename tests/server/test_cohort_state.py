@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pgfixture
 
 from capture.analyze import cohort_state, storage
-from capture.analyze import store as analyze_store
 
 BASELINE = json.loads(
     (Path(__file__).parent / "fixtures" / "cohort_status_baseline.json").read_text()
@@ -156,7 +155,6 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
             directory = self.pool / f"s{i}"
             directory.mkdir(exist_ok=True)
             storage.write_analysis(self.project_id, directory.name, {"text": "write-up"})
-        self.addCleanup(analyze_store.close_all)
         return storage.read_cohort(self.project_id, "c")
 
     def live(self):

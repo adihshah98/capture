@@ -95,15 +95,15 @@ def write_analysis_result(
     return result
 
 
-async def extract_session_digest(
-    session_dir: Path, chunk_names: list, *, project_id: str, force: bool = False
-) -> dict:
-    """Rebuild frames for a session. Returns the extractor digest."""
-    if not force:
-        cached = read_analysis(project_id, session_dir.name)
-        if cached:
-            return {"cached": True, "analysis": cached}
+async def extract_session_digest(session_dir: Path, chunk_names: list) -> dict:
+    """Rebuild frames for a session. Always runs the extractor.
 
+    A cached *write-up* is `analyze_session`'s concern (`read_analysis`).
+    A cached *reconstruction* is `load_session_digest` (digest.json on disk).
+    This function used to return a write-up shaped as a digest when
+    `force=False`, which no production caller wanted and which would hand
+    Gemini a document with no frames.
+    """
     _, out_dir = analysis_paths(session_dir)
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -128,9 +128,7 @@ async def analyze_session(
         if cached:
             return cached
 
-    digest = await extract_session_digest(
-        session_dir, chunk_names, project_id=project_id, force=True
-    )
+    digest = await extract_session_digest(session_dir, chunk_names)
     meta = gemini.session_metadata(project_id, session_id)
     _, model_gate = runtime._gates()
     async with model_gate:

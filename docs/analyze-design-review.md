@@ -3,6 +3,12 @@
 *Reviewed 2026-08-11, re-verified against* `main` *@* `70f5748`*. Part 1 of 3:
 **design** · [bugs](analyze-bug-review.md) · [cleanups](analyze-cleanups.md).*
 
+> **Later.** The package has been split. `__init__.py` is a 19-line docstring,
+> sampling is SQL on ingest-time class columns, `create_cohort` is groups-only,
+> and tests patch owner modules. Measurements below (3,026-line `__init__.py`,
+> 29-parameter `create_cohort`, Python-after-LIMIT sampling) are the tree this
+> review was written against, not HEAD.
+
 > **Re-verification note.** Fifteen commits landed after the first draft. They left
 > `capture/analyze/` **byte-identical** — every measurement in §1–§2 still holds — but
 > restructured everything around it. Three consequences, detailed in §0:

@@ -4,6 +4,9 @@ A cohort is a frozen sample of sessions. A cut is a filter over that cohort, ana
 once and cached. This document covers why the freezing matters, what the cache key
 must contain, and why the numbers in the prompt are computed in Python.
 
+Line citations into `__init__.py` below are historical — those functions now live
+in `stats.py`, `cuts.py`, `cohorts.py`, and `cohort_state.py`.
+
 ---
 
 ## The constraint: the model invents numbers

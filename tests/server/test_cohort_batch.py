@@ -255,7 +255,7 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         self.assertEqual((saved.get("batch") or {}).get("name"), "batches/JOB1")
         self.assertEqual(saved["status"], "running")
         self.assertEqual(
-            [c["id"] for _, c in cohorts.cohorts_needing_batch_resume(self.root)],
+            [c["id"] for _, c in cohorts.cohorts_needing_batch_resume()],
             ["cohort-1"],
         )
 
@@ -354,7 +354,7 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         self.assertEqual((saved.get("batch") or {}).get("name"), "batches/JOB1")
         self.assertEqual(saved["status"], "running")
         self.assertEqual(
-            [c["id"] for _, c in cohorts.cohorts_needing_batch_resume(self.root)],
+            [c["id"] for _, c in cohorts.cohorts_needing_batch_resume()],
             ["cohort-1"],
         )
 

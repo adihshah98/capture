@@ -45,7 +45,6 @@ class StoreCase(pgfixture.CohortStoreMixin, unittest.TestCase):
 
         self.acme_id = projects.by_handle("acme").id
         self.addCleanup(self.tmp.cleanup)
-        self.addCleanup(analyze_store.close_all)
 
 
 class TestRoundTrip(StoreCase):
@@ -591,7 +590,7 @@ class TestResume(StoreCase):
         # Running but never submitted: nothing to resume.
         storage.write_cohort(self.project_id, cohort("cohort-nojob", status="running"))
 
-        found = cohorts.cohorts_needing_batch_resume(self.root)
+        found = cohorts.cohorts_needing_batch_resume()
         self.assertEqual([c["id"] for _, c in found], ["cohort-run"])
         self.assertEqual(found[0][0], self.project_id)
 
@@ -599,7 +598,7 @@ class TestResume(StoreCase):
         storage.write_cohort(
             self.acme_id, cohort("cohort-acme", status="running", batch={"name": "batches/J2"})
         )
-        found = cohorts.cohorts_needing_batch_resume(self.root)
+        found = cohorts.cohorts_needing_batch_resume()
         self.assertEqual([(pid, c["id"]) for pid, c in found], [(self.acme_id, "cohort-acme")])
 
     def test_pools_are_keyed_apart(self):

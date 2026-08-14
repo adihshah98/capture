@@ -24,7 +24,6 @@ Two rules worth keeping if you edit this:
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from . import paths
 from .analyze import (
     cohort_state,
     cuts,
@@ -254,7 +253,7 @@ def pending_batch_resumes() -> list:
     from . import projects as _projects
 
     out = []
-    for project_id, cohort in cohort_jobs.cohorts_needing_batch_resume(paths.DATA_ROOT):
+    for project_id, cohort in cohort_jobs.cohorts_needing_batch_resume():
         found = _projects.by_id(project_id)
         if found is None:
             print(f"cohort resume: no project {project_id}, skipping {cohort.get('id')}")
