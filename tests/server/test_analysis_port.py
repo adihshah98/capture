@@ -154,8 +154,6 @@ class TestVocabularyIsExposed(unittest.TestCase):
     def test_the_cohort_limits_are_concrete(self):
         for name in (
             "MAX_SESSIONS",
-            "DEFAULT_PURCHASED_N",
-            "DEFAULT_ALL_N",
             "MIN_DURATION_MS",
         ):
             self.assertIsInstance(getattr(port, name), int, name)

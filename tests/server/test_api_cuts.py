@@ -35,8 +35,10 @@ class TestCutEndpoint(ServerCase):
         self.seed("cutall" + "x" * 26)
         qs = urllib.parse.urlencode(
             {
-                "purchased": 1,
-                "all": 1,
+                "a": 1,
+                "b": 1,
+                "outcome": "purchased",
+                "b_outcome": "all",
                 "min_duration_ms": 0,
                 "url_contains": "",
             }
@@ -206,8 +208,10 @@ class TestCutSlices(ServerCase):
             )
         qs = urllib.parse.urlencode(
             {
-                "purchased": 2,
-                "all": 2,
+                "a": 2,
+                "b": 2,
+                "outcome": "purchased",
+                "b_outcome": "all",
                 "min_duration_ms": 0,
                 "url_contains": "",
             }

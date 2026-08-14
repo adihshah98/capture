@@ -146,10 +146,8 @@ def _sample_cohort(found: projects.Project, selection: ap.CohortSpec, label: str
 
 @router.post("/api/cohorts")
 async def create_cohort(
+    request: Request,
     found: projects.Project = Depends(readable_project),
-    purchased: int | None = Query(None, ge=0, le=ap.MAX_SESSIONS),
-    all_n: int | None = Query(None, ge=0, le=ap.MAX_SESSIONS, alias="all"),
-    any_n: int = Query(0, ge=0, le=ap.MAX_SESSIONS, alias="any"),
     a_n: int = Query(0, ge=0, le=ap.MAX_SESSIONS, alias="a"),
     b_n: int = Query(0, ge=0, le=ap.MAX_SESSIONS, alias="b"),
     min_duration_ms: int = Query(ap.MIN_DURATION_MS, ge=0),
@@ -158,34 +156,19 @@ async def create_cohort(
     end_ms: int | None = Query(None, ge=0),
     order: str = Query(ap.ORDER_LATEST),
     label: str | None = Query(None, max_length=120),
-    outcome: list | None = Query(None),
-    device: list | None = Query(None),
-    page: str | None = Query(None),
-    utm_source: str | None = Query(None),
-    utm_medium: str | None = Query(None),
-    utm_campaign: str | None = Query(None),
-    utm_content: str | None = Query(None),
-    fbclid: str | None = Query(None),
-    b_outcome: list | None = Query(None),
-    b_device: list | None = Query(None),
-    b_page: str | None = Query(None),
-    b_utm_source: str | None = Query(None),
-    b_utm_medium: str | None = Query(None),
-    b_utm_campaign: str | None = Query(None),
-    b_utm_content: str | None = Query(None),
-    b_fbclid: str | None = Query(None),
 ):
     """Sample a new cohort only — does not start analysis. Prior cohorts are kept.
 
-    Preferred: `a` (+ optional `b`) with independent cut-style filters for each
-    group (`outcome`/`device`/… for A, `b_outcome`/`b_device`/… for B).
+    Groups only: `a` (+ optional `b`) with independent cut-style filters
+    (`outcome`/`device`/… for A, `b_outcome`/`b_device`/… for B).
 
     Optional `start_ms` / `end_ms` bound `last_seen`; `order` is latest or earliest.
     Optional `label` sets the display name (otherwise an auto label is used).
-    Legacy: `any` for one mixed pool, or `purchased` + `all` for a purchase
-    split. Omitting sizes falls back to the default 50+50 purchased sample.
     Total sessions are capped at COHORT_MAX_SESSIONS (500).
     """
+
+    if any(name in request.query_params for name in ("purchased", "all", "any")):
+        raise ApiError(400, "use a/b groups with slice filters, not purchased/all/any")
 
     sort = (order or "").strip().lower()
     if sort not in ap.ORDERS:
@@ -194,75 +177,25 @@ async def create_cohort(
         raise ApiError(400, "start_ms must be <= end_ms")
     chosen_label = ap.clean_label(label)
 
-    slice_a = _slice_from_params(
-        outcome,
-        device,
-        page,
-        utm_source,
-        utm_medium,
-        utm_campaign,
-        utm_content,
-        fbclid,
-    )
-    slice_b = _slice_from_params(
-        b_outcome,
-        b_device,
-        b_page,
-        b_utm_source,
-        b_utm_medium,
-        b_utm_campaign,
-        b_utm_content,
-        b_fbclid,
-    )
+    slice_a = _slice_from_query(request.query_params)
+    slice_b = _slice_from_query(request.query_params, prefix="b_")
 
-    use_groups = a_n > 0 or b_n > 0
-    if use_groups:
-        if any_n or purchased is not None or all_n is not None:
-            raise ApiError(400, "use either a/b groups or purchased/all/any, not both")
-        if a_n < 1:
-            raise ApiError(400, "group A needs at least one session")
-        purchased_n = 0
-        all_count = 0
-        any_count = 0
-        total = a_n + b_n
-    elif any_n > 0:
-        if purchased is not None or all_n is not None:
-            raise ApiError(400, "use either any=N or purchased/all, not both")
-        purchased_n = 0
-        all_count = 0
-        any_count = any_n
-        total = any_n
-    else:
-        purchased_n = ap.DEFAULT_PURCHASED_N if purchased is None else purchased
-        all_count = ap.DEFAULT_ALL_N if all_n is None else all_n
-        # If only one side was set, the other defaults to 0 (not the 50/50 preset).
-        if purchased is not None and all_n is None:
-            all_count = 0
-        if all_n is not None and purchased is None:
-            purchased_n = 0
-        any_count = 0
-        total = purchased_n + all_count
-        # Legacy purchased/non-purchase arms own the outcome split.
-        slice_a.pop("outcome", None)
-
-    if total < 1:
-        raise ApiError(400, "request at least one session")
+    if a_n < 1:
+        raise ApiError(400, "group A needs at least one session")
+    total = a_n + b_n
     if total > ap.MAX_SESSIONS:
         raise ApiError(400, f"cohort size capped at {ap.MAX_SESSIONS} sessions")
 
     selection = ap.CohortSpec(
-        purchased_n=purchased_n,
-        all_n=all_count,
-        any_n=any_count,
-        a_n=a_n if use_groups else 0,
-        b_n=b_n if use_groups else 0,
+        a_n=a_n,
+        b_n=b_n,
         min_duration_ms=min_duration_ms,
         url_contains=url_contains,
         start_ms=start_ms,
         end_ms=end_ms,
         order=sort,
         slice_spec=slice_a,
-        slice_b=slice_b if use_groups and b_n > 0 else {},
+        slice_b=slice_b if b_n > 0 else {},
     )
     # Off the event loop: this is a pooled psycopg checkout (up to
     # CAPTURE_DB_WAIT_S) plus a sorted scan, and running it inline stalls every
@@ -744,6 +677,25 @@ def _multi_param(raw, allowed, field) -> list:
             if value not in out:
                 out.append(value)
     return out
+
+
+def _slice_from_query(params, prefix: str = "") -> dict:
+    """Cut-style slice from query params, optionally prefixed (`b_outcome`, …)."""
+
+    def first(name: str) -> str | None:
+        values = params.getlist(f"{prefix}{name}")
+        return values[0] if values else None
+
+    return _slice_from_params(
+        params.getlist(f"{prefix}outcome") or None,
+        params.getlist(f"{prefix}device") or None,
+        first("page"),
+        first("utm_source"),
+        first("utm_medium"),
+        first("utm_campaign"),
+        first("utm_content"),
+        first("fbclid"),
+    )
 
 
 def _slice_from_params(

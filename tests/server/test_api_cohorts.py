@@ -34,14 +34,15 @@ class TestCohort(ServerCase):
             },
         )
 
-    def create_cohort_url(self, purchased=1, all_n=0, **extra):
+    def create_cohort_url(self, a=1, b=0, **extra):
         """POST URL that disables production ashwamag/≥5s filters for test fixtures."""
         params = {
-            "purchased": purchased,
-            "all": all_n,
+            "a": a,
             "min_duration_ms": 0,
             "url_contains": "",
         }
+        if b:
+            params["b"] = b
         params.update(extra)
         qs = urllib.parse.urlencode(params)
         return f"{self.base}/api/cohorts?{qs}"
@@ -50,9 +51,9 @@ class TestCohort(ServerCase):
         qs = urllib.parse.urlencode(extra) if extra else ""
         return f"{self.base}/api/cohorts/{cohort_id}/analyze" + (f"?{qs}" if qs else "")
 
-    def create_and_analyze(self, purchased=1, all_n=0, **extra):
+    def create_and_analyze(self, a=1, b=0, **extra):
         status, body = request(
-            self.create_cohort_url(purchased=purchased, all_n=all_n, **extra),
+            self.create_cohort_url(a=a, b=b, **extra),
             method="POST",
             data=b"",
         )
@@ -94,7 +95,7 @@ class TestCohort(ServerCase):
         sid = "getpers" + "x" * 25
         self.assertEqual(self.ingest(sid), 200)
         self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-        status, body = request(self.create_cohort_url(purchased=1, all_n=0), method="POST", data=b"")
+        status, body = request(self.create_cohort_url(a=1), method="POST", data=b"")
         self.assertEqual(status, 201, body)
         cohort_id = json.loads(body)["id"]
 
@@ -145,15 +146,15 @@ class TestCohort(ServerCase):
             self.assertEqual(self.ingest(sid), 200)
             self.seed_analysis(sid)
 
-        cohort = self.create_and_analyze(purchased=2, all_n=2)
-        self.assertEqual(cohort["purchased_n"], 2)
-        self.assertEqual(cohort["all_n"], 2)
+        cohort = self.create_and_analyze(a=2, b=2, outcome="purchased", b_outcome="all")
+        self.assertEqual(cohort["a_n"], 2)
+        self.assertEqual(cohort["b_n"], 2)
         self.assertEqual(len(cohort["sessions"]), 4)
-        self.assertIn("purchased", cohort.get("selection", ""))
+        self.assertIn("for A", cohort.get("selection", ""))
         filters = {s["filter"] for s in cohort["sessions"]}
-        self.assertEqual(filters, {"purchased", "all"})
-        purchased_ids = {s["session_id"] for s in cohort["sessions"] if s["filter"] == "purchased"}
-        all_ids = {s["session_id"] for s in cohort["sessions"] if s["filter"] == "all"}
+        self.assertEqual(filters, {"a", "b"})
+        purchased_ids = {s["session_id"] for s in cohort["sessions"] if s["filter"] == "a"}
+        all_ids = {s["session_id"] for s in cohort["sessions"] if s["filter"] == "b"}
         self.assertTrue(purchased_ids <= set(purchased))
         self.assertTrue(all_ids <= set(plain))
         self.assertFalse(purchased_ids & all_ids)
@@ -175,7 +176,7 @@ class TestCohort(ServerCase):
         for entry in saved["sessions"]:
             self.assertNotIn("text", entry)
 
-    def test_rejects_cohorts_over_500_and_supports_any_sample(self):
+    def test_rejects_cohorts_over_500_and_samples_a_mixed_group(self):
         for i in range(3):
             sid = f"any{i}" + "x" * 28
             self.assertEqual(self.ingest(sid), 200)
@@ -184,7 +185,7 @@ class TestCohort(ServerCase):
             self.seed_analysis(sid)
 
         status, body = request(
-            self.create_cohort_url(purchased=300, all_n=250),
+            self.create_cohort_url(a=300, b=250),
             method="POST",
             data=b"",
         )
@@ -192,16 +193,23 @@ class TestCohort(ServerCase):
         self.assertIn("500", json.loads(body)["error"])
 
         status, body = request(
-            f"{self.base}/api/cohorts?"
-            + urllib.parse.urlencode({"any": 2, "min_duration_ms": 0, "url_contains": ""}),
+            self.create_cohort_url(purchased=1),
+            method="POST",
+            data=b"",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("a/b groups", json.loads(body)["error"])
+
+        status, body = request(
+            self.create_cohort_url(a=2),
             method="POST",
             data=b"",
         )
         self.assertEqual(status, 201, body)
         cohort = json.loads(body)
-        self.assertEqual(cohort["any_n"], 2)
+        self.assertEqual(cohort["a_n"], 2)
         self.assertEqual(len(cohort["sessions"]), 2)
-        self.assertIn("matching", cohort.get("selection", ""))
+        self.assertIn("for A", cohort.get("selection", ""))
 
     def test_pool_facets_and_slice_filtered_create(self):
         mobile = "facetm" + "x" * 26
@@ -262,7 +270,7 @@ class TestCohort(ServerCase):
             f"{self.base}/api/cohorts?"
             + urllib.parse.urlencode(
                 {
-                    "any": 5,
+                    "a": 5,
                     "min_duration_ms": 0,
                     "url_contains": "",
                     "device": "mobile",
@@ -341,7 +349,7 @@ class TestCohort(ServerCase):
 
         ids = []
         for _ in range(2):
-            cohort = self.create_and_analyze(purchased=1, all_n=0)
+            cohort = self.create_and_analyze(a=1, outcome="purchased")
             cohort_id = cohort["id"]
             ids.append(cohort_id)
             self.wait_done(cohort_id)
@@ -403,7 +411,7 @@ class TestCohort(ServerCase):
         self.assertEqual(self.ingest(sid), 200)
         self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
         self.seed_analysis(sid)
-        cohort = self.create_and_analyze(purchased=1, all_n=0)
+        cohort = self.create_and_analyze(a=1, outcome="purchased")
         cohort_id = cohort["id"]
         self.wait_done(cohort_id)
 
@@ -440,7 +448,7 @@ class TestCohort(ServerCase):
             self.assertEqual(self.ingest(sid), 200)
             self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
             self.seed_analysis(sid)
-        cohort = self.create_and_analyze(purchased=2, all_n=0)
+        cohort = self.create_and_analyze(a=2, outcome="purchased")
         self.wait_done(cohort["id"])
         self.assertEqual(len(self.stored_cohort(cohort["id"])["sessions"]), 2)
 
@@ -476,7 +484,7 @@ class TestCohort(ServerCase):
         self.assertEqual(self.ingest(sid), 200)
         self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
         self.seed_analysis(sid)
-        cohort = self.create_and_analyze(purchased=1, all_n=0)
+        cohort = self.create_and_analyze(a=1, outcome="purchased")
         cohort_id = cohort["id"]
         self.wait_done(cohort_id)
         return cohort_id
@@ -548,7 +556,7 @@ class TestCohortUnavailable(ServerCase):
         sid = "d" * 32
         self.assertEqual(self.ingest(sid), 200)
         status, body = request(
-            f"{self.base}/api/cohorts?purchased=0&all=1&min_duration_ms=0&url_contains=",
+            f"{self.base}/api/cohorts?a=1&min_duration_ms=0&url_contains=",
             method="POST",
             data=b"",
         )

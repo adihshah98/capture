@@ -249,7 +249,7 @@ class TestCohortSampling(unittest.TestCase):
         )
         self.assertEqual(
             [(s["session_id"], s["filter"]) for s in sampled],
-            [("newbuy" + "x" * 26, "purchased"), ("newall" + "x" * 26, "all")],
+            [("newbuy" + "x" * 26, "a"), ("newall" + "x" * 26, "b")],
         )
 
     def test_clicks_break_last_seen_ties(self):
@@ -455,7 +455,7 @@ class TestCohortSampling(unittest.TestCase):
         )
         self.assertEqual(
             {(s["session_id"], s["filter"]) for s in sampled},
-            {("okbuy" + "x" * 27, "purchased"), ("okall" + "x" * 27, "all")},
+            {("okbuy" + "x" * 27, "a"), ("okall" + "x" * 27, "b")},
         )
 
     def test_an_empty_url_filter_samples_every_page(self):
@@ -535,7 +535,7 @@ class TestCohortSampling(unittest.TestCase):
         sampled = sampling.sample_cohort_rows(conn, "", CohortSpec(any_n=2, url_contains=""))
         self.assertEqual(
             [(s["session_id"], s["filter"]) for s in sampled],
-            [("buy1" + "x" * 28, "purchased"), ("rest1" + "x" * 27, "all")],
+            [("buy1" + "x" * 28, "a"), ("rest1" + "x" * 27, "a")],
         )
 
     def test_sample_honors_cut_style_slice_filters(self):
@@ -937,6 +937,33 @@ class TestCohortSampling(unittest.TestCase):
             {"requested": 3, "matched": 1, "scanned": 1, "capped": False},
         )
         self.assertEqual(len(cohort["sessions"]), 1)
+        self.assertEqual(cohort["a_n"], 3)
+        self.assertEqual(cohort["any_n"], 0)
+        self.assertEqual(cohort["sessions"][0]["filter"], "a")
+
+    def test_as_groups_rewrites_legacy_specs(self):
+        split = CohortSpec(
+            purchased_n=2, all_n=3, url_contains="", slice_spec={"device": ["mobile"]}
+        )
+        grouped = split.as_groups()
+        self.assertEqual(grouped.a_n, 2)
+        self.assertEqual(grouped.b_n, 3)
+        self.assertEqual(grouped.slice_spec["outcome"], ["purchased"])
+        self.assertEqual(grouped.slice_b["outcome"], ["checkout", "rest"])
+        self.assertEqual(grouped.slice_spec["device"], ["mobile"])
+        self.assertEqual(grouped.purchased_n, 0)
+
+        mixed = CohortSpec(any_n=7, url_contains="", slice_spec={"page": "/p"})
+        self.assertEqual(mixed.as_groups().a_n, 7)
+        self.assertEqual(mixed.as_groups().slice_spec, {"page": "/p"})
+
+    def test_legacy_stored_cohorts_still_describe_themselves(self):
+        from capture.analyze.labels import cohort_selection_text
+
+        spec = CohortSpec.from_cohort({"purchased_n": 50, "all_n": 50, "min_duration_ms": 5000})
+        text = cohort_selection_text(spec)
+        self.assertIn("50 purchased + 50 non-purchase", text)
+        self.assertNotIn("for A", text)
 
     def test_standout_line_prefers_what_stands_out_section(self):
         text = (

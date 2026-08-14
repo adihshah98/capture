@@ -59,7 +59,7 @@ def build_cohort(
         selection.normalised(),
         slice_spec=normalize_slice(selection.slice_spec),
         slice_b=normalize_slice(selection.slice_b),
-    )
+    ).as_groups()
     result = sample_cohort(conn, project_id, selection)
     stamp = time.strftime("%b %-d, %-I:%M %p", time.localtime(now / 1000))
     chosen = clean_cohort_label(label) or _auto_cohort_label(selection, stamp=stamp)
@@ -72,15 +72,11 @@ def build_cohort(
         "updated_at": now,
         # Sampled only — analysis starts via POST .../analyze.
         "status": "idle",
-        # The legacy arms are only meaningful in their own mode; recording them
-        # alongside any_n/a_n would make the stored rule ambiguous.
-        "purchased_n": selection.purchased_n
-        if selection.total == selection.purchased_n + selection.all_n
-        else 0,
-        "all_n": selection.all_n
-        if selection.total == selection.purchased_n + selection.all_n
-        else 0,
-        "any_n": selection.any_n,
+        # Legacy arms stay on the document at 0 so from_cohort can still
+        # describe cohorts sampled before groups existed.
+        "purchased_n": 0,
+        "all_n": 0,
+        "any_n": 0,
         "a_n": selection.a_n,
         "b_n": selection.b_n,
         "min_duration_ms": selection.min_duration_ms,

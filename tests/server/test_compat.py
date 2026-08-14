@@ -117,9 +117,12 @@ class TestAnalyzeOnPublicSchema(SamplingCase):
             rows = sampling.sample_cohort_rows(
                 conn, str(self.alpha), CohortSpec(any_n=10, url_contains="")
             )
-        classified = {r["session_id"]: r["filter"] for r in rows}
-        self.assertEqual(classified["a-bought"], "purchased")
-        self.assertNotEqual(classified["a-browsed"], "purchased")
+            classified = {r["session_id"]: r["filter"] for r in rows}
+            self.assertEqual(classified["a-bought"], "a")
+            self.assertEqual(classified["a-browsed"], "a")
+            facts = sampling.classified_rows(conn, str(self.alpha), ["a-bought", "a-browsed"])
+        self.assertEqual(facts["a-bought"]["outcome"], "purchased")
+        self.assertEqual(facts["a-browsed"]["outcome"], "rest")
 
     def test_build_cohort_composes_a_group(self):
         with db.connection(self.alpha) as conn:

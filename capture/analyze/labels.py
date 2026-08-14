@@ -73,6 +73,7 @@ def cohort_selection_text(selection: CohortSpec) -> str:
             f"timestamps tie."
         )
 
+    # Stored cohorts sampled before groups existed. New samples never land here.
     if any_n > 0:
         who = f"{rank} {any_n} matching"
     else:
@@ -116,6 +117,7 @@ def _auto_cohort_label(selection: CohortSpec, *, stamp: str) -> str:
         else:
             parts.extend(a_bits)
     elif any_n > 0 or purchased_n or all_n:
+        # Display shim: old any / purchased+all cohorts still have a name.
         parts.extend(_slice_label_bits(slice_spec, url_contains))
     return " · ".join(parts)[:120]
 

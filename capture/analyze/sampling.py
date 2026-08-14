@@ -106,7 +106,6 @@ def classified_row(
         "attribution": _attribution_from_columns(
             utm_source, utm_medium, utm_campaign, utm_content, has_fbclid
         ),
-        "bought": outcome_value == "purchased",
     }
 
 
@@ -466,10 +465,13 @@ def _sample_matching_rows(
 def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> SampleResult:
     """Sessions matching a selection rule, plus how the request resolved.
 
+    Always groups (A, optional B). `spec.as_groups()` rewrites a stored
+    any / purchased+all rule so those callers share this path.
+
     `spec.order` is latest (default) or earliest by `last_seen`; `start_ms` /
     `end_ms` bound that same clock. Sessions with more clicks win a tie.
     """
-    spec = spec.normalised()
+    spec = spec.as_groups()
     base: dict[str, Any] = {
         "min_duration_ms": spec.min_duration_ms,
         "url_contains": spec.url_contains,
@@ -478,101 +480,29 @@ def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> Sample
         "order": spec.order,
     }
 
-    if spec.uses_groups:
-        a = _sample_matching_rows(
-            conn, project_id, spec.a_n, slice_spec=spec.slice_spec, tag="a", **base
-        )
-        if spec.b_n > 0:
-            b = _sample_matching_rows(
-                conn,
-                project_id,
-                spec.b_n,
-                # An unset B slice means "same filter as A", not "no filter".
-                slice_spec=spec.slice_b or spec.slice_spec,
-                exclude_ids={s["session_id"] for s in a.sessions},
-                tag="b",
-                **base,
-            )
-            return SampleResult(
-                sessions=a.sessions + b.sessions,
-                sample=_combine_stats(a.sample, b.sample),
-            )
-        return a
-
-    filter_spec = dict(normalize_slice(spec.slice_spec))
-    if spec.any_n <= 0:
-        # The purchased/all arms own the outcome split, so a slice must not
-        # constrain it as well.
-        filter_spec.pop("outcome", None)
-
-    needed = spec.total
-    if needed <= 0:
-        return SampleResult(sessions=[], sample=_empty_stats(0))
-
-    path_needle = "" if filter_spec.get("page") else spec.url_contains
-
-    def _entry(row: dict) -> dict:
-        return {
-            "session_id": row["session_id"],
-            "filter": "purchased" if row.get("bought") else "all",
-            "status": "queued",
-        }
-
-    if spec.any_n > 0:
-        rows = _sample_rows(
+    a = _sample_matching_rows(
+        conn, project_id, spec.a_n, slice_spec=spec.slice_spec, tag="a", **base
+    )
+    if spec.b_n > 0:
+        b = _sample_matching_rows(
             conn,
             project_id,
-            n=spec.any_n,
-            min_duration_ms=spec.min_duration_ms,
-            url_contains=path_needle,
-            slice_spec=filter_spec,
-            start_ms=spec.start_ms,
-            end_ms=spec.end_ms,
-            order=spec.order,
+            spec.b_n,
+            # An unset B slice means "same filter as A", not "no filter".
+            slice_spec=spec.slice_b or spec.slice_spec,
+            exclude_ids={s["session_id"] for s in a.sessions},
+            tag="b",
+            **base,
         )
-        sessions = [_entry(row) for row in rows]
-        matched = len(sessions)
         return SampleResult(
-            sessions=sessions,
-            sample=SampleStats(requested=needed, matched=matched, scanned=matched, capped=False),
+            sessions=a.sessions + b.sessions,
+            sample=_combine_stats(a.sample, b.sample),
         )
-
-    # purchased/all: two top-N queries with the same order ≡ interleaved
-    # bucket-fill over the merged stream, without scanning non-matches.
-    purchased_rows = _sample_rows(
-        conn,
-        project_id,
-        n=spec.purchased_n,
-        min_duration_ms=spec.min_duration_ms,
-        url_contains=path_needle,
-        slice_spec={**filter_spec, "outcome": ["purchased"]},
-        start_ms=spec.start_ms,
-        end_ms=spec.end_ms,
-        order=spec.order,
-    )
-    non_rows = _sample_rows(
-        conn,
-        project_id,
-        n=spec.all_n,
-        min_duration_ms=spec.min_duration_ms,
-        url_contains=path_needle,
-        slice_spec={**filter_spec, "outcome": ["checkout", "rest"]},
-        exclude_ids={row["session_id"] for row in purchased_rows},
-        start_ms=spec.start_ms,
-        end_ms=spec.end_ms,
-        order=spec.order,
-    )
-    sessions = [_entry(row) for row in purchased_rows] + [_entry(row) for row in non_rows]
-    matched = len(sessions)
-    scanned = len(purchased_rows) + len(non_rows)
-    return SampleResult(
-        sessions=sessions,
-        sample=SampleStats(requested=needed, matched=matched, scanned=scanned, capped=False),
-    )
+    return a
 
 
 def sample_cohort_rows(conn: Connection, project_id: str, spec: CohortSpec) -> list:
-    """Sessions matching a selection rule, in the mode the spec asks for.
+    """Sessions matching a selection rule.
 
     Prefer `sample_cohort` when the caller needs to know whether the request
     was filled; this keeps the list-shaped surface used by tests.
