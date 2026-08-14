@@ -16,8 +16,13 @@ than model ones:
   * The per-connection lock is gone. It guarded a `sqlite3.Connection`'s single
     transaction state, not the data; a pooled connection per transaction has no
     such thing to protect.
-  * The transaction is still reentrant: a nested call joins the outer
-    transaction instead of waiting on a row its own caller already holds.
+  * Reentrancy is gone. A nested call used to join the outer transaction via a
+    thread-local, because SQLite's single write lock meant a nested acquire
+    would deadlock a caller against itself. Postgres has no such lock, and no
+    caller nests: every function here opens one transaction and passes `conn`
+    to its helpers. If two writes ever need to commit together, thread `conn`
+    through explicitly rather than reviving ambient state — the signature
+    should say which transaction a call runs in.
 
 `connect()` returns a handle rather than a connection. Callers only ever pass
 it back into this module, and each entry point opens a pooled connection scoped
@@ -26,7 +31,6 @@ sessions.
 """
 
 import json
-import threading
 import time
 from contextlib import contextmanager
 
@@ -43,24 +47,16 @@ SESSION_COLUMNS = ("session_id", "status", "analysis", "error")
 class Store:
     """Stands in for the connection analyze.py used to pass around."""
 
-    def __init__(self):
-        self._local = threading.local()
-
     @contextmanager
     def tx(self, project_id: str):
-        """A transaction scoped to one project. Reentrant: a nested call joins
-        the outer transaction instead of waiting on a row the outer one already
-        holds."""
-        existing = getattr(self._local, "conn", None)
-        if existing is not None:
-            yield existing
-            return
+        """A transaction scoped to one project: a pooled connection with
+        `app.project_id` already set, so row level security applies.
+
+        Yields `(conn, project_id)` as a pair so a function body cannot query
+        under a project the connection was not stamped with.
+        """
         with db.connection(project_id) as conn:
-            self._local.conn = (conn, project_id)
-            try:
-                yield (conn, project_id)
-            finally:
-                self._local.conn = None
+            yield (conn, project_id)
 
     @contextmanager
     def admin_tx(self):

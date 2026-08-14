@@ -28,6 +28,10 @@ def configured() -> bool:
     return bool(os.environ.get("CAPTURE_DATABASE_URL"))
 
 
+def pool_max() -> int:
+    return int(os.environ.get("CAPTURE_DB_POOL_MAX", "10"))
+
+
 def pool() -> ConnectionPool:
     global _pool
     if _pool is None:
@@ -36,7 +40,7 @@ def pool() -> ConnectionPool:
                 _pool = ConnectionPool(
                     database_url(),
                     min_size=1,
-                    max_size=int(os.environ.get("CAPTURE_DB_POOL_MAX", "10")),
+                    max_size=pool_max(),
                     # Fail fast when the database is down. The default 30s wait
                     # would queue ingests behind an outage until they time out
                     # client-side; a prompt 503 lets the recorder retry instead.
