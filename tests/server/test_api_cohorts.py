@@ -102,7 +102,7 @@ class TestCohort(ServerCase):
         saved = self.stored_cohort(cohort_id)
         saved["status"] = "running"
         saved["sessions"][0]["status"] = "running"
-        saved["sessions"][0]["filter"] = "purchased"
+        saved["sessions"][0]["filter"] = "a"
         saved.pop("selection", None)
         self.store_cohort(saved)
 
@@ -117,7 +117,7 @@ class TestCohort(ServerCase):
         self.assertEqual(stored["status"], "done")
         self.assertEqual(stored["sessions"][0]["status"], "done")
         # Sampling extras must survive: GET used to DELETE+INSERT the whole list.
-        self.assertEqual(stored["sessions"][0]["filter"], "purchased")
+        self.assertEqual(stored["sessions"][0]["filter"], "a")
         # Enrich backfills selection on the response; a poll must not freeze the guess.
         self.assertIsNone(stored.get("selection"))
         self.assertTrue(live.get("selection"))

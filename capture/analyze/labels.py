@@ -1,8 +1,8 @@
 """The words a cohort is described by: its selection rule and its display name.
 
 Two audiences, both human. `cohort_selection_text` writes the sentence the
-Insights UI shows under a cohort ("Chosen as the latest 50 purchased + 50
-non-purchase sessions on /pages/x with duration >=5s..."), and
+Insights UI shows under a cohort ("Chosen as the latest 50 for A (purchased) +
+50 for B (did not purchase) sessions with duration >=5s..."), and
 `_auto_cohort_label` writes the short name a cohort gets when the user does not
 supply one.
 
@@ -50,8 +50,7 @@ def _time_window_text(start_ms: int | None, end_ms: int | None) -> str:
 def cohort_selection_text(selection: CohortSpec) -> str:
     """Human-readable sampling rule for the Insights UI."""
     selection = selection.normalised()
-    purchased_n, all_n = selection.purchased_n, selection.all_n
-    any_n, a_n, b_n = selection.any_n, selection.a_n, selection.b_n
+    a_n, b_n = selection.a_n, selection.b_n
     url_contains = selection.url_contains
     slice_spec = normalize_slice(selection.slice_spec)
     slice_b = normalize_slice(selection.slice_b)
@@ -59,28 +58,14 @@ def cohort_selection_text(selection: CohortSpec) -> str:
     min_label = f"{min_s:g}s" if min_s != int(min_s) else f"{int(min_s)}s"
     rank = "latest" if selection.order == cohort_spec.ORDER_LATEST else "earliest"
     window = _time_window_text(selection.start_ms, selection.end_ms)
-
-    if a_n > 0 or b_n > 0:
-        a_scope = _slice_scope_text(slice_spec, url_contains)
-        if b_n > 0:
-            b_scope = _slice_scope_text(slice_b, url_contains)
-            who = f"{rank} {a_n} for A ({a_scope}) + {b_n} for B ({b_scope})"
-        else:
-            who = f"{rank} {a_n} for A ({a_scope})"
-        return (
-            f"Chosen as the {who} sessions{window} with duration ≥{min_label} "
-            f"(last_seen − first_seen), preferring sessions with more clicks when "
-            f"timestamps tie."
-        )
-
-    # Stored cohorts sampled before groups existed. New samples never land here.
-    if any_n > 0:
-        who = f"{rank} {any_n} matching"
+    a_scope = _slice_scope_text(slice_spec, url_contains)
+    if b_n > 0:
+        b_scope = _slice_scope_text(slice_b, url_contains)
+        who = f"{rank} {a_n} for A ({a_scope}) + {b_n} for B ({b_scope})"
     else:
-        who = f"{rank} {purchased_n} purchased + {all_n} non-purchase"
-    scope = _slice_scope_text(slice_spec, url_contains)
+        who = f"{rank} {a_n} for A ({a_scope})"
     return (
-        f"Chosen as the {who} sessions on {scope}{window} with duration ≥{min_label} "
+        f"Chosen as the {who} sessions{window} with duration ≥{min_label} "
         f"(last_seen − first_seen), preferring sessions with more clicks when "
         f"timestamps tie."
     )
@@ -99,26 +84,20 @@ def _slice_label_bits(slice_spec: dict | None, url_contains: str = "") -> list:
 
 def _auto_cohort_label(selection: CohortSpec, *, stamp: str) -> str:
     """Date/time first, then whatever filters were set."""
-    purchased_n, all_n = selection.purchased_n, selection.all_n
-    any_n, a_n, b_n = selection.any_n, selection.a_n, selection.b_n
     url_contains = selection.url_contains
     slice_spec = normalize_slice(selection.slice_spec)
     slice_b = normalize_slice(selection.slice_b)
     parts = [stamp]
-    if a_n > 0 or b_n > 0:
-        a_bits = _slice_label_bits(slice_spec, url_contains)
-        if b_n > 0:
-            b_bits = _slice_label_bits(slice_b, url_contains)
-            if a_bits or b_bits:
-                parts.append(
-                    f"A {' '.join(a_bits) if a_bits else 'any'} / "
-                    f"B {' '.join(b_bits) if b_bits else 'any'}"
-                )
-        else:
-            parts.extend(a_bits)
-    elif any_n > 0 or purchased_n or all_n:
-        # Display shim: old any / purchased+all cohorts still have a name.
-        parts.extend(_slice_label_bits(slice_spec, url_contains))
+    a_bits = _slice_label_bits(slice_spec, url_contains)
+    if selection.b_n > 0:
+        b_bits = _slice_label_bits(slice_b, url_contains)
+        if a_bits or b_bits:
+            parts.append(
+                f"A {' '.join(a_bits) if a_bits else 'any'} / "
+                f"B {' '.join(b_bits) if b_bits else 'any'}"
+            )
+    else:
+        parts.extend(a_bits)
     return " · ".join(parts)[:120]
 
 

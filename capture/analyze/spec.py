@@ -80,20 +80,10 @@ class CohortSpec:
     Sampling is one mode: **groups** -- `a_n` (+ optional `b_n`) with
     independent slices. `slice_b` is what makes an A/B cut possible.
 
-    `purchased_n` / `all_n` / `any_n` are a display shim for cohorts sampled
-    before groups existed. `from_cohort` still reads them so Insights can
-    describe those rows; `as_groups` rewrites them into A/B so sampling and
-    new writes have one path.
-
     The field names match the keys `store.py` persists in the cohort's `fields`
     JSON column, so `asdict()` round-trips through storage without a mapping.
     """
 
-    # Legacy arms, read from stored cohorts. New samples do not set these.
-    purchased_n: int = 0
-    all_n: int = 0
-    any_n: int = 0
-    # Independent groups — the sampling mode.
     a_n: int = 0
     b_n: int = 0
 
@@ -109,17 +99,9 @@ class CohortSpec:
     slice_b: dict = field(default_factory=dict)
 
     @property
-    def uses_groups(self) -> bool:
-        return self.a_n > 0 or self.b_n > 0
-
-    @property
     def total(self) -> int:
-        """How many sessions this spec asks for, whichever mode it is in."""
-        if self.uses_groups:
-            return self.a_n + self.b_n
-        if self.any_n > 0:
-            return self.any_n
-        return self.purchased_n + self.all_n
+        """How many sessions this spec asks for."""
+        return self.a_n + self.b_n
 
     def normalised(self) -> "CohortSpec":
         """A copy with the sort coerced to a known value.
@@ -128,56 +110,6 @@ class CohortSpec:
         same fallback. Done once, here, rather than at each layer.
         """
         return replace(self, order=clean_order(self.order))
-
-    def as_groups(self) -> "CohortSpec":
-        """Rewrite any / purchased+all as A/B so sampling has one path.
-
-        Already-grouped specs are returned with the legacy counts cleared.
-        `from_cohort` keeps the original fields for display; call this only
-        when about to sample or persist a new cohort.
-        """
-        spec = self.normalised()
-        if spec.a_n > 0 or spec.b_n > 0:
-            return replace(spec, purchased_n=0, all_n=0, any_n=0)
-        if spec.any_n > 0:
-            return replace(spec, a_n=spec.any_n, purchased_n=0, all_n=0, any_n=0)
-
-        purchased_n, all_n = spec.purchased_n, spec.all_n
-        base = dict(spec.slice_spec or {})
-        # The purchase split owns outcome, same as the old sampler did.
-        base.pop("outcome", None)
-        if purchased_n > 0 and all_n > 0:
-            return replace(
-                spec,
-                a_n=purchased_n,
-                b_n=all_n,
-                slice_spec={**base, "outcome": ["purchased"]},
-                slice_b={**base, "outcome": ["checkout", "rest"]},
-                purchased_n=0,
-                all_n=0,
-                any_n=0,
-            )
-        if purchased_n > 0:
-            return replace(
-                spec,
-                a_n=purchased_n,
-                b_n=0,
-                slice_spec={**base, "outcome": ["purchased"]},
-                slice_b={},
-                purchased_n=0,
-                all_n=0,
-                any_n=0,
-            )
-        return replace(
-            spec,
-            a_n=all_n,
-            b_n=0,
-            slice_spec={**base, "outcome": ["checkout", "rest"]} if all_n else base,
-            slice_b={},
-            purchased_n=0,
-            all_n=0,
-            any_n=0,
-        )
 
     @classmethod
     def from_cohort(cls, cohort: dict) -> "CohortSpec":
@@ -189,9 +121,6 @@ class CohortSpec:
         """
         min_duration = cohort.get("min_duration_ms")
         return cls(
-            purchased_n=int(cohort.get("purchased_n") or 0),
-            all_n=int(cohort.get("all_n") or 0),
-            any_n=int(cohort.get("any_n") or 0),
             a_n=int(cohort.get("a_n") or 0),
             b_n=int(cohort.get("b_n") or 0),
             min_duration_ms=int(min_duration if min_duration is not None else MIN_DURATION_MS),

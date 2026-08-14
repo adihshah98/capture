@@ -263,7 +263,7 @@ class TestSliceLabel(unittest.TestCase):
 
         label = _auto_cohort_label(
             CohortSpec(
-                any_n=10,
+                a_n=10,
                 slice_spec={"outcome": ["checkout", "rest"], "device": ["mobile"]},
             ),
             stamp="Jan 1",

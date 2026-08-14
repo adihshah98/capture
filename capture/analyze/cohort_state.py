@@ -298,10 +298,9 @@ def persistable_cohort(enriched: dict, stored: dict | None = None) -> dict:
     in-flight marks. What they must not write is the view laid over it.
 
     `selection` is the trap. enrich backfills it from whatever sampling fields
-    are present, so for a cohort sampled by any_n / a_n (where purchased_n and
-    all_n are 0) the guess reads "latest 0 purchased + 0 non-purchase". Since
-    the backfill only fires when the field is missing, writing that guess makes
-    it permanent — in the one field that records how the cohort was built.
+    are present, so a cohort with no counts stored guesses "latest 0 for A".
+    Since the backfill only fires when the field is missing, writing that guess
+    makes it permanent — in the one field that records how the cohort was built.
     `stored` is the cohort as it exists on disk: it says whether `selection`
     was genuinely recorded (keep it) or invented by this pass (drop it, and let
     each read re-derive from live fields).

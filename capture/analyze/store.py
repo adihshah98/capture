@@ -35,7 +35,7 @@ from psycopg.rows import dict_row
 from .. import db
 
 # Columns promoted out of the cohort blob. Everything else in a cohort dict
-# (purchased_n, all_n, slice, selection, url_contains, ...) rides in `fields`.
+# (a_n, b_n, slice, selection, url_contains, ...) rides in `fields`.
 COHORT_COLUMNS = ("id", "label", "status", "created_at", "updated_at", "batch")
 SESSION_COLUMNS = ("session_id", "status", "analysis", "error")
 

@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import psycopg
+
 from capture.analyze import cuts, runtime, storage
 
 
@@ -191,11 +193,21 @@ class TestChatEndpoint(unittest.TestCase):
                 "id": "cohort-chat-test",
                 "status": "done",
                 "sessions": [
-                    {"session_id": "a" * 32, "filter": "purchased", "status": "done"},
-                    {"session_id": "b" * 32, "filter": "all", "status": "done"},
+                    {"session_id": "a" * 32, "filter": "a", "status": "done"},
+                    {"session_id": "b" * 32, "filter": "b", "status": "done"},
                 ],
             },
         )
+        # Chat slices on sessions.outcome, not the group tag.
+        with psycopg.connect(cls.admin_url) as conn:
+            conn.execute(
+                "INSERT INTO sessions (project_id, session_id, first_seen, last_seen,"
+                " chunk_count, bytes, outcome) VALUES"
+                " (%s, %s, 0, 20000, 1, 1, 'purchased'),"
+                " (%s, %s, 0, 20000, 1, 1, 'rest')",
+                (cls.project_id, "a" * 32, cls.project_id, "b" * 32),
+            )
+            conn.commit()
 
     @classmethod
     def tearDownClass(cls):

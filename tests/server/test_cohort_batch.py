@@ -63,7 +63,7 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
                 "id": "cohort-old",
                 "label": "keep me",
                 "status": "done",
-                "sessions": [{"session_id": "other", "filter": "all", "status": "done"}],
+                "sessions": [{"session_id": "other", "filter": "b", "status": "done"}],
             },
         )
         a = self._session("aaa" + "x" * 29)
@@ -113,8 +113,8 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
             "label": "new",
             "status": "queued",
             "sessions": [
-                {"session_id": a.name, "filter": "purchased", "status": "queued"},
-                {"session_id": b.name, "filter": "all", "status": "queued"},
+                {"session_id": a.name, "filter": "a", "status": "queued"},
+                {"session_id": b.name, "filter": "b", "status": "queued"},
             ],
         }
         storage.write_cohort(self.project_id, cohort)
@@ -457,11 +457,11 @@ class TestPersistableCohort(pgfixture.CohortStoreMixin, unittest.TestCase):
 
     def test_a_guessed_selection_is_not_frozen_into_the_file(self):
         # No sampling fields at all: the backfill can only guess, and the guess
-        # ("latest 0 purchased + 0 non-purchase") would be permanent once
-        # written, because enrich only backfills a missing selection.
-        stored = self.store(purchased_n=0, all_n=0, any_n=0, a_n=0, b_n=0)
+        # ("latest 0 for A") would be permanent once written, because enrich
+        # only backfills a missing selection.
+        stored = self.store(a_n=0, b_n=0)
         live, saved = self.round_trip(stored)
-        self.assertIn("0 purchased + 0 non-purchase", live["selection"])
+        self.assertIn("0 for A", live["selection"])
         self.assertIsNone(saved.get("selection"))
 
     def test_a_real_selection_survives(self):

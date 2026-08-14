@@ -466,13 +466,12 @@ def _sample_matching_rows(
 def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> SampleResult:
     """Sessions matching a selection rule, plus how the request resolved.
 
-    Always groups (A, optional B). `spec.as_groups()` rewrites a stored
-    any / purchased+all rule so those callers share this path.
+    Always groups (A, optional B).
 
     `spec.order` is latest (default) or earliest by `last_seen`; `start_ms` /
     `end_ms` bound that same clock. Sessions with more clicks win a tie.
     """
-    spec = spec.as_groups()
+    spec = spec.normalised()
     base: dict[str, Any] = {
         "min_duration_ms": spec.min_duration_ms,
         "url_contains": spec.url_contains,

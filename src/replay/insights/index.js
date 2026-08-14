@@ -585,9 +585,6 @@ function viewSettingRows(body) {
 
   const aN = Number(body.a_n || 0);
   const bN = Number(body.b_n || 0);
-  const anyN = Number(body.any_n || 0);
-  const purchasedN = Number(body.purchased_n || 0);
-  const allN = Number(body.all_n || 0);
   const minMs = Number(
     body.min_duration_ms != null ? body.min_duration_ms : COHORT_MIN_DURATION_S * 1000
   );
@@ -599,11 +596,6 @@ function viewSettingRows(body) {
   if (aN > 0 || bN > 0) {
     push('Group A', `${aN} session${aN === 1 ? '' : 's'}`);
     if (bN > 0) push('Group B', `${bN} session${bN === 1 ? '' : 's'}`);
-  } else if (anyN > 0) {
-    push('Sessions', String(anyN));
-  } else if (purchasedN || allN) {
-    push('Purchased', String(purchasedN));
-    push('Non-purchase', String(allN));
   }
 
   const sample =
@@ -718,13 +710,9 @@ function renderQueue(body) {
   const rows = sessions
     .map((entry) => {
       const filter =
-        entry.filter === 'purchased'
-          ? { className: 'purchased', label: 'Purchased' }
-          : entry.filter === 'a'
-            ? { className: 'a', label: 'A' }
-            : entry.filter === 'b'
-              ? { className: 'b', label: 'B' }
-              : { className: 'all', label: entry.filter === 'all' ? 'All' : String(entry.filter || 'All') };
+        entry.filter === 'b'
+          ? { className: 'b', label: 'B' }
+          : { className: 'a', label: 'A' };
       const status = entry.status || 'queued';
       const campaign =
         (entry.attribution && entry.attribution.utm_campaign) ||

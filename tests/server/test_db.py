@@ -28,6 +28,7 @@ class TestMigrationFiles(unittest.TestCase):
         names = [p.name for p in db.migration_files()]
         self.assertIn("0008_backfill_session_classes.sql", names)
         self.assertIn("0009_recompute_page.sql", names)
+        self.assertIn("0010_cohort_groups.sql", names)
 
 
 if __name__ == "__main__":

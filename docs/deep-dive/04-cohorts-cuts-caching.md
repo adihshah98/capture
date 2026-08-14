@@ -109,16 +109,15 @@ stale?" into a question about the *question*, not the data —
 which is exactly what `cut_key` encodes.
 
 `build_cohort` therefore records not just the members but the **rule** that produced
-them (`purchased_n`, `any_n`, `slice`, `order`, `min_duration_ms`, `url_contains`,
+them (`a_n`, `b_n`, `slice`, `order`, `min_duration_ms`, `url_contains`,
 time bounds) plus a human-readable `selection` string
 ([:1839](../../capture/analyze/__init__.py#L1839)).
 
 ### `persistable_cohort` and the `selection` trap
 
 `enrich_cohort_status` backfills `selection` when absent. That backfill is a *guess*
-from whatever sampling fields are present — and for an `any_n`/`a_n` cohort, where
-`purchased_n` and `all_n` are both 0, the guess reads *"latest 0 purchased + 0
-non-purchase."*
+from whatever sampling fields are present — and for a cohort with no counts stored,
+the guess reads *"latest 0 for A"*.
 
 > ```python
 > Since the backfill only fires when the field is missing, writing that guess makes

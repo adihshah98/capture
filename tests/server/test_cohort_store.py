@@ -51,11 +51,11 @@ class TestRoundTrip(StoreCase):
     def test_a_cohort_survives_a_write_read_cycle_intact(self):
         written = storage.write_cohort(
             self.project_id,
-            cohort(purchased_n=5, all_n=5, label="Sample", slice={"outcome": "purchased"}),
+            cohort(a_n=5, b_n=5, label="Sample", slice={"outcome": "purchased"}),
         )
         got = storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual(got["label"], "Sample")
-        self.assertEqual(got["purchased_n"], 5)
+        self.assertEqual(got["a_n"], 5)
         # Sampling fields ride in the fields blob; they must survive the trip.
         self.assertEqual(got["slice"], {"outcome": "purchased"})
         self.assertEqual([s["session_id"] for s in got["sessions"]], ["s0", "s1", "s2"])
@@ -75,11 +75,11 @@ class TestRoundTrip(StoreCase):
             self.project_id,
             {
                 **cohort(n=0),
-                "sessions": [{"session_id": "s0", "filter": "purchased", "qa_status": "ok"}],
+                "sessions": [{"session_id": "s0", "filter": "a", "qa_status": "ok"}],
             },
         )
         row = storage.read_cohort(self.project_id, "cohort-1")["sessions"][0]
-        self.assertEqual(row["filter"], "purchased")
+        self.assertEqual(row["filter"], "a")
         self.assertEqual(row["qa_status"], "ok")
 
     def test_absent_batch_is_absent_rather_than_null(self):
@@ -147,8 +147,8 @@ class TestRowLevelUpdates(StoreCase):
             self.project_id,
             cohort(
                 sessions=[
-                    {"session_id": "s0", "status": "queued", "filter": "purchased"},
-                    {"session_id": "s1", "status": "queued", "filter": "all"},
+                    {"session_id": "s0", "status": "queued", "filter": "a"},
+                    {"session_id": "s1", "status": "queued", "filter": "b"},
                 ],
                 **extra,
             ),
@@ -164,7 +164,7 @@ class TestRowLevelUpdates(StoreCase):
         got = storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual(got["status"], "running")
         self.assertEqual(got["sessions"][0]["status"], "done")
-        self.assertEqual(got["sessions"][0]["filter"], "purchased")
+        self.assertEqual(got["sessions"][0]["filter"], "a")
         self.assertEqual(got["sessions"][1]["status"], "queued")
 
     def test_set_cohort_status_keeps_the_callers_dict_in_step(self):
@@ -193,7 +193,7 @@ class TestRowLevelUpdates(StoreCase):
         got = storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual(got["label"], "Spring")
         self.assertEqual(got["sessions"][1]["status"], "running")
-        self.assertEqual(got["sessions"][0]["filter"], "purchased")
+        self.assertEqual(got["sessions"][0]["filter"], "a")
 
 
 class TestBulkReads(StoreCase):
@@ -472,7 +472,7 @@ class TestConcurrentMarks(StoreCase):
             {
                 "id": "c",
                 "created_at": 1,
-                "sessions": [{"session_id": "s0", "status": "queued", "filter": "purchased"}],
+                "sessions": [{"session_id": "s0", "status": "queued", "filter": "a"}],
             },
         )
         cohort = storage.read_cohort(self.project_id, "c")
@@ -480,7 +480,7 @@ class TestConcurrentMarks(StoreCase):
             self.project_id, cohort, cohort["sessions"][0], "done", analysis="analysis.json"
         )
         self.assertEqual(
-            storage.read_cohort(self.project_id, "c")["sessions"][0]["filter"], "purchased"
+            storage.read_cohort(self.project_id, "c")["sessions"][0]["filter"], "a"
         )
 
     def test_a_status_refresh_does_not_clobber_in_flight_marks(self):
@@ -517,7 +517,7 @@ class TestConcurrentMarks(StoreCase):
                 "created_at": 1,
                 "status": "running",
                 "sessions": [
-                    {"session_id": "s0", "status": "running", "filter": "purchased"},
+                    {"session_id": "s0", "status": "running", "filter": "a"},
                     {"session_id": "s1", "status": "queued"},
                 ],
             },
@@ -536,7 +536,7 @@ class TestConcurrentMarks(StoreCase):
         self.assertEqual(got["status"], "done")
         self.assertEqual(got["sessions"][0]["status"], "done")
         self.assertEqual(got["sessions"][0]["analysis"], "analysis.json")
-        self.assertEqual(got["sessions"][0]["filter"], "purchased")
+        self.assertEqual(got["sessions"][0]["filter"], "a")
         self.assertEqual(got["sessions"][1]["status"], "queued")
 
     def test_a_matching_view_does_not_touch_the_store(self):

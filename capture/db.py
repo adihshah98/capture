@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 from contextlib import contextmanager
@@ -116,9 +117,11 @@ def migrate(url: str | None = None) -> list:
 
 
 def apply_python_migration(conn, version: str) -> None:
-    """Work SQL cannot share with ingest (urllib.parse, classify.page_path)."""
+    """Work SQL cannot share with the Python that already owns the mapping."""
     if version == "0009_recompute_page":
         recompute_session_pages(conn)
+    elif version == "0010_cohort_groups":
+        rewrite_legacy_cohort_fields(conn)
 
 
 def recompute_session_pages(conn) -> None:
@@ -133,6 +136,90 @@ def recompute_session_pages(conn) -> None:
         "UPDATE sessions SET page = %s WHERE project_id = %s AND session_id = %s",
         [(page_path(url), project_id, session_id) for project_id, session_id, url in rows],
     )
+
+
+def _int_field(fields: dict, key: str) -> int:
+    try:
+        return int(fields.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def groups_fields_from_legacy(fields: dict) -> dict:
+    """Rewrite a stored cohort `fields` blob from purchased/all/any to A/B.
+
+    The purchase split owns `outcome`, the same way the old sampler did.
+    `selection` is left as the historical sentence. New writes never set
+    the three keys; this is only for rows sampled before groups existed.
+    """
+    out = dict(fields)
+    purchased_n = _int_field(out, "purchased_n")
+    all_n = _int_field(out, "all_n")
+    any_n = _int_field(out, "any_n")
+    a_n = _int_field(out, "a_n")
+    b_n = _int_field(out, "b_n")
+
+    if a_n == 0 and b_n == 0:
+        if any_n > 0:
+            out["a_n"] = any_n
+        else:
+            base = dict(out.get("slice") or {}) if isinstance(out.get("slice"), dict) else {}
+            base.pop("outcome", None)
+            if purchased_n > 0 and all_n > 0:
+                out["a_n"] = purchased_n
+                out["b_n"] = all_n
+                out["slice"] = {**base, "outcome": ["purchased"]}
+                out["slice_b"] = {**base, "outcome": ["checkout", "rest"]}
+            elif purchased_n > 0:
+                out["a_n"] = purchased_n
+                out["slice"] = {**base, "outcome": ["purchased"]}
+                out.pop("slice_b", None)
+            elif all_n > 0:
+                out["a_n"] = all_n
+                out["slice"] = {**base, "outcome": ["checkout", "rest"]}
+                out.pop("slice_b", None)
+
+    for key in ("purchased_n", "all_n", "any_n"):
+        out.pop(key, None)
+    return out
+
+
+_FILTER_TAG = {"purchased": "a", "all": "b"}
+
+
+def rewrite_legacy_cohort_fields(conn) -> None:
+    """One-shot: stored sampling rules and session tags become A/B groups."""
+    rows = conn.execute("SELECT project_id, cohort_id, fields FROM cohorts").fetchall()
+    updates = []
+    for project_id, cohort_id, fields in rows:
+        current = dict(fields or {})
+        rewritten = groups_fields_from_legacy(current)
+        if rewritten != current:
+            updates.append((json.dumps(rewritten), project_id, cohort_id))
+    if updates:
+        conn.cursor().executemany(
+            "UPDATE cohorts SET fields = %s::jsonb"
+            " WHERE project_id = %s AND cohort_id = %s",
+            updates,
+        )
+
+    session_rows = conn.execute(
+        "SELECT project_id, cohort_id, session_id, fields FROM cohort_sessions"
+    ).fetchall()
+    session_updates = []
+    for project_id, cohort_id, session_id, fields in session_rows:
+        current = dict(fields or {})
+        mapped = _FILTER_TAG.get(current.get("filter"))
+        if mapped is None:
+            continue
+        current["filter"] = mapped
+        session_updates.append((json.dumps(current), project_id, cohort_id, session_id))
+    if session_updates:
+        conn.cursor().executemany(
+            "UPDATE cohort_sessions SET fields = %s::jsonb"
+            " WHERE project_id = %s AND cohort_id = %s AND session_id = %s",
+            session_updates,
+        )
 
 
 if __name__ == "__main__":
