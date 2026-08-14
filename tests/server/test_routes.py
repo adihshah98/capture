@@ -37,7 +37,6 @@ EXPECTED = {
     ("GET", "/api/cohorts/{cohort_id}"),
     ("PATCH", "/api/cohorts/{cohort_id}"),
     ("DELETE", "/api/cohorts/{cohort_id}"),
-    ("GET", "/api/cohorts/{cohort_id}/facets"),
     ("GET", "/api/cohorts/{cohort_id}/cut"),
     ("POST", "/api/cohorts/{cohort_id}/analyze"),
     ("POST", "/api/cohorts/{cohort_id}/pause"),
@@ -63,7 +62,7 @@ class TestRouteInventory(unittest.TestCase):
         self.assertEqual(extra, set(), f"undeclared routes: {sorted(extra)}")
 
     def test_the_count_is_what_we_think_it_is(self):
-        self.assertEqual(len(operations()), 27)
+        self.assertEqual(len(operations()), 26)
 
 
 if __name__ == "__main__":

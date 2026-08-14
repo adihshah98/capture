@@ -151,7 +151,7 @@ async def create_cohort(
     a_n: int = Query(0, ge=0, le=ap.MAX_SESSIONS, alias="a"),
     b_n: int = Query(0, ge=0, le=ap.MAX_SESSIONS, alias="b"),
     min_duration_ms: int = Query(ap.MIN_DURATION_MS, ge=0),
-    url_contains: str = Query(ap.URL_CONTAINS),
+    url_contains: str = Query(""),
     start_ms: int | None = Query(None, ge=0),
     end_ms: int | None = Query(None, ge=0),
     order: str = Query(ap.ORDER_LATEST),
@@ -362,14 +362,6 @@ async def _run_cut_job(
         _cut_errors[task_key] = getattr(exc, "message", None) or str(exc) or "cut analysis failed"
     finally:
         _cut_tasks.pop(task_key, None)
-
-
-@router.get("/api/cohorts/{cohort_id}/facets")
-def get_cohort_facets(cohort_id: str, found: projects.Project = Depends(readable_project)):
-    """Slice values present in this cohort, so the picker only offers real ones."""
-    cohort = _resolve_cohort_or_404(found, cohort_id)
-    live = ap.cohort_view(found, cohort)
-    return {"cohort_id": cohort["id"], **cohort_facets(found, live)}
 
 
 @router.get("/api/cohorts/{cohort_id}/cut")
@@ -585,9 +577,7 @@ def stamp_cohort_attribution(found: projects.Project, cohort: dict) -> dict:
             row["page"] = fact["page"]
         else:
             row.pop("page", None)
-        row["outcome"] = fact.get("outcome") or (
-            "purchased" if row.get("filter") == "purchased" else "rest"
-        )
+        row["outcome"] = fact.get("outcome") or "rest"
         sessions.append(row)
     return {**cohort, "sessions": sessions}
 
@@ -622,9 +612,7 @@ def _cut_rows(found: projects.Project, cohort: dict) -> list:
         rows.append(
             {
                 "session_id": sid,
-                # Fall back to the sample filter when the index has no class row.
-                "outcome": fact.get("outcome")
-                or ("purchased" if entry.get("filter") == "purchased" else "rest"),
+                "outcome": fact.get("outcome") or "rest",
                 "device": fact.get("device"),
                 "page": fact.get("page"),
                 "attribution": fact.get("attribution"),
@@ -632,16 +620,6 @@ def _cut_rows(found: projects.Project, cohort: dict) -> list:
             }
         )
     return rows
-
-
-def cohort_facets(found: projects.Project, cohort: dict) -> dict:
-    """The slice values actually present in this cohort, for the group picker.
-
-    Counts come from analyzed sessions only, since those are the ones a cut
-    can reason over — offering a filter that would select zero write-ups is
-    worse than not offering it.
-    """
-    return ap.facets_from_rows(_cut_rows(found, cohort))
 
 
 def _parse_fbclid_flag(raw: str | None) -> bool | None:

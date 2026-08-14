@@ -39,14 +39,8 @@ MAX_SESSIONS = 500
 # scroll, no decision. Measured as last_seen - first_seen.
 MIN_DURATION_MS = 5000
 
-# A substring required in the entry URL, applied as `url LIKE '%<value>%'`.
-#
-# Empty means "any page", which is the correct default for a multi-tenant
-# product. It is read from the environment because it was previously hardcoded
-# to one customer's landing page ("/pages/ashwamag-01"), which silently scoped
-# every cohort sampled without an explicit override -- including every cohort
-# created through the API, since this is the Query() default. Any other tenant
-# got an empty cohort and a successful response.
+# Empty means "any page". Stored on old cohorts that were sampled with a
+# substring gate; new samples use the `page` slice instead. Not an API default.
 URL_CONTAINS = os.environ.get("COHORT_URL_CONTAINS", "")
 
 # How many of the newest index rows to scan when a cut-style slice is applied.
@@ -105,7 +99,7 @@ class CohortSpec:
 
     # Base gates, applied in SQL.
     min_duration_ms: int = MIN_DURATION_MS
-    url_contains: str = URL_CONTAINS
+    url_contains: str = ""
     start_ms: int | None = None
     end_ms: int | None = None
     order: str = ORDER_LATEST

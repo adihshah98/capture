@@ -48,7 +48,6 @@ MODEL = runtime.GEMINI_MODEL
 
 MAX_SESSIONS = spec.MAX_SESSIONS
 MIN_DURATION_MS = spec.MIN_DURATION_MS
-URL_CONTAINS = spec.URL_CONTAINS
 ORDER_LATEST = spec.ORDER_LATEST
 ORDERS = spec.ORDERS
 
@@ -216,8 +215,7 @@ def classified_rows(conn, project: Project, session_ids) -> dict:
     """Materialised class columns for these sessions, named the way a cut slices.
 
     Sampling already filtered on the same columns. The caller passes the cohort's
-    ids so this is a point lookup, not a project scan, and does not re-derive
-    labels from raw JSON.
+    ids so this is a point lookup, not a project scan.
     """
     return sampling.classified_rows(conn, project.id, session_ids)
 

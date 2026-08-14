@@ -11,6 +11,7 @@ const {
   formatOutcome,
   sliceNameBits,
   suggestCohortName,
+  facetsFromRows,
 } = await import('../../src/replay/insights/slices.js');
 
 test('an empty slice has every field and matches everything', () => {
@@ -80,3 +81,53 @@ test('a name is suggested from the same tokens the server uses', () => {
 test('an unfiltered cohort still gets a name', () => {
   assert.equal(typeof suggestCohortName({ sliceA: emptySlice() }), 'string');
 });
+
+test('picker facets include a campaign the Sessions table would show', () => {
+  const facets = facetsFromRows([
+    {
+      status: 'done',
+      text: 'write-up',
+      outcome: 'purchased',
+      attribution: { utm_campaign: 'Spring', utm_source: 'google' },
+    },
+    {
+      status: 'done',
+      text: 'write-up',
+      outcome: 'rest',
+      attribution: { utm_campaign: 'spring' },
+    },
+  ]);
+  assert.equal(facets.n, 2);
+  assert.deepEqual(
+    facets.utm_campaign.map((item) => [item.value, item.count]),
+    [['spring', 2]]
+  );
+  assert.deepEqual(
+    facets.utm_source.map((item) => [item.value, item.count]),
+    [['google', 1]]
+  );
+  assert.ok(facets.outcome.some((item) => item.value === 'purchased'));
+});
+
+test('picker facets omit empty dimensions rather than showing a blank control', () => {
+  const facets = facetsFromRows([{ outcome: 'purchased', text: 'x', status: 'done' }]);
+  assert.deepEqual(facets.device, []);
+  assert.deepEqual(facets.utm_campaign, []);
+  assert.equal(facets.outcome.length, 1);
+});
+
+test('picker facets list every landing page present on the rows', () => {
+  const facets = facetsFromRows([
+    { status: 'done', text: 'a', page: '/products/ashwa-mag-1' },
+    { status: 'done', text: 'b', page: '/pages/ashwamag-01' },
+    { status: 'done', text: 'c', page: '/products/ashwa-mag-1' },
+  ]);
+  assert.deepEqual(
+    facets.page.map((item) => [item.value, item.count]),
+    [
+      ['/products/ashwa-mag-1', 2],
+      ['/pages/ashwamag-01', 1],
+    ]
+  );
+});
+

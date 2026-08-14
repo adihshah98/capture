@@ -21,6 +21,10 @@ export const OUTCOME_LABELS = {
   all: 'did not purchase',
 };
 
+/** Same order as capture.classify.OUTCOME_VALUES / DEVICE_VALUES. */
+export const OUTCOME_VALUES = ['purchased', 'checkout', 'rest'];
+export const DEVICE_VALUES = ['mobile', 'desktop'];
+
 /** One group's filter. Every field is a single value; '' means "any". */
 export const SLICE_FIELDS = ['outcome', 'device', 'page', 'utm_source', 'utm_campaign'];
 
@@ -30,6 +34,48 @@ export function emptySlice() {
 
 export function sliceIsEmpty(spec) {
   return SLICE_FIELDS.every((field) => !spec[field]);
+}
+
+function listedFacet(counts, field, order) {
+  const items = counts[field];
+  const keys = order || Object.keys(items).sort((a, b) => items[b] - items[a] || a.localeCompare(b));
+  return keys
+    .filter((key) => items[key])
+    .map((key) => ({
+      value: key,
+      count: items[key],
+      label: field === 'outcome' ? OUTCOME_LABELS[key] || key : key,
+    }));
+}
+
+/** Distinct slice values on these rows — the Analysis picker is built from this. */
+export function facetsFromRows(rows) {
+  const counts = {
+    outcome: {},
+    device: {},
+    page: {},
+    utm_source: {},
+    utm_campaign: {},
+  };
+  for (const row of rows || []) {
+    const outcome = row.outcome || 'rest';
+    counts.outcome[outcome] = (counts.outcome[outcome] || 0) + 1;
+    if (row.device) counts.device[row.device] = (counts.device[row.device] || 0) + 1;
+    if (row.page) counts.page[row.page] = (counts.page[row.page] || 0) + 1;
+    const attrs = row.attribution || {};
+    for (const key of ['utm_source', 'utm_campaign']) {
+      const value = String(attrs[key] || '').trim().toLowerCase();
+      if (value) counts[key][value] = (counts[key][value] || 0) + 1;
+    }
+  }
+  return {
+    n: (rows || []).length,
+    outcome: listedFacet(counts, 'outcome', OUTCOME_VALUES),
+    device: listedFacet(counts, 'device', DEVICE_VALUES),
+    page: listedFacet(counts, 'page'),
+    utm_source: listedFacet(counts, 'utm_source'),
+    utm_campaign: listedFacet(counts, 'utm_campaign'),
+  };
 }
 
 export function isMetaAttribution(attrs) {

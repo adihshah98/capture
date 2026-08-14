@@ -24,6 +24,11 @@ class TestMigrationFiles(unittest.TestCase):
                 names = [p.name for p in db.migration_files()]
         self.assertEqual(names, ["0001_init.sql", "0002_next.sql"])
 
+    def test_session_class_backfill_is_shipped(self):
+        names = [p.name for p in db.migration_files()]
+        self.assertIn("0008_backfill_session_classes.sql", names)
+        self.assertIn("0009_recompute_page.sql", names)
+
 
 if __name__ == "__main__":
     unittest.main()

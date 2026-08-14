@@ -8,6 +8,7 @@ import { chatInline, chatMarkdown } from './markdown.js';
 import {
   SLICE_FIELDS,
   emptySlice,
+  facetsFromRows,
   rowMatches,
   sliceIsEmpty,
   sliceNameBits,
@@ -16,6 +17,7 @@ import {
 import {
   COHORT_MAX_SESSIONS,
   analyzedCount,
+  analyzedSessions,
   clampGroupSize,
   escapeAttr,
   escapeHtml,
@@ -46,7 +48,6 @@ const progressEl = document.getElementById('cohort-progress');
 const cutLabelEl = document.getElementById('cut-label');
 const cutProgressEl = document.getElementById('cut-progress');
 const cutRunBtn = document.getElementById('cut-run');
-const cutRefreshBtn = document.getElementById('cut-refresh');
 const cutBodyEl = document.getElementById('cut-body');
 const tableWrapEl = document.getElementById('cohort-table-wrap');
 const pickerEl = document.getElementById('cut-picker');
@@ -203,8 +204,6 @@ function syncCutRunButton() {
       cutRunBtn.title = 'Ask the model what this filtered group has in common';
     }
   }
-  // Legacy second button — keep hidden if the markup still has it.
-  if (cutRefreshBtn) cutRefreshBtn.hidden = true;
 }
 
 function withProject(params) {
@@ -245,8 +244,6 @@ function createCohortUrl({
   params.set('a', String(a));
   if (b > 0) params.set('b', String(b));
   params.set('min_duration_ms', String(minDurationMs));
-  // Exact page / utm / device filters replace the old url_contains default.
-  params.set('url_contains', '');
   params.set('order', order || 'latest');
   if (label) params.set('label', label);
   if (startMs != null) params.set('start_ms', String(startMs));
@@ -361,8 +358,6 @@ function renderCreateFacets() {
     renderCreateFacetHost(createFacetsBEl, createSliceB, 'create-b');
   }
 }
-
-
 
 
 function syncCreateFormHints() {
@@ -487,14 +482,6 @@ function retryUrl(id, sessionId) {
     sessionId
   )}/retry${qs ? `?${qs}` : ''}`;
 }
-
-function facetsUrl(id) {
-  const qs = withProject(new URLSearchParams()).toString();
-  return `/api/cohorts/${encodeURIComponent(id)}/facets${qs ? `?${qs}` : ''}`;
-}
-
-
-
 
 function cutUrl(id, { run = false, refresh = false } = {}) {
   const params = withProject(new URLSearchParams());
@@ -858,7 +845,7 @@ function renderPicker() {
 /** Live n=, so an empty group is obvious before spending a call. */
 function updatePickerCounts() {
   if (!pickerEl || !cohort) return;
-  const rows = (cohort.sessions || []).filter((s) => s.status === 'done' && s.text);
+  const rows = analyzedSessions(cohort);
   const n = rows.filter((r) => rowMatches(r, slice)).length;
   const hintEl = pickerEl.querySelector('[data-hint-text]');
   const countEl = pickerEl.querySelector('[data-count="n"]');
@@ -878,14 +865,19 @@ function onSliceChanged() {
   loadCut().catch(() => {});
 }
 
-async function loadFacets() {
-  if (!cohortId) return;
-  try {
-    facets = await fetchJson(facetsUrl(cohortId));
-    renderPicker();
-  } catch {
+/** Rebuild the Analysis picker from this cohort's analyzed rows.
+
+Each option is a value present on those rows (landing page, campaign, …),
+stamped from the class columns when the cohort was fetched.
+*/
+function syncPicker() {
+  if (!cohort) {
     facets = null;
+    renderPicker();
+    return;
   }
+  facets = facetsFromRows(analyzedSessions(cohort));
+  renderPicker();
 }
 
 function renderCutPlaceholder(message) {
@@ -998,7 +990,6 @@ async function runCut({ refresh = false } = {}) {
   if (!cohortId || !analysisEnabled) return;
   stopCutPolling();
   cutRunBtn.disabled = true;
-  if (cutRefreshBtn) cutRefreshBtn.disabled = true;
   cutProgressEl.textContent = refresh ? 'Re-analyzing…' : 'Analyzing…';
   renderCutPlaceholder('Reading the write-ups in this group. This takes a few seconds.');
   try {
@@ -1215,7 +1206,7 @@ function renderCohort(body) {
   progressEl.textContent = text;
   syncRunButtons();
   renderQueue(body);
-  updatePickerCounts();
+  syncPicker();
 
   const running = cohortIsRunning();
   if (running && !autoSwitchedForRun) {
@@ -1263,7 +1254,6 @@ export async function refreshCohorts() {
   }
   renderCohortOptions(cohorts);
   await refreshCohort();
-  await loadFacets();
   await loadCut();
 }
 
@@ -1499,7 +1489,6 @@ export function initInsights() {
     // A different cohort has different facet values, so reset the picker.
     slice = emptySlice();
     refreshCohort()
-      .then(loadFacets)
       .then(loadCut)
       .catch(() => {});
   });

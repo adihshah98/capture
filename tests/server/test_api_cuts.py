@@ -257,32 +257,19 @@ class TestCutSlices(ServerCase):
             self.assertNotIn("page", entry)
             self.assertNotIn("attribution", entry)
 
-    def test_facets_report_only_values_present_in_the_cohort(self):
-        status, body = request(f"{self.base}/api/cohorts/{self.cohort_id}/facets")
-        self.assertEqual(status, 200, body)
-        facets = json.loads(body)
-        self.assertEqual(facets["n"], 4)
-        self.assertEqual(
-            {f["value"]: f["count"] for f in facets["outcome"]},
-            {"purchased": 2, "checkout": 1, "rest": 1},
-        )
-        self.assertEqual(
-            {f["value"]: f["count"] for f in facets["device"]},
-            {"mobile": 2, "desktop": 2},
-        )
-        self.assertEqual(
-            {f["value"]: f["count"] for f in facets["page"]},
-            {"/p": 2, "/collections/sale": 1, "/products/cream": 1},
-        )
-        self.assertEqual({f["value"] for f in facets["utm_source"]}, {"google", "facebook"})
-        self.assertEqual([f["value"] for f in facets["utm_campaign"]], ["spring"])
-        # Presets are gone; the picker builds a group from these facets alone.
-        self.assertNotIn("presets", facets)
-
-    def test_outcome_facet_is_labelled_for_humans(self):
-        _, body = request(f"{self.base}/api/cohorts/{self.cohort_id}/facets")
-        labels = {f["value"]: f["label"] for f in json.loads(body)["outcome"]}
-        self.assertEqual(labels["checkout"], "reached checkout")
+    def test_stamped_rows_carry_the_values_the_picker_counts(self):
+        """The Analysis picker builds options from these fields, not a facets API."""
+        _, body = request(f"{self.base}/api/cohorts/{self.cohort_id}")
+        rows = json.loads(body)["sessions"]
+        self.assertEqual(len(rows), 4)
+        outcomes = {s["outcome"] for s in rows}
+        self.assertEqual(outcomes, {"purchased", "checkout", "rest"})
+        pages = {s["page"] for s in rows}
+        self.assertEqual(pages, {"/p", "/collections/sale", "/products/cream"})
+        sources = {s.get("attribution", {}).get("utm_source") for s in rows}
+        self.assertEqual(sources, {"google", "facebook"})
+        campaigns = {s.get("attribution", {}).get("utm_campaign") for s in rows}
+        self.assertEqual(campaigns, {"spring"})
 
     def cut(self, query):
         return request(f"{self.base}/api/cohorts/{self.cohort_id}/cut?{query}")

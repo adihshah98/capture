@@ -10,7 +10,9 @@ reading another tenant's rows; the `project_id` predicate is still required so
 the planner can use the tenant indexes.
 
 **Slice filters are SQL.** `outcome`, `device_class`, `page`, and campaign
-columns are materialised at ingest (`classify.session_classes` via `sessionstore`).
+columns are materialised at ingest (`classify.session_classes` via `sessionstore`)
+and backfilled from the JSON / orders already on older rows
+(`migrations/0008_backfill_session_classes.sql`, then `0009` for `page`).
 Sampling pushes a normalised slice into `WHERE`, then `ORDER BY` + `LIMIT n`.
 A short cohort means the pool under those predicates is genuinely short —
 `{requested, matched, scanned, capped}` still records that; `capped` stays for
@@ -112,9 +114,8 @@ def classified_row(
 def classified_rows(conn: Connection, project_id: str, session_ids: list | tuple | set) -> dict:
     """Slice-shaped facts for these sessions, from the materialised columns.
 
-    Scoped to the ids the caller already chose (a cohort). Does not scan the
-    project and does not re-derive labels from raw JSON — sampling already
-    filtered on the same columns, and a cut must use that vocabulary.
+    Scoped to the ids the caller already chose (a cohort). Sampling already
+    filtered on the same columns; a cut must use that vocabulary.
     """
     ids = [sid for sid in session_ids if sid]
     if not ids:

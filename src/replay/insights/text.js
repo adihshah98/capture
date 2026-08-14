@@ -86,7 +86,11 @@ export function localDateTimeMs(value) {
 
 /** Sessions with a finished write-up. A row is only counted when it has text —
 a status of done with nothing written is stale, not analyzed. */
+export function analyzedSessions(cohort) {
+  if (!cohort) return [];
+  return (cohort.sessions || []).filter((s) => s.status === 'done' && s.text);
+}
+
 export function analyzedCount(cohort) {
-  if (!cohort) return 0;
-  return (cohort.sessions || []).filter((s) => s.status === 'done' && s.text).length;
+  return analyzedSessions(cohort).length;
 }

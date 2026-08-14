@@ -109,9 +109,30 @@ def migrate(url: str | None = None) -> list:
                 if role:
                     conn.execute("SELECT set_config('capture.app_role', %s, true)", (role,))
                 conn.execute(path.read_text())
+                apply_python_migration(conn, version)
                 conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
         applied.append(version)
     return applied
+
+
+def apply_python_migration(conn, version: str) -> None:
+    """Work SQL cannot share with ingest (urllib.parse, classify.page_path)."""
+    if version == "0009_recompute_page":
+        recompute_session_pages(conn)
+
+
+def recompute_session_pages(conn) -> None:
+    """Set sessions.page from sessions.url with the same parser ingest uses."""
+    from capture.classify import page_path
+
+    rows = conn.execute("SELECT project_id, session_id, url FROM sessions").fetchall()
+    if not rows:
+        return
+    # Connection.execute exists; executemany is on the cursor (psycopg 3).
+    conn.cursor().executemany(
+        "UPDATE sessions SET page = %s WHERE project_id = %s AND session_id = %s",
+        [(page_path(url), project_id, session_id) for project_id, session_id, url in rows],
+    )
 
 
 if __name__ == "__main__":
