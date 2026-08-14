@@ -644,12 +644,6 @@ def _multi_param(raw, allowed, field) -> list:
             value = part.strip().lower()
             if not value:
                 continue
-            # "all" is the legacy spelling for "did not purchase".
-            if field == "outcome" and value == "all":
-                for legacy in ("checkout", "rest"):
-                    if legacy not in out:
-                        out.append(legacy)
-                continue
             if value not in allowed:
                 raise ApiError(400, f"{field} must be one of: " + ", ".join(allowed))
             if value not in out:

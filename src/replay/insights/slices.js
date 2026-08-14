@@ -13,12 +13,11 @@ disagree the live n= and the suggested name silently drift from the cut.
 /** Same set as capture.attribution.META_SOURCES. */
 const META_SOURCES = new Set(['facebook', 'meta', 'fb', 'instagram', 'ig']);
 
-/** Same map as capture.analyze.slices.OUTCOME_LABELS, plus create-dialog "all". */
+/** Same map as capture.analyze.slices.OUTCOME_LABELS. */
 export const OUTCOME_LABELS = {
   purchased: 'purchased',
   checkout: 'reached checkout',
   rest: 'did not reach checkout',
-  all: 'did not purchase',
 };
 
 /** Same order as capture.classify.OUTCOME_VALUES / DEVICE_VALUES. */
@@ -92,7 +91,11 @@ function normAttr(value) {
 /** Client-side mirror of row_matches_slice, for the live counts only. */
 export function rowMatches(row, spec) {
   if (sliceIsEmpty(spec)) return true;
-  if (spec.outcome && (row.outcome || 'rest') !== spec.outcome) return false;
+  if (spec.outcome) {
+    const want =
+      spec.outcome === 'checkout,rest' ? ['checkout', 'rest'] : [spec.outcome];
+    if (!want.includes(row.outcome || 'rest')) return false;
+  }
   if (spec.device && (row.device || '') !== spec.device) return false;
   if (spec.page && (row.page || '') !== spec.page) return false;
   const attrs = row.attribution || {};
@@ -128,7 +131,7 @@ export function sliceNameBits(sliceState) {
   if (!sliceState) return [];
   const bits = [];
   const outcome = sliceState.outcome;
-  if (outcome === 'all' || outcome === 'checkout,rest') {
+  if (outcome === 'checkout,rest') {
     bits.push('did not purchase');
   } else if (outcome) {
     bits.push(formatOutcome(outcome));

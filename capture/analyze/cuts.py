@@ -249,7 +249,7 @@ async def build_cut_analysis(rows: list, slice_spec: dict | None) -> dict:
         raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
 
     selected, spec = select_rows_by_cut(rows, slice_spec)
-    label = slice_label(spec) if spec else "all sessions"
+    label = slice_label(spec)
 
     base = {
         "cut": cut_key(slice_spec),
@@ -374,7 +374,7 @@ async def chat_context(rows: list, slice_spec: dict | None) -> tuple:
     if not runtime.ANALYSIS_ENABLED:
         raise RuntimeError("analysis is not configured — set GEMINI_API_KEY")
     selected, spec = select_rows_by_cut(rows, slice_spec)
-    label = slice_label(spec) if spec else "all sessions"
+    label = slice_label(spec)
     given = _given_facts(spec, len(selected))
     _, _, citations = cut_context(selected, label, given, spec)
     return selected, label, given, citations, spec

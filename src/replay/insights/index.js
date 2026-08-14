@@ -312,8 +312,8 @@ function createFacetRow(field, items, selected, dataAttr) {
   }
   const extras =
     field === 'outcome'
-      ? `<option value="all"${
-          selected === 'all' ? ' selected' : ''
+      ? `<option value="checkout,rest"${
+          selected === 'checkout,rest' ? ' selected' : ''
         }>did not purchase</option>`
       : '';
   const options = (items || [])

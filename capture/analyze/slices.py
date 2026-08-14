@@ -21,7 +21,7 @@ them and owns the match/normalize/label surface.
 
 from typing import Any
 
-from capture.attribution import META_SOURCES, is_meta_attribution
+from capture.attribution import is_meta_attribution
 from capture.classify import (
     DEVICE_VALUES,
     MOBILE_MAX_WIDTH,
@@ -33,7 +33,6 @@ from capture.classify import (
 
 __all__ = [
     "DEVICE_VALUES",
-    "META_SOURCES",
     "MOBILE_MAX_WIDTH",
     "OUTCOME_LABELS",
     "OUTCOME_VALUES",
@@ -43,7 +42,6 @@ __all__ = [
     "outcome_class",
     "page_path",
     "row_matches_slice",
-    "slice_is_empty",
     "slice_label",
     "slice_label_parts",
 ]
@@ -55,7 +53,7 @@ def normalize_slice(spec: dict | None) -> dict:
     Keys: outcome (list of purchased|checkout|rest), device (list of
     mobile|desktop), page (landing path), utm_source, utm_medium, utm_campaign,
     utm_content, fbclid. utm_source="meta" matches Meta traffic (fbclid or a
-    known Meta source).
+    known Meta source); utm_source="non_meta" is the complement.
 
     Constraints are ANDed across keys and ORed within a key, so
     {"outcome": ["purchased", "checkout"], "device": ["mobile"]} reads as
@@ -112,10 +110,6 @@ def normalize_slice(spec: dict | None) -> dict:
     if "fbclid" in spec and spec["fbclid"] is not None:
         out["fbclid"] = bool(spec["fbclid"])
     return out
-
-
-def slice_is_empty(spec: dict) -> bool:
-    return not spec
 
 
 def row_matches_slice(row: dict, spec: dict) -> bool:
@@ -223,7 +217,5 @@ def slice_label_parts(spec: dict) -> list:
 
 
 def slice_label(spec: dict) -> str:
-    if not spec:
-        return "everyone else"
-    parts = slice_label_parts(spec)
+    parts = slice_label_parts(spec or {})
     return " · ".join(parts) if parts else "all sessions"

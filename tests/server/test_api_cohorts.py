@@ -146,7 +146,7 @@ class TestCohort(ServerCase):
             self.assertEqual(self.ingest(sid), 200)
             self.seed_analysis(sid)
 
-        cohort = self.create_and_analyze(a=2, b=2, outcome="purchased", b_outcome="all")
+        cohort = self.create_and_analyze(a=2, b=2, outcome="purchased", b_outcome="checkout,rest")
         self.assertEqual(cohort["a_n"], 2)
         self.assertEqual(cohort["b_n"], 2)
         self.assertEqual(len(cohort["sessions"]), 4)
@@ -301,7 +301,7 @@ class TestCohort(ServerCase):
                     "device": "mobile",
                     "page": "/pages/ashwamag-01",
                     "utm_source": "google",
-                    "b_outcome": "all",
+                    "b_outcome": "checkout,rest",
                     "b_device": "mobile",
                     "b_page": "/pages/ashwamag-01",
                     "b_utm_source": "google",

@@ -38,7 +38,7 @@ class TestCutEndpoint(ServerCase):
                 "a": 1,
                 "b": 1,
                 "outcome": "purchased",
-                "b_outcome": "all",
+                "b_outcome": "checkout,rest",
                 "min_duration_ms": 0,
                 "url_contains": "",
             }
@@ -211,7 +211,7 @@ class TestCutSlices(ServerCase):
                 "a": 2,
                 "b": 2,
                 "outcome": "purchased",
-                "b_outcome": "all",
+                "b_outcome": "checkout,rest",
                 "min_duration_ms": 0,
                 "url_contains": "",
             }
@@ -320,6 +320,7 @@ class TestCutSlices(ServerCase):
             ("outcome=nonsense", "outcome must be"),
             ("device=tablet", "device must be"),
             ("outcome=maybe", "outcome must be"),
+            ("outcome=all", "outcome must be"),
         ):
             status, body = self.cut(query)
             self.assertEqual(status, 400, query)

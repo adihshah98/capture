@@ -43,9 +43,9 @@ MIN_DURATION_MS = 5000
 # substring gate; new samples use the `page` slice instead. Not an API default.
 URL_CONTAINS = os.environ.get("COHORT_URL_CONTAINS", "")
 
-# How many of the newest index rows to scan when a cut-style slice is applied.
-# The slice itself is evaluated in Python after the query returns, so this is
-# the real bound on how rare a slice can be and still fill a cohort.
+# How many of the newest index rows to scan for pool facets. Membership
+# sampling filters in SQL, so this is not the bound on a rare slice filling a
+# cohort — only the facet picker stops here.
 CANDIDATE_CAP = 5000
 
 ORDER_LATEST = "latest"

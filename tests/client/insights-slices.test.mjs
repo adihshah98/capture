@@ -26,6 +26,13 @@ test('one set field is enough to stop it being empty', () => {
   assert.equal(sliceIsEmpty({ ...emptySlice(), device: 'mobile' }), false);
 });
 
+test('did-not-purchase is the checkout+rest union, like the server', () => {
+  const spec = { ...emptySlice(), outcome: 'checkout,rest' };
+  assert.equal(rowMatches({ outcome: 'checkout' }, spec), true);
+  assert.equal(rowMatches({ outcome: 'rest' }, spec), true);
+  assert.equal(rowMatches({ outcome: 'purchased' }, spec), false);
+});
+
 test('outcome defaults to rest when the row has none', () => {
   const spec = { ...emptySlice(), outcome: 'rest' };
   assert.equal(rowMatches({}, spec), true);
@@ -60,7 +67,6 @@ test('outcome labels match the server', () => {
   assert.equal(formatOutcome('purchased'), 'purchased');
   assert.equal(formatOutcome('checkout'), 'reached checkout');
   assert.equal(formatOutcome('rest'), 'did not reach checkout');
-  assert.equal(formatOutcome('all'), 'did not purchase');
 });
 
 test('a name is suggested from the same tokens the server uses', () => {
@@ -68,7 +74,9 @@ test('a name is suggested from the same tokens the server uses', () => {
     sliceNameBits({ ...emptySlice(), device: 'mobile', outcome: 'purchased' }),
     ['purchased', 'mobile']
   );
-  assert.deepEqual(sliceNameBits({ ...emptySlice(), outcome: 'all' }), ['did not purchase']);
+  assert.deepEqual(sliceNameBits({ ...emptySlice(), outcome: 'checkout,rest' }), [
+    'did not purchase',
+  ]);
   assert.deepEqual(sliceNameBits({ ...emptySlice(), utm_source: 'meta' }), ['Meta']);
   assert.deepEqual(sliceNameBits({ ...emptySlice(), utm_campaign: 'spring' }), [
     'campaign=spring',

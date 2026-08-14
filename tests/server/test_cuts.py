@@ -250,7 +250,7 @@ class TestSliceLabel(unittest.TestCase):
             self.label({"outcome": ["checkout"], "device": ["mobile"], "page": "/p"}),
             "reached checkout · mobile · /p",
         )
-        self.assertEqual(self.label({}), "everyone else")
+        self.assertEqual(self.label({}), "all sessions")
 
     def test_slice_label_is_the_joined_parts(self):
         spec = slices.normalize_slice({"outcome": ["checkout"], "device": ["mobile"], "page": "/p"})
