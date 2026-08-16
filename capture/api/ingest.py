@@ -59,7 +59,7 @@ async def ingest(
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
 
-    project = projects.by_token(token)
+    project = await asyncio.to_thread(projects.by_token, token)
     if project is None:
         raise ApiError(401, "unknown project token")
     require_allowed_domain(request, project)
@@ -161,7 +161,7 @@ async def order_event(
         raise ApiError(403, "this server is read-only and does not accept recordings")
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
-    project = projects.by_token(token)
+    project = await asyncio.to_thread(projects.by_token, token)
     if project is None:
         raise ApiError(401, "unknown project token")
 
@@ -179,7 +179,9 @@ async def order_event(
         raise ApiError(400, "unknown event")
 
     now = int(time.time() * 1000)
-    order = sessionstore.record_order(project.id, session_id, event, payload, now)
+    order = await asyncio.to_thread(
+        sessionstore.record_order, project.id, session_id, event, payload, now
+    )
     if order is None:
         raise ApiError(404, "unknown session")
     return {"status": "ok"}
