@@ -71,7 +71,7 @@ def _row_to_project(row) -> Project:
 
 
 def _load() -> list:
-    with db.connection(admin=True) as conn:
+    with db.sync_connection(admin=True) as conn:
         rows = conn.execute(
             """
             SELECT p.id, p.name, p.org_id, p.domains, p.storage_prefix, p.is_default, p.config,
@@ -159,7 +159,7 @@ def for_orgs(orgs: set) -> list:
 
 
 def create(name: str, token: str, *, is_default: bool = False) -> Project:
-    with db.connection(admin=True) as conn:
+    with db.sync_connection(admin=True) as conn:
         pid = conn.execute(
             "INSERT INTO projects (name, storage_prefix, is_default)"
             " VALUES (%s, %s, %s) RETURNING id",
@@ -176,13 +176,13 @@ def create(name: str, token: str, *, is_default: bool = False) -> Project:
 
 
 def set_org(project: Project, org_id: str) -> None:
-    with db.connection(admin=True) as conn:
+    with db.sync_connection(admin=True) as conn:
         conn.execute("UPDATE projects SET org_id = %s WHERE id = %s", (org_id, project.id))
     invalidate()
 
 
 def set_domains(project: Project, domains: list) -> None:
-    with db.connection(admin=True) as conn:
+    with db.sync_connection(admin=True) as conn:
         conn.execute(
             "UPDATE projects SET domains = %s WHERE id = %s",
             (json.dumps(domains), project.id),
@@ -191,7 +191,7 @@ def set_domains(project: Project, domains: list) -> None:
 
 
 def revoke_token(token: str) -> None:
-    with db.connection(admin=True) as conn:
+    with db.sync_connection(admin=True) as conn:
         conn.execute(
             "UPDATE project_tokens SET revoked_at = now() WHERE token = %s AND revoked_at IS NULL",
             (token,),
@@ -200,12 +200,12 @@ def revoke_token(token: str) -> None:
 
 
 def delete(project: Project) -> None:
-    with db.connection(admin=True) as conn:
+    with db.sync_connection(admin=True) as conn:
         conn.execute("DELETE FROM projects WHERE id = %s", (project.id,))
     invalidate()
 
 
 def usage(project: Project) -> tuple:
-    with db.connection(project.id) as conn:
+    with db.sync_connection(project.id) as conn:
         row = conn.execute("SELECT count(*), coalesce(sum(bytes), 0) FROM sessions").fetchone()
     return int(row[0]), int(row[1])

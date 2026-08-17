@@ -32,7 +32,7 @@ sessions.
 
 import json
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 
 from psycopg.rows import dict_row
 
@@ -47,22 +47,22 @@ SESSION_COLUMNS = ("session_id", "status", "analysis", "error")
 class Store:
     """Stands in for the connection analyze.py used to pass around."""
 
-    @contextmanager
-    def tx(self, project_id: str):
+    @asynccontextmanager
+    async def tx(self, project_id: str):
         """A transaction scoped to one project: a pooled connection with
         `app.project_id` already set, so row level security applies.
 
         Yields `(conn, project_id)` as a pair so a function body cannot query
         under a project the connection was not stamped with.
         """
-        with db.connection(project_id) as conn:
+        async with db.connection(project_id) as conn:
             yield (conn, project_id)
 
-    @contextmanager
-    def admin_tx(self):
+    @asynccontextmanager
+    async def admin_tx(self):
         """Across every project — only for resumable_cohorts, which has to look
         at all of them on the startup path."""
-        with db.connection(admin=True) as conn:
+        async with db.connection(admin=True) as conn:
             yield conn
 
 
@@ -76,6 +76,38 @@ def connect() -> Store:
 
 def _rows(conn):
     return conn.cursor(row_factory=dict_row)
+
+
+async def _fetch_all(conn, sql: str, params=()) -> list:
+    """Run a query and return dict rows.
+
+    A helper rather than the chained `cursor.execute(...).fetchall()` the sync
+    driver allowed: on an async connection both halves are coroutines, so the
+    chain has to be broken up. Doing it in one place keeps the call sites
+    reading the way they did before.
+    """
+    async with _rows(conn) as cur:
+        await cur.execute(sql, params)
+        return await cur.fetchall()
+
+
+async def _fetch_one(conn, sql: str, params=()):
+    """Single dict row, or None. See `_fetch_all`."""
+    async with _rows(conn) as cur:
+        await cur.execute(sql, params)
+        return await cur.fetchone()
+
+
+async def _tuples(conn, sql: str, params=()) -> list:
+    """Rows as plain tuples, for the queries that unpack positionally."""
+    cur = await conn.execute(sql, params)
+    return await cur.fetchall()
+
+
+async def _tuple(conn, sql: str, params=()):
+    """Single tuple row, or None. See `_tuples`."""
+    cur = await conn.execute(sql, params)
+    return await cur.fetchone()
 
 
 def _row_to_cohort(row: dict, sessions: list) -> dict:
@@ -140,35 +172,29 @@ def _now() -> int:
     return int(time.time() * 1000)
 
 
-def read_cohort(store: Store, project_id: str, cohort_id: str) -> dict | None:
-    with store.tx(project_id) as (conn, project_id):
-        row = (
-            _rows(conn)
-            .execute(
-                "SELECT * FROM cohorts WHERE project_id = %s AND cohort_id = %s",
-                (project_id, cohort_id),
-            )
-            .fetchone()
+async def read_cohort(store: Store, project_id: str, cohort_id: str) -> dict | None:
+    async with store.tx(project_id) as (conn, project_id):
+        row = await _fetch_one(
+            conn,
+            "SELECT * FROM cohorts WHERE project_id = %s AND cohort_id = %s",
+            (project_id, cohort_id),
         )
         if row is None:
             return None
-        return _row_to_cohort(row, _read_sessions(conn, project_id, cohort_id))
+        return _row_to_cohort(row, await _read_sessions(conn, project_id, cohort_id))
 
 
-def _read_sessions(conn, project_id, cohort_id: str) -> list:
-    rows = (
-        _rows(conn)
-        .execute(
-            "SELECT * FROM cohort_sessions WHERE project_id = %s AND cohort_id = %s"
-            " ORDER BY position",
-            (project_id, cohort_id),
-        )
-        .fetchall()
+async def _read_sessions(conn, project_id, cohort_id: str) -> list:
+    rows = await _fetch_all(
+        conn,
+        "SELECT * FROM cohort_sessions WHERE project_id = %s AND cohort_id = %s"
+        " ORDER BY position",
+        (project_id, cohort_id),
     )
     return [_row_to_session(r) for r in rows]
 
 
-def write_cohort(store: Store, project_id: str, cohort: dict) -> dict:
+async def write_cohort(store: Store, project_id: str, cohort: dict) -> dict:
     """Create (or fully replace) a cohort and its membership. Returns the stored dict.
 
     This is the sampling write: a new frozen set of members. Sessions are
@@ -183,8 +209,8 @@ def write_cohort(store: Store, project_id: str, cohort: dict) -> dict:
     """
     cols, fields, sessions = _split_cohort(cohort)
     updated = _now()
-    with store.tx(project_id) as (conn, project_id):
-        conn.execute(
+    async with store.tx(project_id) as (conn, project_id):
+        await conn.execute(
             """
             INSERT INTO cohorts
                 (project_id, cohort_id, label, status, created_at, updated_at, batch, fields)
@@ -209,7 +235,7 @@ def write_cohort(store: Store, project_id: str, cohort: dict) -> dict:
                 json.dumps(fields),
             ),
         )
-        conn.execute(
+        await conn.execute(
             "DELETE FROM cohort_sessions WHERE project_id = %s AND cohort_id = %s",
             (project_id, cols["id"]),
         )
@@ -220,7 +246,7 @@ def write_cohort(store: Store, project_id: str, cohort: dict) -> dict:
             )
         ]
         if rows:
-            conn.cursor().executemany(
+            await conn.cursor().executemany(
                 """
                 INSERT INTO cohort_sessions
                     (project_id, cohort_id, session_id, position, status, analysis, error, fields)
@@ -231,7 +257,7 @@ def write_cohort(store: Store, project_id: str, cohort: dict) -> dict:
     return {**cohort, "updated_at": updated}
 
 
-def update_session_status(
+async def update_session_status(
     store: Store,
     project_id: str,
     cohort_id: str,
@@ -249,22 +275,22 @@ def update_session_status(
     Returns whether a row matched, so a mark aimed at a session that is no
     longer a member is visible rather than silently dropped.
     """
-    with store.tx(project_id) as (conn, project_id):
-        cur = conn.execute(
+    async with store.tx(project_id) as (conn, project_id):
+        cur = await conn.execute(
             "UPDATE cohort_sessions SET status = %s, analysis = %s, error = %s"
             " WHERE project_id = %s AND cohort_id = %s AND session_id = %s",
             (status, analysis, error, project_id, cohort_id, session_id),
         )
         matched = cur.rowcount > 0
         if matched:
-            conn.execute(
+            await conn.execute(
                 "UPDATE cohorts SET updated_at = %s WHERE project_id = %s AND cohort_id = %s",
                 (_now(), project_id, cohort_id),
             )
     return matched
 
 
-def persist_cohort_refresh(
+async def persist_cohort_refresh(
     store: Store,
     project_id: str,
     cohort_id: str,
@@ -282,20 +308,20 @@ def persist_cohort_refresh(
     if status is None and not rows:
         return
     now = _now()
-    with store.tx(project_id) as (conn, project_id):
+    async with store.tx(project_id) as (conn, project_id):
         if status is not None:
-            conn.execute(
+            await conn.execute(
                 "UPDATE cohorts SET status = %s, updated_at = %s"
                 " WHERE project_id = %s AND cohort_id = %s",
                 (status, now, project_id, cohort_id),
             )
         else:
-            conn.execute(
+            await conn.execute(
                 "UPDATE cohorts SET updated_at = %s WHERE project_id = %s AND cohort_id = %s",
                 (now, project_id, cohort_id),
             )
         if rows:
-            conn.cursor().executemany(
+            await conn.cursor().executemany(
                 """
                 UPDATE cohort_sessions SET status = %s, analysis = %s, error = %s
                  WHERE project_id = %s AND cohort_id = %s AND session_id = %s
@@ -307,10 +333,10 @@ def persist_cohort_refresh(
             )
 
 
-def set_cohort_label(store: Store, project_id: str, cohort_id: str, label: str) -> bool:
+async def set_cohort_label(store: Store, project_id: str, cohort_id: str, label: str) -> bool:
     """Set a cohort's display name without rewriting its membership."""
-    with store.tx(project_id) as (conn, project_id):
-        cur = conn.execute(
+    async with store.tx(project_id) as (conn, project_id):
+        cur = await conn.execute(
             "UPDATE cohorts SET label = %s, updated_at = %s"
             " WHERE project_id = %s AND cohort_id = %s",
             (label, _now(), project_id, cohort_id),
@@ -318,7 +344,7 @@ def set_cohort_label(store: Store, project_id: str, cohort_id: str, label: str) 
         return cur.rowcount > 0
 
 
-def set_cohort_status(
+async def set_cohort_status(
     store: Store,
     project_id: str,
     cohort_id: str,
@@ -328,43 +354,56 @@ def set_cohort_status(
     clear_batch: bool = False,
 ) -> None:
     """Move a cohort's own status (and batch handle) without rewriting membership."""
-    with store.tx(project_id) as (conn, project_id):
+    async with store.tx(project_id) as (conn, project_id):
         if clear_batch:
-            conn.execute(
+            await conn.execute(
                 "UPDATE cohorts SET status = %s, batch = NULL, updated_at = %s"
                 " WHERE project_id = %s AND cohort_id = %s",
                 (status, _now(), project_id, cohort_id),
             )
         elif batch is not None:
-            conn.execute(
+            await conn.execute(
                 "UPDATE cohorts SET status = %s, batch = %s::jsonb, updated_at = %s"
                 " WHERE project_id = %s AND cohort_id = %s",
                 (status, json.dumps(batch), _now(), project_id, cohort_id),
             )
         else:
-            conn.execute(
+            await conn.execute(
                 "UPDATE cohorts SET status = %s, updated_at = %s"
                 " WHERE project_id = %s AND cohort_id = %s",
                 (status, _now(), project_id, cohort_id),
             )
 
 
-def list_cohorts(store: Store, project_id: str) -> list:
-    """Every cohort in this project, newest first, with membership."""
-    with store.tx(project_id) as (conn, project_id):
-        rows = (
-            _rows(conn)
-            .execute(
-                "SELECT * FROM cohorts WHERE project_id = %s"
-                " ORDER BY created_at DESC, cohort_id DESC",
-                (project_id,),
-            )
-            .fetchall()
+async def list_cohorts(store: Store, project_id: str) -> list:
+    """Every cohort in this project, newest first, with membership.
+
+    Two queries regardless of how many cohorts come back. This used to read the
+    membership per cohort, so a project with fifty of them issued fifty-one
+    queries on a dashboard load; the rows are now fetched in one pass and
+    grouped in Python.
+    """
+    async with store.tx(project_id) as (conn, project_id):
+        rows = await _fetch_all(
+            conn,
+            "SELECT * FROM cohorts WHERE project_id = %s"
+            " ORDER BY created_at DESC, cohort_id DESC",
+            (project_id,),
         )
-        return [_row_to_cohort(r, _read_sessions(conn, project_id, r["cohort_id"])) for r in rows]
+        if not rows:
+            return []
+        member_rows = await _fetch_all(
+            conn,
+            "SELECT * FROM cohort_sessions WHERE project_id = %s ORDER BY cohort_id, position",
+            (project_id,),
+        )
+        by_cohort: dict = {}
+        for member in member_rows:
+            by_cohort.setdefault(member["cohort_id"], []).append(_row_to_session(member))
+        return [_row_to_cohort(r, by_cohort.get(r["cohort_id"], [])) for r in rows]
 
 
-def resumable_cohorts(store: Store) -> list:
+async def resumable_cohorts(store: Store) -> list:
     """(project_id, cohort) for every cohort with an in-flight batch job name.
 
     Spans projects, so it runs with admin scope — it is the startup path
@@ -372,38 +411,36 @@ def resumable_cohorts(store: Store) -> list:
     Callers that need a live Project (startup resume) resolve the id once.
     """
     out = []
-    with store.admin_tx() as conn:
-        rows = (
-            _rows(conn)
-            .execute("SELECT * FROM cohorts WHERE status = 'running' AND batch IS NOT NULL")
-            .fetchall()
+    async with store.admin_tx() as conn:
+        rows = await _fetch_all(
+            conn, "SELECT * FROM cohorts WHERE status = 'running' AND batch IS NOT NULL"
         )
         for row in rows:
             if not (row.get("batch") or {}).get("name"):
                 continue
             pid = str(row["project_id"])
-            sessions = _read_sessions(conn, row["project_id"], row["cohort_id"])
+            sessions = await _read_sessions(conn, row["project_id"], row["cohort_id"])
             out.append((pid, _row_to_cohort(row, sessions)))
     return out
 
 
-def delete_cohort(store: Store, project_id: str, cohort_id: str) -> bool:
-    with store.tx(project_id) as (conn, project_id):
-        cur = conn.execute(
+async def delete_cohort(store: Store, project_id: str, cohort_id: str) -> bool:
+    async with store.tx(project_id) as (conn, project_id):
+        cur = await conn.execute(
             "DELETE FROM cohorts WHERE project_id = %s AND cohort_id = %s",
             (project_id, cohort_id),
         )
         found = cur.rowcount > 0
         # Membership cascades from the cohort row; cuts have no foreign key,
         # so they go explicitly.
-        conn.execute(
+        await conn.execute(
             "DELETE FROM cohort_cuts WHERE project_id = %s AND cohort_id = %s",
             (project_id, cohort_id),
         )
     return found
 
 
-def forget_session(store: Store, project_id: str, session_id: str) -> int:
+async def forget_session(store: Store, project_id: str, session_id: str) -> int:
     """Drop a deleted session from every cohort that held it.
 
     A cohort member is a reference to a recording, not a copy of it. Once the
@@ -417,64 +454,66 @@ def forget_session(store: Store, project_id: str, session_id: str) -> int:
     Cached cuts are deliberately left alone — they record what the model said
     when it ran, and rewriting them to match would be a second fabrication.
     """
-    with store.tx(project_id) as (conn, project_id):
-        owners = conn.execute(
+    async with store.tx(project_id) as (conn, project_id):
+        owners = await _tuples(
+            conn,
             "SELECT DISTINCT cohort_id FROM cohort_sessions"
             " WHERE project_id = %s AND session_id = %s",
             (project_id, session_id),
-        ).fetchall()
+        )
         if not owners:
             return 0
-        cur = conn.execute(
+        cur = await conn.execute(
             "DELETE FROM cohort_sessions WHERE project_id = %s AND session_id = %s",
             (project_id, session_id),
         )
         removed = cur.rowcount
         # Bump the owners so a poller sees the membership change.
-        conn.cursor().executemany(
+        await conn.cursor().executemany(
             "UPDATE cohorts SET updated_at = %s WHERE project_id = %s AND cohort_id = %s",
             [(_now(), project_id, r[0]) for r in owners],
         )
     return removed
 
 
-def forget_pool(store: Store, project_id: str) -> int:
+async def forget_pool(store: Store, project_id: str) -> int:
     """Drop every cohort in a project. For a whole-project reset."""
-    with store.tx(project_id) as (conn, project_id):
-        removed = conn.execute(
-            "DELETE FROM cohort_sessions WHERE project_id = %s", (project_id,)
-        ).rowcount
-        conn.execute("DELETE FROM cohort_cuts WHERE project_id = %s", (project_id,))
-        conn.execute("DELETE FROM cohorts WHERE project_id = %s", (project_id,))
+    async with store.tx(project_id) as (conn, project_id):
+        cur = await conn.execute("DELETE FROM cohort_sessions WHERE project_id = %s", (project_id,))
+        removed = cur.rowcount
+        await conn.execute("DELETE FROM cohort_cuts WHERE project_id = %s", (project_id,))
+        await conn.execute("DELETE FROM cohorts WHERE project_id = %s", (project_id,))
     return removed
 
 
-def read_cuts(store: Store, project_id: str, cohort_id: str) -> dict:
-    with store.tx(project_id) as (conn, project_id):
-        rows = conn.execute(
+async def read_cuts(store: Store, project_id: str, cohort_id: str) -> dict:
+    async with store.tx(project_id) as (conn, project_id):
+        rows = await _tuples(
+            conn,
             "SELECT cut_key, cut FROM cohort_cuts WHERE project_id = %s AND cohort_id = %s",
             (project_id, cohort_id),
-        ).fetchall()
+        )
     return {key: cut for key, cut in rows if isinstance(cut, dict)}
 
 
-def read_cut(store: Store, project_id: str, cohort_id: str, key: str) -> dict | None:
-    with store.tx(project_id) as (conn, project_id):
-        row = conn.execute(
+async def read_cut(store: Store, project_id: str, cohort_id: str, key: str) -> dict | None:
+    async with store.tx(project_id) as (conn, project_id):
+        row = await _tuple(
+            conn,
             "SELECT cut FROM cohort_cuts"
             " WHERE project_id = %s AND cohort_id = %s AND cut_key = %s",
             (project_id, cohort_id, key),
-        ).fetchone()
+        )
     if row is None:
         return None
     return row[0] if isinstance(row[0], dict) else None
 
 
-def write_cut(store: Store, project_id: str, cohort_id: str, key: str, cut: dict) -> dict:
+async def write_cut(store: Store, project_id: str, cohort_id: str, key: str, cut: dict) -> dict:
     """Cache one cut. One row, so concurrent cuts of one cohort cannot drop
     each other the way the read-mutate-write of the whole map did."""
-    with store.tx(project_id) as (conn, project_id):
-        conn.execute(
+    async with store.tx(project_id) as (conn, project_id):
+        await conn.execute(
             "INSERT INTO cohort_cuts (project_id, cohort_id, cut_key, cut)"
             " VALUES (%s, %s, %s, %s::jsonb)"
             " ON CONFLICT (project_id, cohort_id, cut_key) DO UPDATE SET cut = excluded.cut",
@@ -483,9 +522,9 @@ def write_cut(store: Store, project_id: str, cohort_id: str, key: str, cut: dict
     return cut
 
 
-def clear_cut(store: Store, project_id: str, cohort_id: str, key: str) -> bool:
-    with store.tx(project_id) as (conn, project_id):
-        cur = conn.execute(
+async def clear_cut(store: Store, project_id: str, cohort_id: str, key: str) -> bool:
+    async with store.tx(project_id) as (conn, project_id):
+        cur = await conn.execute(
             "DELETE FROM cohort_cuts" " WHERE project_id = %s AND cohort_id = %s AND cut_key = %s",
             (project_id, cohort_id, key),
         )
@@ -502,35 +541,37 @@ def _id_list(session_ids) -> list:
     return [str(sid) for sid in session_ids if sid]
 
 
-def read_analysis(store: Store, project_id: str, session_id: str) -> dict | None:
-    with store.tx(project_id) as (conn, project_id):
-        row = conn.execute(
+async def read_analysis(store: Store, project_id: str, session_id: str) -> dict | None:
+    async with store.tx(project_id) as (conn, project_id):
+        row = await _tuple(
+            conn,
             "SELECT body FROM analyses WHERE project_id = %s AND session_id = %s",
             (project_id, session_id),
-        ).fetchone()
+        )
     if row is None:
         return None
     return row[0] if isinstance(row[0], dict) else None
 
 
-def read_analyses(store: Store, project_id: str, session_ids) -> dict:
+async def read_analyses(store: Store, project_id: str, session_ids) -> dict:
     """session_id → write-up for the ids that have one. Missing ids are omitted."""
     ids = _id_list(session_ids)
     if not ids:
         return {}
     placeholders = ", ".join("%s" for _ in ids)
-    with store.tx(project_id) as (conn, project_id):
-        rows = conn.execute(
+    async with store.tx(project_id) as (conn, project_id):
+        rows = await _tuples(
+            conn,
             f"SELECT session_id, body FROM analyses"
             f" WHERE project_id = %s AND session_id IN ({placeholders})",
             (project_id, *ids),
-        ).fetchall()
+        )
     return {sid: body for sid, body in rows if isinstance(body, dict)}
 
 
-def write_analysis(store: Store, project_id: str, session_id: str, result: dict) -> dict:
-    with store.tx(project_id) as (conn, project_id):
-        conn.execute(
+async def write_analysis(store: Store, project_id: str, session_id: str, result: dict) -> dict:
+    async with store.tx(project_id) as (conn, project_id):
+        await conn.execute(
             "INSERT INTO analyses (project_id, session_id, body, created_at)"
             " VALUES (%s, %s, %s::jsonb, %s)"
             " ON CONFLICT (project_id, session_id) DO UPDATE SET"
@@ -545,33 +586,31 @@ def write_analysis(store: Store, project_id: str, session_id: str, result: dict)
     return result
 
 
-def clear_analysis(store: Store, project_id: str, session_id: str) -> None:
-    with store.tx(project_id) as (conn, project_id):
-        conn.execute(
+async def clear_analysis(store: Store, project_id: str, session_id: str) -> None:
+    async with store.tx(project_id) as (conn, project_id):
+        await conn.execute(
             "DELETE FROM analyses WHERE project_id = %s AND session_id = %s",
             (project_id, session_id),
         )
 
 
-def forget_analyses(store: Store, project_id: str) -> int:
+async def forget_analyses(store: Store, project_id: str) -> int:
     """Drop every write-up and job in a project. The analysis half of a reset,
     alongside forget_pool for cohorts."""
-    with store.tx(project_id) as (conn, project_id):
-        removed = conn.execute("DELETE FROM analyses WHERE project_id = %s", (project_id,)).rowcount
-        conn.execute("DELETE FROM analysis_jobs WHERE project_id = %s", (project_id,))
+    async with store.tx(project_id) as (conn, project_id):
+        cur = await conn.execute("DELETE FROM analyses WHERE project_id = %s", (project_id,))
+        removed = cur.rowcount
+        await conn.execute("DELETE FROM analysis_jobs WHERE project_id = %s", (project_id,))
     return removed
 
 
-def read_job(store: Store, project_id: str, session_id: str) -> dict | None:
-    with store.tx(project_id) as (conn, project_id):
-        row = (
-            _rows(conn)
-            .execute(
-                "SELECT status, error, updated_at FROM analysis_jobs"
-                " WHERE project_id = %s AND session_id = %s",
-                (project_id, session_id),
-            )
-            .fetchone()
+async def read_job(store: Store, project_id: str, session_id: str) -> dict | None:
+    async with store.tx(project_id) as (conn, project_id):
+        row = await _fetch_one(
+            conn,
+            "SELECT status, error, updated_at FROM analysis_jobs"
+            " WHERE project_id = %s AND session_id = %s",
+            (project_id, session_id),
         )
     if row is None:
         return None
@@ -581,21 +620,18 @@ def read_job(store: Store, project_id: str, session_id: str) -> dict | None:
     return job
 
 
-def read_jobs(store: Store, project_id: str, session_ids) -> dict:
+async def read_jobs(store: Store, project_id: str, session_ids) -> dict:
     """session_id → job row for the ids that have one. Missing ids are omitted."""
     ids = _id_list(session_ids)
     if not ids:
         return {}
     placeholders = ", ".join("%s" for _ in ids)
-    with store.tx(project_id) as (conn, project_id):
-        rows = (
-            _rows(conn)
-            .execute(
-                f"SELECT session_id, status, error, updated_at FROM analysis_jobs"
-                f" WHERE project_id = %s AND session_id IN ({placeholders})",
-                (project_id, *ids),
-            )
-            .fetchall()
+    async with store.tx(project_id) as (conn, project_id):
+        rows = await _fetch_all(
+            conn,
+            f"SELECT session_id, status, error, updated_at FROM analysis_jobs"
+            f" WHERE project_id = %s AND session_id IN ({placeholders})",
+            (project_id, *ids),
         )
     out = {}
     for row in rows:
@@ -606,9 +642,9 @@ def read_jobs(store: Store, project_id: str, session_ids) -> dict:
     return out
 
 
-def write_job(store: Store, project_id: str, session_id: str, job: dict) -> dict:
-    with store.tx(project_id) as (conn, project_id):
-        conn.execute(
+async def write_job(store: Store, project_id: str, session_id: str, job: dict) -> dict:
+    async with store.tx(project_id) as (conn, project_id):
+        await conn.execute(
             "INSERT INTO analysis_jobs (project_id, session_id, status, error, updated_at)"
             " VALUES (%s, %s, %s, %s, %s)"
             " ON CONFLICT (project_id, session_id) DO UPDATE SET"
@@ -619,34 +655,31 @@ def write_job(store: Store, project_id: str, session_id: str, job: dict) -> dict
     return job
 
 
-def clear_job(store: Store, project_id: str, session_id: str) -> None:
-    with store.tx(project_id) as (conn, project_id):
-        conn.execute(
+async def clear_job(store: Store, project_id: str, session_id: str) -> None:
+    async with store.tx(project_id) as (conn, project_id):
+        await conn.execute(
             "DELETE FROM analysis_jobs WHERE project_id = %s AND session_id = %s",
             (project_id, session_id),
         )
 
 
-def session_facts(store: Store, project_id: str, session_id: str) -> tuple:
+async def session_facts(store: Store, project_id: str, session_id: str) -> tuple:
     """(entry url, order) for one session — what visitor.json and order.json held.
 
     The entry URL keeps its query string: it is the only place the UTMs
     survive, since page_path() drops them and the digest's URLs are
     post-navigation.
     """
-    with store.tx(project_id) as (conn, project_id):
-        row = (
-            _rows(conn)
-            .execute(
-                "SELECT s.url, o.checkout_started_at, o.purchased_at, o.order_id,"
-                " o.total, o.currency"
-                " FROM sessions s"
-                " LEFT JOIN orders o"
-                "   ON o.project_id = s.project_id AND o.session_id = s.session_id"
-                " WHERE s.project_id = %s AND s.session_id = %s",
-                (project_id, session_id),
-            )
-            .fetchone()
+    async with store.tx(project_id) as (conn, project_id):
+        row = await _fetch_one(
+            conn,
+            "SELECT s.url, o.checkout_started_at, o.purchased_at, o.order_id,"
+            " o.total, o.currency"
+            " FROM sessions s"
+            " LEFT JOIN orders o"
+            "   ON o.project_id = s.project_id AND o.session_id = s.session_id"
+            " WHERE s.project_id = %s AND s.session_id = %s",
+            (project_id, session_id),
         )
     if row is None:
         return None, None

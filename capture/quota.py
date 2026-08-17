@@ -14,11 +14,11 @@ from . import sessionstore
 _bytes_used: dict = {}
 
 
-def used(project) -> int:
+async def used(project) -> int:
     """Cached so the quota check is not a query per ingest; the running total is
     maintained in SQL and re-read only on a cold cache."""
     if project.id not in _bytes_used:
-        _bytes_used[project.id] = sessionstore.project_bytes(project.id)
+        _bytes_used[project.id] = await sessionstore.project_bytes(project.id)
     return _bytes_used[project.id]
 
 

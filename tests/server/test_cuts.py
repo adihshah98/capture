@@ -1,6 +1,5 @@
 """Cut analysis: filtering a cohort, keying the cache, shaping the model's reply."""
 
-import asyncio
 import inspect
 import json
 import re
@@ -28,7 +27,7 @@ def row(sid, outcome="rest", device=None, page=None, **attrs):
     }
 
 
-class TestOutcomeAndDeviceClass(unittest.TestCase):
+class TestOutcomeAndDeviceClass(unittest.IsolatedAsyncioTestCase):
     def test_outcome_is_three_disjoint_buckets(self):
         self.assertEqual(slices.outcome_class({"purchased_at": 1}), "purchased")
         # A purchase implies checkout, but "checkout" means reached-and-did-not-buy.
@@ -48,7 +47,7 @@ class TestOutcomeAndDeviceClass(unittest.TestCase):
         self.assertIsNone(slices.device_class(None))
 
 
-class TestPagePath(unittest.TestCase):
+class TestPagePath(unittest.IsolatedAsyncioTestCase):
     def test_strips_query_hash_and_trailing_slash(self):
         self.assertEqual(
             slices.page_path("https://shop.test/products/cream/?utm_source=meta#x"),
@@ -109,7 +108,7 @@ class TestPagePath(unittest.TestCase):
         self.assertEqual(slices.page_path("https://shop.test/caf%C3%A9"), "/café")
 
 
-class TestNormalizeSlice(unittest.TestCase):
+class TestNormalizeSlice(unittest.IsolatedAsyncioTestCase):
     def test_multi_valued_outcome_and_device(self):
         spec = slices.normalize_slice({"outcome": ["purchased", "checkout"], "device": "mobile"})
         self.assertEqual(spec["outcome"], ["checkout", "purchased"])
@@ -183,7 +182,7 @@ class TestNormalizeSlice(unittest.TestCase):
         )
 
 
-class TestMatchOutcomeAndDevice(unittest.TestCase):
+class TestMatchOutcomeAndDevice(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.rows = [
             row("pm", "purchased", "mobile", page="/p", utm_source="google"),
@@ -234,7 +233,7 @@ class TestMatchOutcomeAndDevice(unittest.TestCase):
         self.assertFalse(slices.row_matches_slice(rows[0], spec))
 
 
-class TestSliceLabel(unittest.TestCase):
+class TestSliceLabel(unittest.IsolatedAsyncioTestCase):
     def label(self, spec):
         return slices.slice_label(slices.normalize_slice(spec))
 
@@ -273,7 +272,7 @@ class TestSliceLabel(unittest.TestCase):
         self.assertNotIn("non-purchase", label)
 
 
-class TestSelectRowsByCut(unittest.TestCase):
+class TestSelectRowsByCut(unittest.IsolatedAsyncioTestCase):
     def test_an_empty_filter_selects_the_whole_cohort(self):
         rows = [row("a", "purchased"), row("b"), row("c", "purchased")]
         selected, spec = cuts.select_rows_by_cut(rows, None)
@@ -312,7 +311,7 @@ class TestSelectRowsByCut(unittest.TestCase):
         self.assertEqual(selected, [])
 
 
-class TestCutKey(unittest.TestCase):
+class TestCutKey(unittest.IsolatedAsyncioTestCase):
     def test_same_cut_hashes_the_same_regardless_of_key_order(self):
         one = cuts.cut_key({"outcome": "purchased", "utm_source": "meta"})
         two = cuts.cut_key({"utm_source": "META", "outcome": "purchased"})
@@ -332,7 +331,7 @@ class TestCutKey(unittest.TestCase):
         self.assertEqual(json.loads(key)["filter"], {"outcome": ["purchased"]})
 
 
-class TestCutKeyPromptVersion(unittest.TestCase):
+class TestCutKeyPromptVersion(unittest.IsolatedAsyncioTestCase):
     """A cut's answer depends on what the model was asked, not only on which
     sessions were selected. Keying on the filter alone meant a reworded
     CUT_PROMPT kept serving answers from the old one, with no invalidation
@@ -382,7 +381,7 @@ class TestCutKeyPromptVersion(unittest.TestCase):
         self.assertNotEqual(legacy, self.key())
 
 
-class TestPromptVersion(unittest.TestCase):
+class TestPromptVersion(unittest.IsolatedAsyncioTestCase):
     def test_it_is_stable_and_content_addressed(self):
         self.assertEqual(cuts.prompt_version("abc"), cuts.prompt_version("abc"))
         self.assertNotEqual(cuts.prompt_version("abc"), cuts.prompt_version("abd"))
@@ -391,7 +390,7 @@ class TestPromptVersion(unittest.TestCase):
         self.assertEqual(len(cuts.prompt_version("anything")), 8)
 
 
-class TestNormalizeCutAnalysis(unittest.TestCase):
+class TestNormalizeCutAnalysis(unittest.IsolatedAsyncioTestCase):
     def test_keeps_the_documented_shape_and_drops_junk(self):
         out = cutfmt.normalize_cut_analysis(
             {
@@ -556,7 +555,7 @@ class TestNormalizeCutAnalysis(unittest.TestCase):
         self.assertEqual(out["blockers"][0]["observation"], "a real item with [00:05]")
 
 
-class TestBuildCutAnalysis(unittest.TestCase):
+class TestBuildCutAnalysis(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self._enabled = runtime.ANALYSIS_ENABLED
         runtime.ANALYSIS_ENABLED = True
@@ -567,7 +566,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
         runtime.ANALYSIS_ENABLED = self._enabled
         runtime._gate_loop = None
 
-    def test_an_empty_group_skips_the_model_call(self):
+    async def test_an_empty_group_skips_the_model_call(self):
         calls = []
 
         async def fake(*args):
@@ -576,13 +575,13 @@ class TestBuildCutAnalysis(unittest.TestCase):
 
         rows = [row("a", "purchased"), row("b", "purchased")]
         with patch.object(cuts, "call_gemini_cut", fake):
-            out = asyncio.run(cuts.build_cut_analysis(rows, {"outcome": "checkout"}))
+            out = await cuts.build_cut_analysis(rows, {"outcome": "checkout"})
 
         self.assertEqual(calls, [], "no sessions match — nothing to read")
         self.assertEqual(out["n"], 0)
         self.assertIn("No analyzed sessions", out["analysis"]["headline"])
 
-    def test_a_filtered_group_calls_the_model_and_records_membership(self):
+    async def test_a_filtered_group_calls_the_model_and_records_membership(self):
         seen = {}
 
         async def fake(rows, label, given="", spec=None):
@@ -593,7 +592,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
 
         rows = [row("p1", "purchased"), row("n1"), row("n2")]
         with patch.object(cuts, "call_gemini_cut", fake):
-            out = asyncio.run(cuts.build_cut_analysis(rows, {"outcome": "purchased"}))
+            out = await cuts.build_cut_analysis(rows, {"outcome": "purchased"})
 
         self.assertEqual(seen["rows"], ["p1"])
         self.assertEqual(seen["label"], "purchased")
@@ -604,7 +603,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
         self.assertEqual(out["analysis"]["headline"], "they hesitate")
         self.assertEqual(out["cut"], cuts.cut_key({"outcome": "purchased"}))
 
-    def test_an_unfiltered_group_reads_the_whole_cohort(self):
+    async def test_an_unfiltered_group_reads_the_whole_cohort(self):
         seen = {}
 
         async def fake(rows, label, given="", spec=None):
@@ -615,7 +614,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
 
         rows = [row("p1", "purchased"), row("n1"), row("n2")]
         with patch.object(cuts, "call_gemini_cut", fake):
-            out = asyncio.run(cuts.build_cut_analysis(rows, None))
+            out = await cuts.build_cut_analysis(rows, None)
 
         self.assertEqual(seen["rows"], ["p1", "n1", "n2"])
         # No filter means nothing is banned — but the group size is still
@@ -667,7 +666,7 @@ class TestBuildCutAnalysis(unittest.TestCase):
         self.assertNotIn("unknown", text)
 
 
-class TestGivenFacts(unittest.TestCase):
+class TestGivenFacts(unittest.IsolatedAsyncioTestCase):
     """The filter that selected a group must never come back as a finding."""
 
     def given(self, spec, n=9):
@@ -741,7 +740,7 @@ class TestGivenFacts(unittest.TestCase):
         )
         self.assertNotIn("cannot separate", text)
 
-    def test_build_passes_the_given_facts_to_the_model(self):
+    async def test_build_passes_the_given_facts_to_the_model(self):
         seen = {}
 
         async def fake(rows, label, given="", spec=None):
@@ -754,7 +753,7 @@ class TestGivenFacts(unittest.TestCase):
         try:
             rows = [row("a", "purchased"), row("b", "rest")]
             with patch.object(cuts, "call_gemini_cut", fake):
-                asyncio.run(cuts.build_cut_analysis(rows, {"outcome": ["purchased"]}))
+                await cuts.build_cut_analysis(rows, {"outcome": ["purchased"]})
         finally:
             runtime.ANALYSIS_ENABLED = saved_enabled
             runtime._gate_loop = None
@@ -763,7 +762,7 @@ class TestGivenFacts(unittest.TestCase):
         self.assertIn("exactly 1 session(s)", seen["given"])
 
 
-class TestShareDenominator(unittest.TestCase):
+class TestShareDenominator(unittest.IsolatedAsyncioTestCase):
     """A share must count out of the group, not out of the wider cohort.
 
     The observed bug: a 9-session cut rendered "All 46 sessions landed ...",
@@ -804,7 +803,7 @@ class TestShareDenominator(unittest.TestCase):
         self.assertTrue(cutfmt._share_denominator_ok("All 9 of 9", 9))
 
 
-class TestCutOutputBudget(unittest.TestCase):
+class TestCutOutputBudget(unittest.IsolatedAsyncioTestCase):
     """Five sections of concrete items need room; too small a cap summarises."""
 
     def test_the_answer_has_room_beyond_the_thinking_budget(self):
@@ -823,7 +822,7 @@ class TestCutOutputBudget(unittest.TestCase):
         )
 
 
-class TestCutPromptContent(unittest.TestCase):
+class TestCutPromptContent(unittest.IsolatedAsyncioTestCase):
     """The prompt has to keep asking for the things the first version lost."""
 
     def test_demands_concrete_evidence(self):
@@ -955,7 +954,7 @@ class TestCutPromptContent(unittest.TestCase):
         self.assertNotIn("Group B", prompt)
 
 
-class TestCutCache(pgfixture.CohortStoreMixin, unittest.TestCase):
+class TestCutCache(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
@@ -964,54 +963,54 @@ class TestCutCache(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.project_id = self._pg_project
         self.addCleanup(self.tmp.cleanup)
 
-    def test_round_trips_a_cut_under_its_key(self):
+    async def test_round_trips_a_cut_under_its_key(self):
         key = cuts.cut_key({"outcome": "purchased"})
-        self.assertIsNone(storage.read_cut(self.project_id, "cohort-1", key))
-        storage.write_cut(self.project_id, "cohort-1", key, {"cut": key, "n": 3})
-        self.assertEqual(storage.read_cut(self.project_id, "cohort-1", key)["n"], 3)
+        self.assertIsNone(await storage.read_cut(self.project_id, "cohort-1", key))
+        await storage.write_cut(self.project_id, "cohort-1", key, {"cut": key, "n": 3})
+        self.assertEqual((await storage.read_cut(self.project_id, "cohort-1", key))["n"], 3)
 
-    def test_cuts_of_one_cohort_do_not_collide(self):
+    async def test_cuts_of_one_cohort_do_not_collide(self):
         k1 = cuts.cut_key({"outcome": "purchased"})
         k2 = cuts.cut_key({"utm_source": "meta"})
-        storage.write_cut(self.project_id, "cohort-1", k1, {"n": 1})
-        storage.write_cut(self.project_id, "cohort-1", k2, {"n": 2})
-        self.assertEqual(storage.read_cut(self.project_id, "cohort-1", k1)["n"], 1)
-        self.assertEqual(storage.read_cut(self.project_id, "cohort-1", k2)["n"], 2)
+        await storage.write_cut(self.project_id, "cohort-1", k1, {"n": 1})
+        await storage.write_cut(self.project_id, "cohort-1", k2, {"n": 2})
+        self.assertEqual((await storage.read_cut(self.project_id, "cohort-1", k1))["n"], 1)
+        self.assertEqual((await storage.read_cut(self.project_id, "cohort-1", k2))["n"], 2)
 
-    def test_cohorts_do_not_share_a_cut_cache(self):
+    async def test_cohorts_do_not_share_a_cut_cache(self):
         key = cuts.cut_key({"outcome": "purchased"})
-        storage.write_cut(self.project_id, "cohort-1", key, {"n": 1})
-        self.assertIsNone(storage.read_cut(self.project_id, "cohort-2", key))
+        await storage.write_cut(self.project_id, "cohort-1", key, {"n": 1})
+        self.assertIsNone(await storage.read_cut(self.project_id, "cohort-2", key))
 
-    def test_a_bad_cohort_id_is_refused(self):
-        self.assertEqual(storage.read_cuts(self.project_id, "../../etc/passwd"), {})
+    async def test_a_bad_cohort_id_is_refused(self):
+        self.assertEqual(await storage.read_cuts(self.project_id, "../../etc/passwd"), {})
 
-    def test_clearing_a_cut_frees_it_to_be_asked_again(self):
+    async def test_clearing_a_cut_frees_it_to_be_asked_again(self):
         key = cuts.cut_key({"outcome": "purchased"})
-        storage.write_cut(self.project_id, "cohort-1", key, {"n": 3})
-        self.assertTrue(storage.clear_cut(self.project_id, "cohort-1", key))
-        self.assertIsNone(storage.read_cut(self.project_id, "cohort-1", key))
+        await storage.write_cut(self.project_id, "cohort-1", key, {"n": 3})
+        self.assertTrue(await storage.clear_cut(self.project_id, "cohort-1", key))
+        self.assertIsNone(await storage.read_cut(self.project_id, "cohort-1", key))
 
-    def test_clearing_one_cut_leaves_its_neighbours_cached(self):
+    async def test_clearing_one_cut_leaves_its_neighbours_cached(self):
         k1 = cuts.cut_key({"outcome": "purchased"})
         k2 = cuts.cut_key({"utm_source": "meta"})
-        storage.write_cut(self.project_id, "cohort-1", k1, {"n": 1})
-        storage.write_cut(self.project_id, "cohort-1", k2, {"n": 2})
-        storage.clear_cut(self.project_id, "cohort-1", k1)
-        self.assertIsNone(storage.read_cut(self.project_id, "cohort-1", k1))
-        self.assertEqual(storage.read_cut(self.project_id, "cohort-1", k2)["n"], 2)
+        await storage.write_cut(self.project_id, "cohort-1", k1, {"n": 1})
+        await storage.write_cut(self.project_id, "cohort-1", k2, {"n": 2})
+        await storage.clear_cut(self.project_id, "cohort-1", k1)
+        self.assertIsNone(await storage.read_cut(self.project_id, "cohort-1", k1))
+        self.assertEqual((await storage.read_cut(self.project_id, "cohort-1", k2))["n"], 2)
 
-    def test_clearing_a_cut_that_was_never_cached_is_a_no_op(self):
+    async def test_clearing_a_cut_that_was_never_cached_is_a_no_op(self):
         key = cuts.cut_key({"outcome": "purchased"})
-        self.assertFalse(storage.clear_cut(self.project_id, "cohort-1", key))
-        self.assertFalse(storage.clear_cut(self.project_id, "../../etc/passwd", key))
+        self.assertFalse(await storage.clear_cut(self.project_id, "cohort-1", key))
+        self.assertFalse(await storage.clear_cut(self.project_id, "../../etc/passwd", key))
 
-    def test_a_cleared_cut_can_be_rewritten(self):
+    async def test_a_cleared_cut_can_be_rewritten(self):
         key = cuts.cut_key({"outcome": "purchased"})
-        storage.write_cut(self.project_id, "cohort-1", key, {"n": 3})
-        storage.clear_cut(self.project_id, "cohort-1", key)
-        storage.write_cut(self.project_id, "cohort-1", key, {"n": 4})
-        self.assertEqual(storage.read_cut(self.project_id, "cohort-1", key)["n"], 4)
+        await storage.write_cut(self.project_id, "cohort-1", key, {"n": 3})
+        await storage.clear_cut(self.project_id, "cohort-1", key)
+        await storage.write_cut(self.project_id, "cohort-1", key, {"n": 4})
+        self.assertEqual((await storage.read_cut(self.project_id, "cohort-1", key))["n"], 4)
 
 
 def split_rows(converting=8, flat=8, untagged=0):
@@ -1034,7 +1033,7 @@ def split_rows(converting=8, flat=8, untagged=0):
     return rows
 
 
-class TestCrossTabFloor(unittest.TestCase):
+class TestCrossTabFloor(unittest.IsolatedAsyncioTestCase):
     """The floor is what keeps a two-session fluke out of a marketing deck."""
 
     def test_a_real_split_is_reported_with_exact_counts(self):
@@ -1089,7 +1088,7 @@ class TestCrossTabFloor(unittest.TestCase):
         self.assertEqual(stats.cross_tab_block([], {}), "")
 
 
-class TestCrossTabDimensions(unittest.TestCase):
+class TestCrossTabDimensions(unittest.IsolatedAsyncioTestCase):
     def test_a_filtered_dimension_is_never_an_axis(self):
         # device is constant under this filter, so it cannot separate anything.
         block = stats.cross_tab_block(split_rows(), {"device": ["mobile"]})
@@ -1117,7 +1116,7 @@ class TestCrossTabDimensions(unittest.TestCase):
         self.assertIn("EXACT", block)
 
 
-class TestCrossTabSingleOutcomeGroups(unittest.TestCase):
+class TestCrossTabSingleOutcomeGroups(unittest.IsolatedAsyncioTestCase):
     """A purchased-only cut has no purchase rate to grade lift against."""
 
     def uniform(self):
@@ -1160,7 +1159,7 @@ class TestCrossTabSingleOutcomeGroups(unittest.TestCase):
         self.assertNotIn("google", block.split("Examined")[0])
 
 
-class TestPromptsTeachTheMeasuredBlock(unittest.TestCase):
+class TestPromptsTeachTheMeasuredBlock(unittest.IsolatedAsyncioTestCase):
     """Computed numbers are only useful if the prompts defer to them."""
 
     def test_the_cut_prompt_makes_the_block_authoritative(self):
@@ -1185,7 +1184,7 @@ class TestPromptsTeachTheMeasuredBlock(unittest.TestCase):
         self.assertIn("Measured splits", cuts.CHAT_PROMPT.split("Counting")[0])
 
 
-class TestCrossTabReachesBothReaders(unittest.TestCase):
+class TestCrossTabReachesBothReaders(unittest.IsolatedAsyncioTestCase):
     """The cut and the chat must see identical measured splits."""
 
     def test_the_block_is_in_the_shared_context_header(self):
@@ -1194,7 +1193,7 @@ class TestCrossTabReachesBothReaders(unittest.TestCase):
         self.assertIn("Measured splits", header)
         self.assertIn("meta: 8 sessions", header)
 
-    def test_cut_and_chat_headers_match(self):
+    async def test_cut_and_chat_headers_match(self):
         # Both readers build the header the same way from the same spec, so a
         # chat can never answer over a thinner view than the cut on screen.
         rows = split_rows()
@@ -1209,8 +1208,8 @@ class TestCrossTabReachesBothReaders(unittest.TestCase):
         runtime.ANALYSIS_ENABLED = True
         try:
             with patch.object(cuts, "call_gemini_cut", fake_cut):
-                asyncio.run(cuts.build_cut_analysis(rows, slice_spec))
-            selected, label, given, _, spec = asyncio.run(cuts.chat_context(rows, slice_spec))
+                await cuts.build_cut_analysis(rows, slice_spec)
+            selected, label, given, _, spec = await cuts.chat_context(rows, slice_spec)
         finally:
             runtime.ANALYSIS_ENABLED = saved_enabled
 

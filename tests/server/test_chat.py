@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import psycopg
 
+from capture import db
 from capture.analyze import cuts, runtime, storage
 
 
@@ -22,7 +23,7 @@ def row(sid, outcome="rest", device=None, page=None, text=None, **attrs):
     }
 
 
-class TestCutContextIsShared(unittest.TestCase):
+class TestCutContextIsShared(unittest.IsolatedAsyncioTestCase):
     """The whole point of cut_context: chat and cuts read the same evidence."""
 
     def test_chat_and_cut_are_handed_identical_context(self):
@@ -52,7 +53,7 @@ class TestCutContextIsShared(unittest.TestCase):
         self.assertIn("no sessions in this group", side)
 
 
-class TestChatContext(unittest.TestCase):
+class TestChatContext(unittest.IsolatedAsyncioTestCase):
     """chat_context refuses to run unconfigured, so these enable it. The suite
     runs without a real key — nothing here reaches the network."""
 
@@ -63,52 +64,52 @@ class TestChatContext(unittest.TestCase):
     def tearDown(self):
         runtime.ANALYSIS_ENABLED = self._enabled
 
-    def test_the_filter_selects_the_group_and_names_it(self):
+    async def test_the_filter_selects_the_group_and_names_it(self):
         rows = [
             row("a", outcome="purchased", device="mobile"),
             row("b", outcome="rest", device="mobile"),
             row("c", outcome="purchased", device="desktop"),
         ]
-        selected, label, given, citations, _ = asyncio.run(
-            cuts.chat_context(rows, {"outcome": ["purchased"]})
+        selected, label, given, citations, _ = await cuts.chat_context(
+            rows, {"outcome": ["purchased"]}
         )
         self.assertEqual([r["session_id"] for r in selected], ["a", "c"])
         self.assertIn("purchased", label)
         self.assertEqual(citations, {"1": "a", "2": "c"})
 
-    def test_the_premises_state_the_filtered_group_size(self):
+    async def test_the_premises_state_the_filtered_group_size(self):
         rows = [row(str(i), device="mobile") for i in range(5)] + [row("x", device="desktop")]
-        selected, _, given, _, _ = asyncio.run(cuts.chat_context(rows, {"device": ["mobile"]}))
+        selected, _, given, _, _ = await cuts.chat_context(rows, {"device": ["mobile"]})
         self.assertEqual(len(selected), 5)
         # The group size, not the cohort size, is the only total offered.
         self.assertIn("exactly 5 session(s)", given)
         self.assertNotIn("exactly 6", given)
 
-    def test_an_empty_filter_selects_everyone(self):
+    async def test_an_empty_filter_selects_everyone(self):
         rows = [row("a"), row("b")]
-        selected, label, _, _, _ = asyncio.run(cuts.chat_context(rows, None))
+        selected, label, _, _, _ = await cuts.chat_context(rows, None)
         self.assertEqual(len(selected), 2)
         self.assertEqual(label, "all sessions")
 
-    def test_a_filter_matching_nobody_yields_an_empty_group(self):
+    async def test_a_filter_matching_nobody_yields_an_empty_group(self):
         # The endpoint turns this into a 400 rather than spending a call.
-        selected, _, _, citations, _ = asyncio.run(
-            cuts.chat_context([row("a", device="mobile")], {"device": ["desktop"]})
+        selected, _, _, citations, _ = await cuts.chat_context(
+            [row("a", device="mobile")], {"device": ["desktop"]}
         )
         self.assertEqual(selected, [])
         self.assertEqual(citations, {})
 
-    def test_it_refuses_to_run_unconfigured(self):
+    async def test_it_refuses_to_run_unconfigured(self):
         enabled = runtime.ANALYSIS_ENABLED
         runtime.ANALYSIS_ENABLED = False
         try:
             with self.assertRaises(RuntimeError):
-                asyncio.run(cuts.chat_context([row("a")], None))
+                await cuts.chat_context([row("a")], None)
         finally:
             runtime.ANALYSIS_ENABLED = enabled
 
 
-class TestCleanChatMessages(unittest.TestCase):
+class TestCleanChatMessages(unittest.IsolatedAsyncioTestCase):
     def test_assistant_is_renamed_to_the_role_gemini_expects(self):
         out = cuts.clean_chat_messages(
             [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
@@ -154,7 +155,7 @@ class TestCleanChatMessages(unittest.TestCase):
         self.assertEqual(out[0]["content"], "hi")
 
 
-class TestChatEndpoint(unittest.TestCase):
+class TestChatEndpoint(unittest.IsolatedAsyncioTestCase):
     """The SSE contract, with the model stubbed — no network, no key needed."""
 
     @classmethod
@@ -181,23 +182,32 @@ class TestChatEndpoint(unittest.TestCase):
 
         cls.client = TestClient(server.app)
 
-        # A cohort of two analyzed sessions.
+        # A cohort of two analyzed sessions. The store is async, and
+        # setUpClass cannot be a coroutine, so the seeding runs on a
+        # throwaway loop — the class-level fixture is one-shot setup, not
+        # something that needs to share the tests' loop.
         cls.pool = deps.resolve_pool(None)
-        for sid, text in (("a" * 32, "S-a write-up"), ("b" * 32, "S-b write-up")):
-            d = cls.pool / sid
-            d.mkdir(parents=True, exist_ok=True)
-            storage.write_analysis(cls.project_id, sid, {"status": "done", "text": text})
-        cls.cohort = storage.write_cohort(
-            cls.project_id,
-            {
-                "id": "cohort-chat-test",
-                "status": "done",
-                "sessions": [
-                    {"session_id": "a" * 32, "filter": "a", "status": "done"},
-                    {"session_id": "b" * 32, "filter": "b", "status": "done"},
-                ],
-            },
-        )
+
+        async def _seed():
+            for sid, text in (("a" * 32, "S-a write-up"), ("b" * 32, "S-b write-up")):
+                d = cls.pool / sid
+                d.mkdir(parents=True, exist_ok=True)
+                await storage.write_analysis(cls.project_id, sid, {"status": "done", "text": text})
+            cohort = await storage.write_cohort(
+                cls.project_id,
+                {
+                    "id": "cohort-chat-test",
+                    "status": "done",
+                    "sessions": [
+                        {"session_id": "a" * 32, "filter": "a", "status": "done"},
+                        {"session_id": "b" * 32, "filter": "b", "status": "done"},
+                    ],
+                },
+            )
+            await db.close_apool()
+            return cohort
+
+        cls.cohort = asyncio.run(_seed())
         # Chat slices on sessions.outcome, not the group tag.
         with psycopg.connect(cls.admin_url) as conn:
             conn.execute(
@@ -340,7 +350,7 @@ class TestChatEndpoint(unittest.TestCase):
         self.assertIn('"n":1', res.text)
 
 
-class TestChatPrompt(unittest.TestCase):
+class TestChatPrompt(unittest.IsolatedAsyncioTestCase):
     def test_it_separates_missing_evidence_from_absent_behaviour(self):
         """The failure this prompt exists to prevent: a write-up that does not
         mention X read as proof that X did not happen."""

@@ -14,7 +14,7 @@ BACKFILL = (REPO / "migrations" / "0008_backfill_session_classes.sql").read_text
 
 
 class TestSessionClassesBackfill(ServerCase):
-    def test_backfill_copies_json_and_orders_into_class_columns(self):
+    async def test_backfill_copies_json_and_orders_into_class_columns(self):
         sid = "legbf" + "x" * 27
         with psycopg.connect(self.admin_url) as conn:
             conn.execute(
@@ -43,18 +43,19 @@ class TestSessionClassesBackfill(ServerCase):
 
         from capture import db
 
-        with db.connection(self.project_id) as conn:
-            row = conn.execute(
+        async with db.connection(self.project_id) as conn:
+            row = await db.fetchone(
+                conn,
                 "SELECT outcome, device_class, page, utm_source, utm_campaign,"
                 " has_fbclid, is_meta FROM sessions WHERE session_id = %s",
                 (sid,),
-            ).fetchone()
+            )
         self.assertEqual(
             row,
             ("purchased", "mobile", "/p", "google", "spring", False, False),
         )
 
-    def test_backfill_does_not_overwrite_ingest_columns(self):
+    async def test_backfill_does_not_overwrite_ingest_columns(self):
         sid = "keepbf" + "x" * 26
         with psycopg.connect(self.admin_url) as conn:
             conn.execute(
@@ -80,14 +81,15 @@ class TestSessionClassesBackfill(ServerCase):
 
         from capture import db
 
-        with db.connection(self.project_id) as conn:
-            row = conn.execute(
+        async with db.connection(self.project_id) as conn:
+            row = await db.fetchone(
+                conn,
                 "SELECT device_class, page, utm_campaign FROM sessions" " WHERE session_id = %s",
                 (sid,),
-            ).fetchone()
+            )
         self.assertEqual(row, ("desktop", "/current", "fresh"))
 
-    def test_backfill_keeps_is_meta_false_when_there_is_no_campaign(self):
+    async def test_backfill_keeps_is_meta_false_when_there_is_no_campaign(self):
         """A row with no attribution JSON: `utm_source IN (...)` is SQL NULL.
 
         OR-ing that onto is_meta used to write NULL and abort the migration.
@@ -117,14 +119,15 @@ class TestSessionClassesBackfill(ServerCase):
 
         from capture import db
 
-        with db.connection(self.project_id) as conn:
-            row = conn.execute(
+        async with db.connection(self.project_id) as conn:
+            row = await db.fetchone(
+                conn,
                 "SELECT is_meta, has_fbclid, page FROM sessions WHERE session_id = %s",
                 (sid,),
-            ).fetchone()
+            )
         self.assertEqual(row, (False, False, "/products/ashwa-mag-1"))
 
-    def test_backfill_keeps_distinct_landing_pages(self):
+    async def test_backfill_keeps_distinct_landing_pages(self):
         """0008's regexp must not collapse two product URLs into `/`."""
         a = "pagea" + "x" * 27
         b = "pageb" + "x" * 27
@@ -147,18 +150,19 @@ class TestSessionClassesBackfill(ServerCase):
 
         from capture import db
 
-        with db.connection(self.project_id) as conn:
+        async with db.connection(self.project_id) as conn:
             pages = {
                 row[0]: row[1]
-                for row in conn.execute(
+                for row in await db.fetchall(
+                    conn,
                     "SELECT session_id, page FROM sessions WHERE session_id IN (%s, %s)",
                     (a, b),
-                ).fetchall()
+                )
             }
         self.assertEqual(pages[a], "/products/ashwa-mag-1")
         self.assertEqual(pages[b], "/pages/ashwamag-01")
 
-    def test_recompute_page_overwrites_the_homepage_collapse(self):
+    async def test_recompute_page_overwrites_the_homepage_collapse(self):
         """0008 stored `/` for unreadable URLs; 0009 uses page_path instead."""
         sid = "collap" + "x" * 26
         with psycopg.connect(self.admin_url) as conn:
@@ -185,9 +189,12 @@ class TestSessionClassesBackfill(ServerCase):
             db.recompute_session_pages(conn)
             conn.commit()
 
-        with db.connection(self.project_id) as conn:
-            page = conn.execute(
-                "SELECT page FROM sessions WHERE session_id = %s",
-                (sid,),
-            ).fetchone()[0]
+        async with db.connection(self.project_id) as conn:
+            page = (
+                await db.fetchone(
+                    conn,
+                    "SELECT page FROM sessions WHERE session_id = %s",
+                    (sid,),
+                )
+            )[0]
         self.assertEqual(page, "/collections/all")

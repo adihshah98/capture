@@ -111,7 +111,9 @@ def classified_row(
     }
 
 
-def classified_rows(conn: Connection, project_id: str, session_ids: list | tuple | set) -> dict:
+async def classified_rows(
+    conn: Connection, project_id: str, session_ids: list | tuple | set
+) -> dict:
     """Slice-shaped facts for these sessions, from the materialised columns.
 
     Scoped to the ids the caller already chose (a cohort). Sampling already
@@ -121,7 +123,7 @@ def classified_rows(conn: Connection, project_id: str, session_ids: list | tuple
     if not ids:
         return {}
     placeholders = ", ".join("%s" for _ in ids)
-    rows = conn.execute(
+    cur = await conn.execute(
         f"""
         SELECT s.session_id, s.outcome, s.device_class, s.page,
                s.utm_source, s.utm_medium, s.utm_campaign, s.utm_content, s.has_fbclid
@@ -129,7 +131,8 @@ def classified_rows(conn: Connection, project_id: str, session_ids: list | tuple
         WHERE s.project_id = %s AND s.session_id IN ({placeholders})
         """,
         (project_id, *ids),
-    ).fetchall()
+    )
+    rows = await cur.fetchall()
     out = {}
     for (
         sid,
@@ -257,7 +260,7 @@ def _slice_where(slice_spec: dict | None) -> tuple[str, list]:
     return (" AND ".join(where), params) if where else ("", [])
 
 
-def pool_facets(
+async def pool_facets(
     conn: Connection,
     project_id: str,
     *,
@@ -270,7 +273,7 @@ def pool_facets(
     """
     where_sql, params = _cohort_where(project_id, min_duration_ms=min_duration_ms, url_contains="")
     order_sql = _cohort_order_sql(cohort_spec.ORDER_LATEST)
-    rows = conn.execute(
+    cur = await conn.execute(
         f"""
         SELECT s.session_id, s.outcome, s.device_class, s.page,
                s.utm_source, s.utm_medium, s.utm_campaign, s.utm_content, s.has_fbclid
@@ -280,7 +283,8 @@ def pool_facets(
         LIMIT %s
         """,
         (*params, cohort_spec.CANDIDATE_CAP),
-    ).fetchall()
+    )
+    rows = await cur.fetchall()
     return facets_from_rows(
         [
             classified_row(
@@ -352,7 +356,7 @@ def _cohort_order_sql(order: str) -> str:
     return f"s.last_seen DESC, {activity} DESC, s.session_id DESC"
 
 
-def _sample_rows(
+async def _sample_rows(
     conn: Connection,
     project_id: str,
     *,
@@ -380,7 +384,7 @@ def _sample_rows(
     order_sql = _cohort_order_sql(
         order if order in cohort_spec.ORDERS else cohort_spec.ORDER_LATEST
     )
-    rows = conn.execute(
+    cur = await conn.execute(
         f"""
         SELECT s.session_id, s.outcome, s.device_class, s.page,
                s.utm_source, s.utm_medium, s.utm_campaign, s.utm_content, s.has_fbclid
@@ -390,7 +394,8 @@ def _sample_rows(
         LIMIT %s
         """,
         (*params, max(0, int(n))),
-    ).fetchall()
+    )
+    rows = await cur.fetchall()
     return [
         classified_row(
             sid,
@@ -419,7 +424,7 @@ def _combine_stats(*parts: SampleStats) -> SampleStats:
     return SampleStats(requested=requested, matched=matched, scanned=scanned, capped=capped)
 
 
-def _sample_matching_rows(
+async def _sample_matching_rows(
     conn: Connection,
     project_id: str,
     n: int,
@@ -441,7 +446,7 @@ def _sample_matching_rows(
         return SampleResult(sessions=[], sample=_empty_stats(0))
     spec = normalize_slice(slice_spec)
     path_needle = "" if spec.get("page") else url_contains
-    rows = _sample_rows(
+    rows = await _sample_rows(
         conn,
         project_id,
         n=n,
@@ -463,7 +468,7 @@ def _sample_matching_rows(
     )
 
 
-def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> SampleResult:
+async def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> SampleResult:
     """Sessions matching a selection rule, plus how the request resolved.
 
     Always groups (A, optional B).
@@ -480,11 +485,11 @@ def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> Sample
         "order": spec.order,
     }
 
-    a = _sample_matching_rows(
+    a = await _sample_matching_rows(
         conn, project_id, spec.a_n, slice_spec=spec.slice_spec, tag="a", **base
     )
     if spec.b_n > 0:
-        b = _sample_matching_rows(
+        b = await _sample_matching_rows(
             conn,
             project_id,
             spec.b_n,
@@ -501,10 +506,10 @@ def sample_cohort(conn: Connection, project_id: str, spec: CohortSpec) -> Sample
     return a
 
 
-def sample_cohort_rows(conn: Connection, project_id: str, spec: CohortSpec) -> list:
+async def sample_cohort_rows(conn: Connection, project_id: str, spec: CohortSpec) -> list:
     """Sessions matching a selection rule.
 
     Prefer `sample_cohort` when the caller needs to know whether the request
     was filled; this keeps the list-shaped surface used by tests.
     """
-    return sample_cohort(conn, project_id, spec).sessions
+    return (await sample_cohort(conn, project_id, spec)).sessions

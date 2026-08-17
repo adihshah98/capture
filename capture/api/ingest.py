@@ -69,7 +69,7 @@ async def ingest(
         and shutil.disk_usage(paths.DATA_ROOT).free < config.MIN_FREE_DISK_BYTES
     ):
         raise ApiError(507, "server storage full")
-    if config.MAX_PROJECT_BYTES and quota.used(project) >= config.MAX_PROJECT_BYTES:
+    if config.MAX_PROJECT_BYTES and await quota.used(project) >= config.MAX_PROJECT_BYTES:
         raise ApiError(429, "project storage quota reached")
 
     body = await request.body()
@@ -123,15 +123,14 @@ async def ingest(
     first_ts, last_ts = event_span(events) or (now, now)
 
     window_id = str(payload.get("window_id") or "default")
-    state = await asyncio.to_thread(sessionstore.window_state, project.id, session_id, window_id)
+    state = await sessionstore.window_state(project.id, session_id, window_id)
     active_ts = last_active_scan(events, state)
     if active_ts:
         state["active"] = max(state.get("active", 0), active_ts)
     state["first"] = min(state.get("first", first_ts), first_ts)
     state["last"] = max(state.get("last", last_ts), last_ts)
 
-    await asyncio.to_thread(
-        sessionstore.record_chunk,
+    await sessionstore.record_chunk(
         project.id,
         session_id,
         window_id=window_id,
@@ -179,9 +178,7 @@ async def order_event(
         raise ApiError(400, "unknown event")
 
     now = int(time.time() * 1000)
-    order = await asyncio.to_thread(
-        sessionstore.record_order, project.id, session_id, event, payload, now
-    )
+    order = await sessionstore.record_order(project.id, session_id, event, payload, now)
     if order is None:
         raise ApiError(404, "unknown session")
     return {"status": "ok"}

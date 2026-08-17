@@ -56,7 +56,9 @@ async def stop_all() -> None:
     pending += [t for t in cohort_tasks.values() if not t.done()]
     for (_project_id, session_id), running in analysis_tasks.items():
         if not running.task.done():
-            ap.set_job(running.project, session_id, "error", error="server restarted mid-analysis")
+            await ap.set_job(
+                running.project, session_id, "error", error="server restarted mid-analysis"
+            )
     for task in pending:
         task.cancel()
     if pending:
@@ -155,12 +157,12 @@ async def chunks_on_disk(project, session_ids: list, *, analysis_only: bool = Fa
 async def _run_analysis_job(
     project: projects.Project, session_id: str, chunk_names: list, force: bool = True
 ) -> None:
-    ap.set_job(project, session_id, "running")
+    await ap.set_job(project, session_id, "running")
     try:
         async with chunks_on_disk(project, [session_id]):
             await ap.run_session(project, session_id, chunk_names, force=force)
     except Exception as exc:
-        ap.set_job(project, session_id, "error", error=str(exc))
+        await ap.set_job(project, session_id, "error", error=str(exc))
     finally:
         analysis_tasks.pop(analysis_key(project, session_id), None)
 
@@ -179,7 +181,7 @@ async def start_session(project: projects.Project, session_id: str, force: bool 
         raise ApiError(400, "this session has no chunks to analyze")
 
     if not force:
-        cached = ap.session_analysis(project, session_id)
+        cached = await ap.session_analysis(project, session_id)
         if cached:
             if "status" not in cached:
                 cached = {**cached, "status": "done"}
@@ -190,15 +192,15 @@ async def start_session(project: projects.Project, session_id: str, force: bool 
     if existing and not existing.task.done():
         return {"status": "running", "accepted": True}
 
-    job = ap.job(project, session_id)
+    job = await ap.job(project, session_id)
     if job and job.get("status") == "running" and (existing is None or existing.task.done()):
         # Stale status from a crashed worker — allow a fresh start.
-        ap.clear_job(project, session_id)
+        await ap.clear_job(project, session_id)
 
     if force:
-        ap.clear_session_analysis(project, session_id)
+        await ap.clear_session_analysis(project, session_id)
 
-    ap.set_job(project, session_id, "running")
+    await ap.set_job(project, session_id, "running")
     task = asyncio.create_task(
         _run_analysis_job(project, session_id, [c.name for c in chunks], force=True)
     )
@@ -214,10 +216,10 @@ async def await_session(project: projects.Project, session_id: str, force: bool 
     running = analysis_tasks.get(analysis_key(project, session_id))
     if running is not None:
         await running.task
-    job = ap.job(project, session_id)
+    job = await ap.job(project, session_id)
     if job and job.get("status") == "error":
         raise RuntimeError(job.get("error") or "analysis failed")
-    if not ap.session_analysis(project, session_id):
+    if not await ap.session_analysis(project, session_id):
         raise RuntimeError("analysis finished without a result")
 
 
@@ -233,24 +235,28 @@ async def run_cohort(project: projects.Project, cohort_id: str, force: bool = Fa
     """Analyze one cohort in the background. Other cohorts are untouched."""
     key = cohort_key(project, cohort_id)
     try:
-        cohort = ap.cohort(project, cohort_id)
+        cohort = await ap.cohort(project, cohort_id)
         if not cohort:
             return
         # Same condition as run_cohort_job: an existing Batch name means
         # collect from digest.json, not re-extract. Staging rrweb chunks
         # here would be a full S3 fetch the resume path never reads.
         analysis_only = bool((cohort.get("batch") or {}).get("name")) and not force
-        async with chunks_on_disk(
-            project, cohort_session_ids(cohort), analysis_only=analysis_only
-        ):
+        async with chunks_on_disk(project, cohort_session_ids(cohort), analysis_only=analysis_only):
             await ap.run_cohort(project, cohort, force=force)
     except asyncio.CancelledError:
-        cohort = ap.cohort(project, cohort_id)
+        # Shielded: this cleanup runs on an already-cancelled task, and a second
+        # cancellation landing mid-pause would leave the cohort marked running
+        # with no job behind it. See analyze/cohorts._pause_for_teardown.
+        cohort = await asyncio.shield(ap.cohort(project, cohort_id))
         if cohort:
             batch_name = (cohort.get("batch") or {}).get("name")
             if batch_name:
-                await ap.cancel_batch(batch_name)
-            ap.mark_paused(project, cohort)
+                await asyncio.shield(ap.cancel_batch(batch_name))
+            try:
+                await asyncio.shield(ap.mark_paused(project, cohort))
+            except Exception as exc:
+                print(f"cohort pause during teardown failed: {exc}")
         raise
     finally:
         cohort_tasks.pop(key, None)
@@ -260,7 +266,7 @@ async def resume_cohort(project: projects.Project, cohort_id: str) -> None:
     """Re-attach to a Batch job after a process restart."""
     key = cohort_key(project, cohort_id)
     try:
-        cohort = ap.cohort(project, cohort_id)
+        cohort = await ap.cohort(project, cohort_id)
         if not cohort:
             return
         async with chunks_on_disk(project, cohort_session_ids(cohort), analysis_only=True):

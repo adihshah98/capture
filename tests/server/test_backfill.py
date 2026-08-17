@@ -115,36 +115,36 @@ class TestBackfill(unittest.TestCase):
             raise RuntimeError(f"backfill failed: {result.stdout}\n{result.stderr}")
         return result.stdout
 
-    def rows(self, sql, params=()):
+    async def rows(self, sql, params=()):
         with psycopg.connect(self.admin_url) as conn:
-            return conn.execute(sql, params).fetchall()
+            return conn.execute(sql, params)
 
-    def test_every_pool_becomes_a_project(self):
-        self.assertEqual(self.rows("SELECT count(*) FROM sessions")[0][0], 3)
-        names = sorted(r[0] for r in self.rows("SELECT name FROM projects"))
+    async def test_every_pool_becomes_a_project(self):
+        self.assertEqual(await self.rows("SELECT count(*) FROM sessions")[0][0], 3)
+        names = sorted(r[0] for r in await self.rows("SELECT name FROM projects"))
         self.assertEqual(names, ["Brand", "Default"])
 
-    def test_the_legacy_pool_is_the_default_project(self):
-        rows = self.rows("SELECT name FROM projects WHERE is_default")
+    async def test_the_legacy_pool_is_the_default_project(self):
+        rows = await self.rows("SELECT name FROM projects WHERE is_default")
         self.assertEqual([r[0] for r in rows], ["Default"])
 
-    def test_storage_prefix_locates_each_pool_on_disk(self):
-        rows = dict(self.rows("SELECT name, storage_prefix FROM projects"))
+    async def test_storage_prefix_locates_each_pool_on_disk(self):
+        rows = dict(await self.rows("SELECT name, storage_prefix FROM projects"))
         self.assertEqual(rows, {"Default": "", "Brand": "cap_tenant"})
 
-    def test_the_tenant_token_is_recorded_separately_from_identity(self):
-        rows = self.rows(
+    async def test_the_tenant_token_is_recorded_separately_from_identity(self):
+        rows = await self.rows(
             "SELECT t.token, p.name, p.org_id FROM project_tokens t"
             " JOIN projects p ON p.id = t.project_id"
         )
         self.assertEqual(rows, [("cap_tenant", "Brand", "org_42")])
 
-    def test_no_session_is_left_without_a_project(self):
-        orphans = self.rows("SELECT count(*) FROM sessions WHERE project_id IS NULL")
+    async def test_no_session_is_left_without_a_project(self):
+        orphans = await self.rows("SELECT count(*) FROM sessions WHERE project_id IS NULL")
         self.assertEqual(orphans[0][0], 0)
 
-    def test_sessions_land_in_the_right_project(self):
-        rows = self.rows(
+    async def test_sessions_land_in_the_right_project(self):
+        rows = await self.rows(
             "SELECT p.name, s.session_id FROM sessions s"
             " JOIN projects p ON p.id = s.project_id ORDER BY s.session_id"
         )
@@ -153,43 +153,45 @@ class TestBackfill(unittest.TestCase):
             [("Default", "legacy-one"), ("Default", "legacy-two"), ("Brand", "tenant-one")],
         )
 
-    def test_interaction_counters_carry_over(self):
-        rows = self.rows("SELECT clicks, rage FROM sessions WHERE session_id = 'legacy-one'")
+    async def test_interaction_counters_carry_over(self):
+        rows = await self.rows("SELECT clicks, rage FROM sessions WHERE session_id = 'legacy-one'")
         self.assertEqual(rows, [(3, 1)])
 
-    def test_attribution_is_parsed_from_the_entry_url(self):
-        rows = self.rows("SELECT attribution FROM sessions WHERE session_id = 'legacy-one'")
+    async def test_attribution_is_parsed_from_the_entry_url(self):
+        rows = await self.rows("SELECT attribution FROM sessions WHERE session_id = 'legacy-one'")
         self.assertEqual(rows[0][0], {"utm_source": "meta"})
 
-    def test_orders_become_their_own_row(self):
-        rows = self.rows(
+    async def test_orders_become_their_own_row(self):
+        rows = await self.rows(
             "SELECT purchased_at, order_id, total, currency FROM orders"
             " JOIN sessions USING (project_id, session_id) WHERE session_id = 'legacy-two'"
         )
         self.assertEqual(rows, [(20, "#1001", 49.5, "USD")])
 
-    def test_window_state_becomes_rows(self):
-        rows = self.rows(
+    async def test_window_state_becomes_rows(self):
+        rows = await self.rows(
             "SELECT window_id, first_seen, last_seen, bytes FROM session_windows"
             " WHERE session_id = 'legacy-one'"
         )
         self.assertEqual(rows, [("aaaa1111", 1000, 2000, 512)])
 
-    def test_running_it_again_changes_nothing(self):
-        before = self.rows(
+    async def test_running_it_again_changes_nothing(self):
+        before = await self.rows(
             "SELECT project_id, session_id, chunk_count, bytes, clicks FROM sessions"
             " ORDER BY session_id"
         )
-        projects_before = self.rows("SELECT count(*) FROM projects")[0][0]
-        tokens_before = self.rows("SELECT count(*) FROM project_tokens")[0][0]
+        projects_before = await self.rows("SELECT count(*) FROM projects")[0][0]
+        tokens_before = await self.rows("SELECT count(*) FROM project_tokens")[0][0]
         self.run_backfill()
-        after = self.rows(
+        after = await self.rows(
             "SELECT project_id, session_id, chunk_count, bytes, clicks FROM sessions"
             " ORDER BY session_id"
         )
         self.assertEqual(before, after)
-        self.assertEqual(self.rows("SELECT count(*) FROM projects")[0][0], projects_before)
-        self.assertEqual(self.rows("SELECT count(*) FROM project_tokens")[0][0], tokens_before)
+        self.assertEqual(await self.rows("SELECT count(*) FROM projects")[0][0], projects_before)
+        self.assertEqual(
+            await self.rows("SELECT count(*) FROM project_tokens")[0][0], tokens_before
+        )
 
 
 LEGACY_INDEX_DDL = """
@@ -258,46 +260,50 @@ class TestBackfillPrefersTheIndex(unittest.TestCase):
         cls.admin_url, cls.app_url = pgfixture.fresh_database()
         TestBackfill.run_backfill.__func__(cls)
 
-    def rows(self, sql, params=()):
+    async def rows(self, sql, params=()):
         with psycopg.connect(self.admin_url) as conn:
-            return conn.execute(sql, params).fetchall()
+            return conn.execute(sql, params)
 
-    def test_the_row_comes_from_the_index_not_the_unparseable_chunk(self):
-        row = self.rows(
+    async def test_the_row_comes_from_the_index_not_the_unparseable_chunk(self):
+        row = await self.rows(
             "SELECT first_seen, last_seen, chunk_count, bytes, clicks, rage, visitor_id,"
             " windows, duration FROM sessions WHERE session_id = 'indexed-session'"
         )
         self.assertEqual(row, [(500, 9500, 7, 123456, 11, 3, "v-idx", 2, 8800)])
 
-    def test_json_columns_survive_the_move(self):
-        device, attribution = self.rows(
+    async def test_json_columns_survive_the_move(self):
+        device, attribution = await self.rows(
             "SELECT device, attribution FROM sessions WHERE session_id = 'indexed-session'"
         )[0]
         self.assertEqual(device, {"width": 414, "height": 896})
         self.assertEqual(attribution, {"utm_source": "meta"})
 
-    def test_the_order_is_split_into_its_own_row(self):
+    async def test_the_order_is_split_into_its_own_row(self):
         self.assertEqual(
-            self.rows("SELECT purchased_at, total, currency FROM orders"),
+            await self.rows("SELECT purchased_at, total, currency FROM orders"),
             [(9000, 12.5, "GBP")],
         )
 
-    def test_window_rows_come_from_the_sidecar(self):
+    async def test_window_rows_come_from_the_sidecar(self):
         self.assertEqual(
-            self.rows("SELECT window_id, first_seen, last_seen, bytes FROM session_windows"),
+            await self.rows("SELECT window_id, first_seen, last_seen, bytes FROM session_windows"),
             [("w1", 500, 9500, 4242)],
         )
 
-    def test_bytes_used_is_recomputed_on_the_project(self):
+    async def test_bytes_used_is_recomputed_on_the_project(self):
         self.assertEqual(
-            self.rows("SELECT bytes_used FROM projects WHERE storage_prefix = 'cap_indexed'"),
+            await self.rows("SELECT bytes_used FROM projects WHERE storage_prefix = 'cap_indexed'"),
             [(123456,)],
         )
 
-    def test_rerunning_is_still_idempotent(self):
-        before = self.rows("SELECT session_id, bytes, clicks FROM sessions ORDER BY session_id")
+    async def test_rerunning_is_still_idempotent(self):
+        before = await self.rows(
+            "SELECT session_id, bytes, clicks FROM sessions ORDER BY session_id"
+        )
         TestBackfill.run_backfill.__func__(type(self))
-        after = self.rows("SELECT session_id, bytes, clicks FROM sessions ORDER BY session_id")
+        after = await self.rows(
+            "SELECT session_id, bytes, clicks FROM sessions ORDER BY session_id"
+        )
         self.assertEqual(before, after)
 
 

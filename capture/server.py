@@ -24,6 +24,8 @@ try:
 except ImportError:
     pass
 
+from psycopg_pool import PoolTimeout
+
 from . import analysis_port as ap
 from . import (
     config,
@@ -34,8 +36,6 @@ from . import (
     session,
     workos,
 )
-from psycopg_pool import PoolTimeout
-
 from .api import auth, cohorts, ingest, meta, sessions
 from .errors import ApiError
 from .projects import ProjectsUnavailable
@@ -67,28 +67,24 @@ async def lifespan(_app):
     if config.PREFLIGHT:
         print("CAPTURE_PREFLIGHT=1 — no retention sweep, no cohort resume")
 
-    # Every db call reaches the pool through asyncio.to_thread, so the default
-    # executor is the queue in front of it. Left at its default of
-    # cpu_count + 4 the two limits are set independently and the wrong one
-    # binds: on a 10-core box 14 threads contend for 10 connections, and the 4
-    # that miss wait on a checkout whose 5s timeout was chosen for "the
-    # database is down", not "we out-fanned our own pool" — so a slow query
-    # turns into a 500 rather than backpressure. Sizing the executor to the
-    # pool makes threads queue in the executor instead, where waiting is free
-    # and unbounded, and keeps CAPTURE_DB_POOL_MAX the single knob for
-    # per-process database concurrency.
+    # Database work runs on the async pool now, so the default executor is no
+    # longer the queue in front of Postgres — it only serves the blocking edges
+    # that remain (S3 puts, the extractor's file staging). It is still sized to
+    # the database pool: those threads mostly interleave with database work, and
+    # keeping one knob (CAPTURE_DB_POOL_MAX) for per-process concurrency is
+    # simpler than two that have to be reasoned about together.
     loop_ = asyncio.get_running_loop()
     if not getattr(loop_, "_default_executor", None):
         loop_.set_default_executor(
             concurrent.futures.ThreadPoolExecutor(
                 max_workers=db.pool_max(),
-                thread_name_prefix="capture-db",
+                thread_name_prefix="capture-io",
             )
         )
 
     async def loop():
         while True:
-            removed = await asyncio.to_thread(retention.sweep_expired_sessions)
+            removed = await retention.sweep_expired_sessions()
             if removed:
                 print(f"retention: removed {removed} expired session(s)")
             await asyncio.sleep(24 * 3600)
@@ -99,16 +95,16 @@ async def lifespan(_app):
     # Cohort state moved to Postgres, so this now depends on the database being
     # reachable. Failing to resume must not stop the server booting: it comes up
     # degraded and reports so, where before it would exit and never serve.
-    def _resumable():
+    async def _resumable():
         if config.PREFLIGHT:
             return []
         try:
-            return ap.pending_batch_resumes()
+            return await ap.pending_batch_resumes()
         except Exception as exc:
             print(f"cohort resume unavailable at startup: {exc}")
             return []
 
-    for owner, cohort in _resumable():
+    for owner, cohort in await _resumable():
         key = jobs.cohort_key(owner, cohort["id"])
         if key not in jobs.cohort_tasks:
             print(
@@ -121,6 +117,9 @@ async def lifespan(_app):
         if task is not None:
             task.cancel()
         await jobs.stop_all()
+        # Both pools: the async one serves requests, the sync one is still open
+        # if a CLI-shaped path (projects registry, migrations) touched it.
+        await db.close_apool()
         await asyncio.to_thread(db.close_pool)
 
 

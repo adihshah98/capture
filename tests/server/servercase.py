@@ -62,7 +62,14 @@ def request_headers(url):
         return err.code, err.headers
 
 
-class ServerCase(unittest.TestCase):
+class ServerCase(unittest.IsolatedAsyncioTestCase):
+    """Boots a real server subprocess and talks to it over HTTP.
+
+    Async-capable because the store these tests seed through is async now: a
+    case that writes a cohort or an analysis directly (rather than via the HTTP
+    API) needs to await it, which only happens if the case runs on a loop.
+    """
+
     env: dict = {}
 
     default_project: bool = True
@@ -198,19 +205,19 @@ class ServerCase(unittest.TestCase):
         """
         return analyze_store.connect()
 
-    def stored_cohort(self, cohort_id, project_id=None):
+    async def stored_cohort(self, cohort_id, project_id=None):
         """The cohort as persisted, or None. Mirrors storage.read_cohort."""
         pid = project_id if project_id is not None else self.project_id
-        return analyze_store.read_cohort(self.cohort_store(), pid, cohort_id)
+        return await analyze_store.read_cohort(self.cohort_store(), pid, cohort_id)
 
-    def store_cohort(self, cohort, project_id=None):
+    async def store_cohort(self, cohort, project_id=None):
         """Overwrite persisted cohort state, to stage a mid-run condition."""
         pid = project_id if project_id is not None else self.project_id
-        return analyze_store.write_cohort(self.cohort_store(), pid, cohort)
+        return await analyze_store.write_cohort(self.cohort_store(), pid, cohort)
 
-    def stored_cuts(self, cohort_id, project_id=None):
+    async def stored_cuts(self, cohort_id, project_id=None):
         pid = project_id if project_id is not None else self.project_id
-        return analyze_store.read_cuts(self.cohort_store(), pid, cohort_id)
+        return await analyze_store.read_cuts(self.cohort_store(), pid, cohort_id)
 
     def ingest(self, session_id, payload=None, gzipped=True, token=None, raw=None, headers=None):
         body = (

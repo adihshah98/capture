@@ -13,6 +13,7 @@ labels.
 import json
 
 from . import classify, db
+
 SESSION_COLUMNS = """
     s.session_id, s.first_seen, s.last_seen, s.last_active, s.duration, s.windows,
     s.chunk_count, s.bytes, s.clicks, s.rage, s.visitor_id, s.url, s.device, s.attribution,
@@ -104,14 +105,15 @@ PRIMARY_WINDOW_SPAN = """
 """
 
 
-def window_state(project_id, session_id: str, window_id: str) -> dict:
+async def window_state(project_id, session_id: str, window_id: str) -> dict:
     """The scanner's carried state for one window — what window-state.json held."""
-    with db.connection(project_id) as conn:
-        row = conn.execute(
+    async with db.connection(project_id) as conn:
+        row = await db.fetchone(
+            conn,
             "SELECT first_seen, last_seen, last_active, bytes, nav, href FROM session_windows"
             " WHERE session_id = %s AND window_id = %s",
             (session_id, str(window_id)),
-        ).fetchone()
+        )
     if not row:
         return {}
     first, last, active, size, nav, href = row
@@ -125,7 +127,7 @@ def window_state(project_id, session_id: str, window_id: str) -> dict:
     return state
 
 
-def record_chunk(
+async def record_chunk(
     project_id,
     session_id,
     *,
@@ -149,8 +151,8 @@ def record_chunk(
     """
     url = meta.get("url")
     classes = classify.session_classes(url=url, device=device, attribution=attribution)
-    with db.connection(project_id) as conn:
-        conn.execute(
+    async with db.connection(project_id) as conn:
+        await conn.execute(
             """
             INSERT INTO sessions
                 (project_id, session_id, first_seen, last_seen, last_active,
@@ -211,7 +213,7 @@ def record_chunk(
                 classes["is_meta"],
             ),
         )
-        conn.execute(
+        await conn.execute(
             """
             INSERT INTO session_windows
                 (project_id, session_id, window_id, first_seen, last_seen, last_active, bytes, nav, href)
@@ -236,7 +238,7 @@ def record_chunk(
                 state.get("href") if isinstance(state.get("href"), str) else None,
             ),
         )
-        conn.execute(
+        await conn.execute(
             f"""
             UPDATE sessions SET
                 windows  = (SELECT count(*) FROM session_windows
@@ -246,25 +248,25 @@ def record_chunk(
             """,
             (project_id, session_id, project_id, session_id, session_id),
         )
-        conn.execute(
+        await conn.execute(
             "UPDATE projects SET bytes_used = bytes_used + %s WHERE id = %s", (size, project_id)
         )
 
 
-def record_order(project_id, session_id, event: str, payload: dict, now: int) -> dict | None:
+async def record_order(project_id, session_id, event: str, payload: dict, now: int) -> dict | None:
     """Returns the order as stored, or None when the session is unknown.
 
     Also refreshes `sessions.outcome` from the stored timestamps so sampling
     can filter purchases without joining orders at query time.
     """
-    with db.connection(project_id) as conn:
-        known = conn.execute(
-            "SELECT 1 FROM sessions WHERE session_id = %s", (session_id,)
-        ).fetchone()
+    async with db.connection(project_id) as conn:
+        known = await db.fetchone(
+            conn, "SELECT 1 FROM sessions WHERE session_id = %s", (session_id,)
+        )
         if not known:
             return None
         if event == "checkout_started":
-            conn.execute(
+            await conn.execute(
                 "INSERT INTO orders (project_id, session_id, checkout_started_at)"
                 " VALUES (%s, %s, %s)"
                 " ON CONFLICT (project_id, session_id) DO UPDATE SET"
@@ -273,7 +275,7 @@ def record_order(project_id, session_id, event: str, payload: dict, now: int) ->
             )
         else:
             total = payload.get("total")
-            conn.execute(
+            await conn.execute(
                 """
                 INSERT INTO orders (project_id, session_id, purchased_at, order_id, total, currency)
                 VALUES (%s, %s, %s, %s, %s, %s)
@@ -296,28 +298,29 @@ def record_order(project_id, session_id, event: str, payload: dict, now: int) ->
                     payload["currency"][:8] if isinstance(payload.get("currency"), str) else None,
                 ),
             )
-        row = conn.execute(
+        row = await db.fetchone(
+            conn,
             "SELECT checkout_started_at, purchased_at, order_id, total, currency"
             " FROM orders WHERE session_id = %s",
             (session_id,),
-        ).fetchone()
+        )
         order = _order(row) if row else None
-        conn.execute(
+        await conn.execute(
             "UPDATE sessions SET outcome = %s WHERE session_id = %s",
             (classify.outcome_class(order), session_id),
         )
     return order
 
 
-def get(project_id, session_id: str) -> dict | None:
-    with db.connection(project_id) as conn:
-        row = conn.execute(
-            f"SELECT {SESSION_COLUMNS} {FROM_SESSIONS} WHERE s.session_id = %s", (session_id,)
-        ).fetchone()
+async def get(project_id, session_id: str) -> dict | None:
+    async with db.connection(project_id) as conn:
+        row = await db.fetchone(
+            conn, f"SELECT {SESSION_COLUMNS} {FROM_SESSIONS} WHERE s.session_id = %s", (session_id,)
+        )
     return row_to_info(row) if row else None
 
 
-def listing(
+async def listing(
     project_id,
     *,
     limit: int,
@@ -334,10 +337,11 @@ def listing(
         where.append("(s.session_id ILIKE %s OR s.visitor_id ILIKE %s OR s.url ILIKE %s)")
         params += [like, like, like]
 
-    with db.connection(project_id) as conn:
-        total = conn.execute(
-            f"SELECT count(*) {FROM_SESSIONS} WHERE {' AND '.join(where)}", params
-        ).fetchone()[0]
+    async with db.connection(project_id) as conn:
+        total_row = await db.fetchone(
+            conn, f"SELECT count(*) {FROM_SESSIONS} WHERE {' AND '.join(where)}", params
+        )
+        total = total_row[0]
         page_where, page_params = list(where), list(params)
         if cursor:
             seen, _, sid = cursor.partition(":")
@@ -345,11 +349,12 @@ def listing(
                 raise ValueError("bad cursor")
             page_where.append("(s.last_seen < %s OR (s.last_seen = %s AND s.session_id < %s))")
             page_params += [int(seen), int(seen), sid]
-        rows = conn.execute(
+        rows = await db.fetchall(
+            conn,
             f"SELECT {SESSION_COLUMNS} {FROM_SESSIONS} WHERE {' AND '.join(page_where)}"
             " ORDER BY s.last_seen DESC, s.session_id DESC LIMIT %s",
             [*page_params, limit + 1],
-        ).fetchall()
+        )
 
     more = len(rows) > limit
     sessions = [row_to_info(r) for r in rows[:limit]]
@@ -359,24 +364,25 @@ def listing(
     return {"sessions": sessions, "total": total, "cursor": next_cursor}
 
 
-def forget(project_id, session_id: str) -> None:
-    with db.connection(project_id) as conn:
+async def forget(project_id, session_id: str) -> None:
+    async with db.connection(project_id) as conn:
         # Windows and orders cascade from the session row. The analysis and its
         # job status have no foreign key — see migrations/0004 — so they go here,
         # where the deletion is visible.
-        conn.execute("DELETE FROM analyses WHERE session_id = %s", (session_id,))
-        conn.execute("DELETE FROM analysis_jobs WHERE session_id = %s", (session_id,))
-        conn.execute("DELETE FROM sessions WHERE session_id = %s", (session_id,))
+        await conn.execute("DELETE FROM analyses WHERE session_id = %s", (session_id,))
+        await conn.execute("DELETE FROM analysis_jobs WHERE session_id = %s", (session_id,))
+        await conn.execute("DELETE FROM sessions WHERE session_id = %s", (session_id,))
 
 
-def expired(project_id, cutoff_ms: int) -> list:
-    with db.connection(project_id) as conn:
-        rows = conn.execute(
-            "SELECT session_id FROM sessions WHERE last_seen < %s", (int(cutoff_ms),)
-        ).fetchall()
+async def expired(project_id, cutoff_ms: int) -> list:
+    async with db.connection(project_id) as conn:
+        rows = await db.fetchall(
+            conn, "SELECT session_id FROM sessions WHERE last_seen < %s", (int(cutoff_ms),)
+        )
     return [r[0] for r in rows]
 
 
-def project_bytes(project_id) -> int:
-    with db.connection(project_id) as conn:
-        return int(conn.execute("SELECT coalesce(sum(bytes), 0) FROM sessions").fetchone()[0])
+async def project_bytes(project_id) -> int:
+    async with db.connection(project_id) as conn:
+        row = await db.fetchone(conn, "SELECT coalesce(sum(bytes), 0) FROM sessions")
+        return int(row[0])

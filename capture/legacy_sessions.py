@@ -10,7 +10,7 @@ visitor.json, interactions.json or device.json, and every pool's sessions are
 represented in Postgres. Until then the read paths fall back here.
 
 Live callers:
-  - api/sessions.py — the fallback when sessionstore.get() finds no row
+  - api/sessions.py — the fallback when await sessionstore.get() finds no row
   - backfill.py     — this is how the migration reads what it is migrating
 
 Nothing here should gain features. If you find yourself adding a field, it belongs
@@ -70,7 +70,7 @@ def session_states(entry: Path) -> tuple:
 
 
 def session_info(entry: Path) -> dict | None:
-    """The same shape sessionstore.get() returns, rebuilt from disk. None when the
+    """The same shape await sessionstore.get() returns, rebuilt from disk. None when the
     directory holds no chunks."""
     chunks = chunk_files(entry)
     if not chunks:

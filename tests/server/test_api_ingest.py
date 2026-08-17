@@ -260,7 +260,7 @@ class TestDeviceIndex(ServerCase):
 class TestAttribution(ServerCase):
     EVENTS = [{"type": 4, "data": {}}]
 
-    def test_utm_and_fbclid_indexed_at_ingest(self):
+    async def test_utm_and_fbclid_indexed_at_ingest(self):
         sid = "utm" + "x" * 29
         url = (
             "https://brand.example/landing"
@@ -285,18 +285,19 @@ class TestAttribution(ServerCase):
         # Class columns are frozen at ingest for SQL sampling.
         from capture import db
 
-        with db.connection(self.project_id) as conn:
-            row = conn.execute(
+        async with db.connection(self.project_id) as conn:
+            row = await db.fetchone(
+                conn,
                 "SELECT page, device_class, utm_source, is_meta, has_fbclid, outcome"
                 " FROM sessions WHERE session_id = %s",
                 (sid,),
-            ).fetchone()
+            )
         self.assertEqual(
             row,
             ("/landing", None, "facebook", True, True, "rest"),
         )
 
-    def test_device_and_page_classes_are_written_at_ingest(self):
+    async def test_device_and_page_classes_are_written_at_ingest(self):
         sid = "cls" + "x" * 29
         self.assertEqual(
             self.ingest(
@@ -310,17 +311,20 @@ class TestAttribution(ServerCase):
         )
         from capture import db
 
-        with db.connection(self.project_id) as conn:
-            row = conn.execute(
+        async with db.connection(self.project_id) as conn:
+            row = await db.fetchone(
+                conn,
                 "SELECT page, device_class, outcome FROM sessions WHERE session_id = %s",
                 (sid,),
-            ).fetchone()
+            )
         self.assertEqual(row, ("/products/serum", "mobile", "rest"))
         self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-        with db.connection(self.project_id) as conn:
-            outcome = conn.execute(
-                "SELECT outcome FROM sessions WHERE session_id = %s", (sid,)
-            ).fetchone()[0]
+        async with db.connection(self.project_id) as conn:
+            outcome = (
+                await db.fetchone(
+                    conn, "SELECT outcome FROM sessions WHERE session_id = %s", (sid,)
+                )
+            )[0]
         self.assertEqual(outcome, "purchased")
 
     def test_plain_url_has_no_attribution(self):

@@ -73,7 +73,7 @@ def session_chunk_names(session_dir: Path) -> list:
     return sorted(c.name for c in session_dir.iterdir() if c.is_file() and SAFE_CHUNK.match(c.name))
 
 
-def write_analysis_result(
+async def write_analysis_result(
     project_id: str,
     session_id: str,
     text: str,
@@ -90,8 +90,8 @@ def write_analysis_result(
         "frame_count": frame_count,
         "warnings": warnings or [],
     }
-    write_analysis(project_id, session_id, result)
-    clear_job(project_id, session_id)
+    await write_analysis(project_id, session_id, result)
+    await clear_job(project_id, session_id)
     return result
 
 
@@ -124,16 +124,18 @@ async def analyze_session(
 
     session_id = session_dir.name
     if not force:
-        cached = read_analysis(project_id, session_id)
+        cached = await read_analysis(project_id, session_id)
         if cached:
             return cached
 
     digest = await extract_session_digest(session_dir, chunk_names)
-    meta = gemini.session_metadata(project_id, session_id)
+    # Off the loop, and before the model gate is taken: a database round trip
+    # held across a permit idles a slot another session could be calling on.
+    meta = await gemini.session_metadata(project_id, session_id)
     _, model_gate = runtime._gates()
     async with model_gate:
         text = await gemini.call_gemini(digest, digest.get("frames") or [], meta)
-    return write_analysis_result(
+    return await write_analysis_result(
         project_id,
         session_id,
         text,

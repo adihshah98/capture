@@ -83,29 +83,31 @@ def model_gate() -> int:
 # ------------------------------------------------------------- per-session work
 
 
-def session_analysis(project: Project, session_id: str) -> dict | None:
-    return storage.read_analysis(project.id, session_id)
+async def session_analysis(project: Project, session_id: str) -> dict | None:
+    return await storage.read_analysis(project.id, session_id)
 
 
-def session_analyses(project: Project, session_ids) -> dict:
+async def session_analyses(project: Project, session_ids) -> dict:
     """session_id → write-up for the ids that have one. One query, not N."""
-    return storage.read_analyses(project.id, session_ids)
+    return await storage.read_analyses(project.id, session_ids)
 
 
-def clear_session_analysis(project: Project, session_id: str) -> None:
-    storage.clear_analysis(project.id, session_id, session_dir=_session_dir(project, session_id))
+async def clear_session_analysis(project: Project, session_id: str) -> None:
+    await storage.clear_analysis(
+        project.id, session_id, session_dir=_session_dir(project, session_id)
+    )
 
 
-def job(project: Project, session_id: str) -> dict | None:
-    return storage.read_job(project.id, session_id)
+async def job(project: Project, session_id: str) -> dict | None:
+    return await storage.read_job(project.id, session_id)
 
 
-def set_job(project: Project, session_id: str, status: str, error: str | None = None) -> dict:
-    return storage.write_job(project.id, session_id, status, error=error)
+async def set_job(project: Project, session_id: str, status: str, error: str | None = None) -> dict:
+    return await storage.write_job(project.id, session_id, status, error=error)
 
 
-def clear_job(project: Project, session_id: str) -> None:
-    storage.clear_job(project.id, session_id)
+async def clear_job(project: Project, session_id: str) -> None:
+    await storage.clear_job(project.id, session_id)
 
 
 async def run_session(
@@ -116,24 +118,24 @@ async def run_session(
     )
 
 
-def forget_session(project: Project, session_id: str) -> int:
+async def forget_session(project: Project, session_id: str) -> int:
     """Drop a deleted recording from the cohorts that held it."""
-    return storage.forget_session(project.id, session_id)
+    return await storage.forget_session(project.id, session_id)
 
 
 # ------------------------------------------------------------------- cohorts
 
 
-def cohort(project: Project, cohort_id: str) -> dict | None:
-    return storage.read_cohort(project.id, cohort_id)
+async def cohort(project: Project, cohort_id: str) -> dict | None:
+    return await storage.read_cohort(project.id, cohort_id)
 
 
-def save_cohort(project: Project, cohort: dict) -> dict:
+async def save_cohort(project: Project, cohort: dict) -> dict:
     """Create a cohort. Status and batch updates go through set_cohort_status."""
-    return storage.write_cohort(project.id, cohort)
+    return await storage.write_cohort(project.id, cohort)
 
 
-def set_cohort_status(
+async def set_cohort_status(
     project: Project,
     cohort: dict,
     status: str,
@@ -142,10 +144,12 @@ def set_cohort_status(
     clear_batch: bool = False,
 ) -> None:
     """Move a cohort's own status without replacing membership."""
-    storage.set_cohort_status(project.id, cohort, status, batch=batch, clear_batch=clear_batch)
+    await storage.set_cohort_status(
+        project.id, cohort, status, batch=batch, clear_batch=clear_batch
+    )
 
 
-def mark_cohort_session(
+async def mark_cohort_session(
     project: Project,
     cohort: dict,
     entry: dict,
@@ -154,70 +158,72 @@ def mark_cohort_session(
     analysis: str | None = None,
     error: str | None = None,
 ) -> None:
-    storage.mark_cohort_session(project.id, cohort, entry, status, analysis=analysis, error=error)
+    await storage.mark_cohort_session(
+        project.id, cohort, entry, status, analysis=analysis, error=error
+    )
 
 
-def persist_cohort_refresh(project: Project, stored: dict, live: dict) -> bool:
+async def persist_cohort_refresh(project: Project, stored: dict, live: dict) -> bool:
     """Write enrich's durable status without replacing membership."""
-    return storage.persist_cohort_refresh(project.id, stored, live)
+    return await storage.persist_cohort_refresh(project.id, stored, live)
 
 
-def cohorts(project: Project) -> list:
-    return storage.list_cohorts(project.id)
+async def cohorts(project: Project) -> list:
+    return await storage.list_cohorts(project.id)
 
 
-def latest_cohort(project: Project) -> dict | None:
-    return storage.latest_cohort(project.id)
+async def latest_cohort(project: Project) -> dict | None:
+    return await storage.latest_cohort(project.id)
 
 
-def rename_cohort(project: Project, cohort_id: str, label: str) -> dict | None:
-    return cohort_jobs.rename_cohort(project.id, cohort_id, label)
+async def rename_cohort(project: Project, cohort_id: str, label: str) -> dict | None:
+    return await cohort_jobs.rename_cohort(project.id, cohort_id, label)
 
 
-def delete_cohort(project: Project, cohort_id: str) -> bool:
-    return cohort_jobs.delete_cohort(project.id, cohort_id)
+async def delete_cohort(project: Project, cohort_id: str) -> bool:
+    return await cohort_jobs.delete_cohort(project.id, cohort_id)
 
 
-def cohort_view(project: Project, cohort: dict) -> dict:
+async def cohort_view(project: Project, cohort: dict) -> dict:
     """The cohort as the API reports it: stored fields plus derived status and
     progress. Durable bits of this view go back through persist_cohort_refresh
     (and set_cohort_status for the batch handle), not write_cohort."""
-    return cohort_state.enrich_cohort_status(project.id, cohort)
+    return await cohort_state.enrich_cohort_status(project.id, cohort)
 
 
 def storable_cohort(view: dict, stored: dict | None = None) -> dict:
     return cohort_state.persistable_cohort(view, stored)
 
 
-def with_insights(project: Project, cohort: dict) -> dict:
-    return cohort_state.attach_cohort_insights(project.id, cohort)
+async def with_insights(project: Project, cohort: dict) -> dict:
+    return await cohort_state.attach_cohort_insights(project.id, cohort)
 
 
-def mark_paused(project: Project, cohort: dict) -> dict:
-    return cohort_jobs.mark_cohort_paused(project.id, cohort)
+async def mark_paused(project: Project, cohort: dict) -> dict:
+    return await cohort_jobs.mark_cohort_paused(project.id, cohort)
 
 
-def build_cohort(conn, project: Project, selection: CohortSpec, *, label=None) -> dict:
+async def build_cohort(conn, project: Project, selection: CohortSpec, *, label=None) -> dict:
     """Sample a cohort out of the session index. Takes the caller's connection
     because the sampling runs inside the request's transaction."""
-    return cohort_jobs.build_cohort(conn, project.id, selection, label=label)
+    return await cohort_jobs.build_cohort(conn, project.id, selection, label=label)
 
 
-def pool_facets(conn, project: Project, *, min_duration_ms: int = 0) -> dict:
-    return sampling.pool_facets(conn, project.id, min_duration_ms=min_duration_ms)
+async def pool_facets(conn, project: Project, *, min_duration_ms: int = 0) -> dict:
+    return await sampling.pool_facets(conn, project.id, min_duration_ms=min_duration_ms)
 
 
 def facets_from_rows(rows: list) -> dict:
     return sampling.facets_from_rows(rows)
 
 
-def classified_rows(conn, project: Project, session_ids) -> dict:
+async def classified_rows(conn, project: Project, session_ids) -> dict:
     """Materialised class columns for these sessions, named the way a cut slices.
 
     Sampling already filtered on the same columns. The caller passes the cohort's
     ids so this is a point lookup, not a project scan.
     """
-    return sampling.classified_rows(conn, project.id, session_ids)
+    return await sampling.classified_rows(conn, project.id, session_ids)
 
 
 def clean_label(label: str | None) -> str:
@@ -241,7 +247,7 @@ async def cancel_batch(job_name: str) -> None:
     await gemini.cancel_gemini_batch(job_name)
 
 
-def pending_batch_resumes() -> list:
+async def pending_batch_resumes() -> list:
     """(Project, cohort) pairs with a batch job still in flight, for startup.
 
     analyze reports these keyed by project_id; resolving to a Project here
@@ -251,7 +257,7 @@ def pending_batch_resumes() -> list:
     from . import projects as _projects
 
     out = []
-    for project_id, cohort in cohort_jobs.cohorts_needing_batch_resume():
+    for project_id, cohort in await cohort_jobs.cohorts_needing_batch_resume():
         found = _projects.by_id(project_id)
         if found is None:
             print(f"cohort resume: no project {project_id}, skipping {cohort.get('id')}")
@@ -263,16 +269,16 @@ def pending_batch_resumes() -> list:
 # ----------------------------------------------------------------------- cuts
 
 
-def cut(project: Project, cohort_id: str, key: str) -> dict | None:
-    return storage.read_cut(project.id, cohort_id, key)
+async def cut(project: Project, cohort_id: str, key: str) -> dict | None:
+    return await storage.read_cut(project.id, cohort_id, key)
 
 
-def save_cut(project: Project, cohort_id: str, key: str, value: dict) -> dict:
-    return storage.write_cut(project.id, cohort_id, key, value)
+async def save_cut(project: Project, cohort_id: str, key: str, value: dict) -> dict:
+    return await storage.write_cut(project.id, cohort_id, key, value)
 
 
-def clear_cut(project: Project, cohort_id: str, key: str) -> bool:
-    return storage.clear_cut(project.id, cohort_id, key)
+async def clear_cut(project: Project, cohort_id: str, key: str) -> bool:
+    return await storage.clear_cut(project.id, cohort_id, key)
 
 
 def cut_key(slice_spec: dict | None) -> str:

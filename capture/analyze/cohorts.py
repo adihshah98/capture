@@ -37,7 +37,7 @@ from .storage import (
 )
 
 
-def build_cohort(
+async def build_cohort(
     conn: spec.Connection,
     project_id: str,
     selection: spec.CohortSpec,
@@ -59,7 +59,7 @@ def build_cohort(
         slice_spec=normalize_slice(selection.slice_spec),
         slice_b=normalize_slice(selection.slice_b),
     )
-    result = sample_cohort(conn, project_id, selection)
+    result = await sample_cohort(conn, project_id, selection)
     stamp = time.strftime("%b %-d, %-I:%M %p", time.localtime(now / 1000))
     chosen = clean_cohort_label(label) or _auto_cohort_label(selection, stamp=stamp)
     return {
@@ -88,26 +88,26 @@ def build_cohort(
     }
 
 
-def rename_cohort(project_id: str, cohort_id: str, label: str) -> dict | None:
+async def rename_cohort(project_id: str, cohort_id: str, label: str) -> dict | None:
     """Set a cohort's display label. Membership is untouched."""
-    cohort = read_cohort(project_id, cohort_id)
+    cohort = await read_cohort(project_id, cohort_id)
     if not cohort:
         return None
     clean = clean_cohort_label(label)
     if not clean:
         raise ValueError("label cannot be empty")
-    if not set_cohort_label(project_id, cohort_id, clean):
+    if not await set_cohort_label(project_id, cohort_id, clean):
         return None
     return {**cohort, "label": clean}
 
 
-def delete_cohort(project_id: str, cohort_id: str) -> bool:
+async def delete_cohort(project_id: str, cohort_id: str) -> bool:
     """Remove a cohort and its cached cuts. Session write-ups stay."""
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return False
-    return analyze_store.delete_cohort(analyze_store.connect(), project_id, cohort_id)
+    return await analyze_store.delete_cohort(analyze_store.connect(), project_id, cohort_id)
 
 
 def _session_snapshot(cohort: dict) -> list:
@@ -115,25 +115,46 @@ def _session_snapshot(cohort: dict) -> list:
     return [dict(e) for e in (cohort.get("sessions") or [])]
 
 
-def _persist_session_edits(project_id: str, cohort: dict, before: list) -> None:
-    persist_cohort_refresh(project_id, {**cohort, "sessions": before}, cohort)
+async def _persist_session_edits(project_id: str, cohort: dict, before: list) -> None:
+    """Write back whatever the caller changed in `cohort["sessions"]`.
+
+    `before` is the pre-mutation snapshot, so the refresh can diff against it
+    and touch only the rows that actually moved.
+    """
+    await persist_cohort_refresh(project_id, {**cohort, "sessions": before}, cohort)
 
 
-def _persist_finished(project_id: str, live: dict) -> dict:
-    """Write enrich's durable status and drop the batch name. Membership stays."""
+async def _persist_finished(project_id: str, live: dict) -> dict:
+    """Write enrich's durable status and drop the batch name. Membership stays.
+
+    The three round trips are awaited separately rather than wrapped as one
+    hop because `set_cohort_status` mutates `final` in place and the refresh
+    below has to see that mutation — keeping the steps apart is what makes
+    that ordering visible.
+    """
     live.pop("batch", None)
-    final = enrich_cohort_status(project_id, live)
-    set_cohort_status(project_id, final, final.get("status") or "idle", clear_batch=True)
-    persist_cohort_refresh(project_id, live, final)
+    final = await enrich_cohort_status(project_id, live)
+    await set_cohort_status(project_id, final, final.get("status") or "idle", clear_batch=True)
+    await persist_cohort_refresh(project_id, live, final)
     return final
 
 
-def mark_cohort_paused(project_id: str, cohort: dict) -> dict:
-    """Persist paused status and return in-flight session rows to queued."""
+async def mark_cohort_paused(project_id: str, cohort: dict) -> dict:
+    """Persist paused status and return in-flight session rows to queued.
+
+    Two of its callers are `CancelledError` handlers (`run_cohort_job` below and
+    `jobs.run_cohort`), which makes the interruption window real: the task is
+    already being torn down, so a second cancellation landing between the status
+    write and the session rows would leave the cohort marked running with no job
+    behind it. Callers on that path wrap this in `asyncio.shield` so the writes
+    finish as a unit — see `_pause_for_teardown`. Nothing here is safe to leave
+    half-applied, and shielding is what the async driver gives us in place of
+    the blocking call that used to guarantee it.
+    """
     before = _session_snapshot(cohort)
     ids = [e["session_id"] for e in before if e.get("session_id")]
-    analyses = read_analyses(project_id, ids)
-    jobs = read_jobs(project_id, ids)
+    analyses = await read_analyses(project_id, ids)
+    jobs = await read_jobs(project_id, ids)
     for entry in cohort.get("sessions") or []:
         sid = entry["session_id"]
         if analyses.get(sid):
@@ -147,10 +168,28 @@ def mark_cohort_paused(project_id: str, cohort: dict) -> dict:
         ):
             entry["status"] = "queued"
             entry.pop("error", None)
-            clear_job(project_id, sid)
-    set_cohort_status(project_id, cohort, "paused", clear_batch=True)
-    _persist_session_edits(project_id, cohort, before)
-    return enrich_cohort_status(project_id, cohort)
+            await clear_job(project_id, sid)
+    await set_cohort_status(project_id, cohort, "paused", clear_batch=True)
+    await _persist_session_edits(project_id, cohort, before)
+    return await enrich_cohort_status(project_id, cohort)
+
+
+async def _pause_for_teardown(project_id: str, cohort: dict) -> None:
+    """Pause a cohort from a cancellation handler, uninterruptibly.
+
+    `asyncio.shield` keeps the pause running to completion even if the awaiting
+    task is cancelled again — a shutdown that stops waiting, say. Without it the
+    second cancellation can land between `mark_cohort_paused`'s status write and
+    its session rows, leaving the cohort marked running with nothing behind it,
+    which is exactly the state the pause exists to prevent.
+
+    Errors are swallowed on purpose: this runs while something else is already
+    going wrong, and the original exception is the one worth propagating.
+    """
+    try:
+        await asyncio.shield(mark_cohort_paused(project_id, cohort))
+    except Exception as exc:
+        print(f"cohort pause during teardown failed: {exc}")
 
 
 async def resume_cohort_batch(project_id: str, cohort: dict, *, sessions_root: Path) -> dict:
@@ -158,12 +197,12 @@ async def resume_cohort_batch(project_id: str, cohort: dict, *, sessions_root: P
     batch = cohort.get("batch") or {}
     job_name = batch.get("name")
     if not job_name:
-        return enrich_cohort_status(project_id, cohort)
+        return await enrich_cohort_status(project_id, cohort)
 
     prepared = []
     wanted = set(batch.get("session_ids") or [])
     before = _session_snapshot(cohort)
-    analyses = read_analyses(project_id, [e.get("session_id") for e in before])
+    analyses = await read_analyses(project_id, [e.get("session_id") for e in before])
     for entry in cohort.get("sessions") or []:
         sid = entry.get("session_id")
         if wanted and sid not in wanted:
@@ -174,11 +213,16 @@ async def resume_cohort_batch(project_id: str, cohort: dict, *, sessions_root: P
             entry["analysis"] = ANALYSIS_FILE
             entry.pop("error", None)
             continue
-        digest = session.load_session_digest(session_path) or {"frames": [], "warnings": []}
+        # Reads digest.json off disk — file I/O, so it moves off the loop for
+        # the same reason the database calls do.
+        digest = await asyncio.to_thread(session.load_session_digest, session_path) or {
+            "frames": [],
+            "warnings": [],
+        }
         entry["status"] = "running"
-        write_job(project_id, sid, "running")
+        await write_job(project_id, sid, "running")
         prepared.append((entry, digest))
-    _persist_session_edits(project_id, cohort, before)
+    await _persist_session_edits(project_id, cohort, before)
 
     if prepared:
         # Same rule as the first attempt: a batch we could not collect keeps
@@ -188,9 +232,10 @@ async def resume_cohort_batch(project_id: str, cohort: dict, *, sessions_root: P
         if not await _collect_cohort_batch(
             project_id, cohort, prepared, job_name, sessions_root=sessions_root
         ):
-            return enrich_cohort_status(project_id, read_cohort(project_id, cohort["id"]) or cohort)
-    live = read_cohort(project_id, cohort["id"]) or cohort
-    return _persist_finished(project_id, live)
+            live = await read_cohort(project_id, cohort["id"]) or cohort
+            return await enrich_cohort_status(project_id, live)
+    live = await read_cohort(project_id, cohort["id"]) or cohort
+    return await _persist_finished(project_id, live)
 
 
 async def run_cohort_job(
@@ -208,11 +253,13 @@ async def run_cohort_job(
         if (cohort.get("batch") or {}).get("name") and not force:
             return await resume_cohort_batch(project_id, cohort, sessions_root=sessions_root)
 
-        set_cohort_status(project_id, cohort, "running", clear_batch=True)
+        await set_cohort_status(project_id, cohort, "running", clear_batch=True)
 
         before = _session_snapshot(cohort)
         pending_entries = []
-        analyses = {} if force else read_analyses(project_id, [e.get("session_id") for e in before])
+        analyses = (
+            {} if force else await read_analyses(project_id, [e.get("session_id") for e in before])
+        )
         for entry in cohort.get("sessions") or []:
             sid = entry["session_id"]
             if not force and analyses.get(sid):
@@ -223,47 +270,49 @@ async def run_cohort_job(
             entry["status"] = "queued"
             entry.pop("error", None)
             pending_entries.append(entry)
-        _persist_session_edits(project_id, cohort, before)
+        await _persist_session_edits(project_id, cohort, before)
 
         if not pending_entries:
-            return enrich_cohort_status(project_id, read_cohort(project_id, cohort["id"]) or cohort)
+            live = await read_cohort(project_id, cohort["id"]) or cohort
+            return await enrich_cohort_status(project_id, live)
 
         prepared = []  # (entry, digest)
 
         async def extract_one(entry: dict) -> None:
             sid = entry["session_id"]
             session_path = sessions_root / sid
-            write_job(project_id, sid, "running")
+            await write_job(project_id, sid, "running")
             # One row, not the whole document: these coroutines run
             # concurrently and each owns exactly one session.
-            mark_cohort_session(project_id, cohort, entry, "running")
+            await mark_cohort_session(project_id, cohort, entry, "running")
             try:
                 # Reuse a prior reconstruction unless the caller asked to redo.
                 # Without this, a retry after a Batch OOM would wipe digests and
                 # spend another hour in Playwright before talking to Gemini.
                 if not force:
-                    digest = session.load_session_digest(session_path)
+                    digest = await asyncio.to_thread(session.load_session_digest, session_path)
                     if digest and gemini._usable_frames(digest.get("frames") or []):
                         prepared.append((entry, digest))
                         return
-                chunks = session.session_chunk_names(session_path)
+                chunks = await asyncio.to_thread(session.session_chunk_names, session_path)
                 if not chunks:
                     raise RuntimeError("no chunks to analyze")
                 if force:
-                    clear_analysis(project_id, sid, session_dir=session_path)
+                    await clear_analysis(project_id, sid, session_dir=session_path)
                 digest = await session.extract_session_digest(session_path, chunks)
                 prepared.append((entry, digest))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 message = str(exc) or "analysis failed"
-                write_job(project_id, sid, "error", error=message)
-                mark_cohort_session(project_id, cohort, entry, "error", error=message)
+                await write_job(project_id, sid, "error", error=message)
+                await mark_cohort_session(project_id, cohort, entry, "error", error=message)
 
         await asyncio.gather(*(extract_one(e) for e in pending_entries), return_exceptions=True)
 
         if not prepared:
-            return enrich_cohort_status(project_id, read_cohort(project_id, cohort["id"]) or cohort)
+            live = await read_cohort(project_id, cohort["id"]) or cohort
+            return await enrich_cohort_status(project_id, live)
 
         use_batch = runtime.ANALYZE_BATCH and runtime.ANALYSIS_ENABLED
         job_name = None
@@ -284,7 +333,7 @@ async def run_cohort_job(
                 # No job was created, so nothing has been paid for: falling
                 # back keeps a Batch outage from stranding an extracted cohort.
                 print(f"cohort batch submit failed ({exc}); falling back to sync Gemini")
-                set_cohort_status(
+                await set_cohort_status(
                     project_id,
                     cohort,
                     cohort.get("status") or "running",
@@ -298,27 +347,30 @@ async def run_cohort_job(
                 "submitted_at": int(time.time() * 1000),
                 "session_ids": [e["session_id"] for e, _ in prepared],
             }
-            set_cohort_status(project_id, cohort, cohort.get("status") or "running", batch=batch)
+            await set_cohort_status(
+                project_id, cohort, cohort.get("status") or "running", batch=batch
+            )
             if not await _collect_cohort_batch(
                 project_id, cohort, prepared, job_name, sessions_root=sessions_root
             ):
                 # Still in flight and no longer being watched. The name stays
                 # on disk so startup resume — or a Start from the UI — picks
                 # the same job back up.
-                return enrich_cohort_status(
-                    project_id, read_cohort(project_id, cohort["id"]) or cohort
-                )
+                live = await read_cohort(project_id, cohort["id"]) or cohort
+                return await enrich_cohort_status(project_id, live)
         elif not use_batch:
             await _cohort_sync_model(project_id, cohort, prepared, sessions_root=sessions_root)
 
-        live = read_cohort(project_id, cohort["id"]) or cohort
-        return _persist_finished(project_id, live)
+        live = await read_cohort(project_id, cohort["id"]) or cohort
+        return await _persist_finished(project_id, live)
     except asyncio.CancelledError:
-        live = read_cohort(project_id, cohort["id"]) or cohort
+        # Teardown. Each step is shielded so a second cancellation cannot leave
+        # the cohort half-paused; see `_pause_for_teardown`.
+        live = await asyncio.shield(read_cohort(project_id, cohort["id"])) or cohort
         batch_name = (live.get("batch") or {}).get("name")
         if batch_name:
-            await gemini.cancel_gemini_batch(batch_name)
-        mark_cohort_paused(project_id, live)
+            await asyncio.shield(gemini.cancel_gemini_batch(batch_name))
+        await _pause_for_teardown(project_id, live)
         raise
 
 
@@ -345,18 +397,18 @@ async def _collect_cohort_batch(
         raise
     except gemini.BatchStillRunning as exc:
         print(f"cohort batch {job_name} not collected ({exc}); leaving it to resume")
-        _mark_prepared_still_running(project_id, cohort, prepared)
+        await _mark_prepared_still_running(project_id, cohort, prepared)
         return False
     except Exception as exc:
         # Reading or writing the results failed, not the job. The name stays so
         # a resume can retry the collection instead of re-billing the cohort.
         message = str(exc) or "could not apply batch results"
         print(f"cohort batch {job_name} apply failed ({message}); leaving it to resume")
-        _mark_prepared_still_running(project_id, cohort, prepared)
+        await _mark_prepared_still_running(project_id, cohort, prepared)
         return False
 
 
-def _mark_prepared_still_running(project_id: str, cohort: dict, prepared: list) -> None:
+async def _mark_prepared_still_running(project_id: str, cohort: dict, prepared: list) -> None:
     """Return the batch's sessions to `running` so a resume picks them up.
 
     Row at a time rather than one `write_cohort`: apply_cohort_batch may
@@ -367,7 +419,7 @@ def _mark_prepared_still_running(project_id: str, cohort: dict, prepared: list) 
     for entry, _ in prepared:
         if entry.get("status") == "done":
             continue
-        mark_cohort_session(project_id, cohort, entry, "running")
+        await mark_cohort_session(project_id, cohort, entry, "running")
 
 
 async def apply_cohort_batch(
@@ -391,29 +443,32 @@ async def apply_cohort_batch(
         message = getattr(err, "message", None) if err else None
         message = message or f"Gemini batch {state}"
         for entry, _ in prepared:
-            write_job(project_id, entry["session_id"], "error", error=message)
-            mark_cohort_session(project_id, cohort, entry, "error", error=message)
+            await write_job(project_id, entry["session_id"], "error", error=message)
+            await mark_cohort_session(project_id, cohort, entry, "error", error=message)
         return
 
-    results = gemini.parse_batch_results(job)
+    # File-output jobs download a whole cohort's results through the *sync*
+    # genai client, so this is blocking network I/O, not just parsing.
+    # Called through the module so `patch.object(gemini, ...)` still lands.
+    results = await asyncio.to_thread(gemini.parse_batch_results, job)
     for sid, (entry, digest) in by_id.items():
         hit = results.get(sid)
         if not hit:
             message = "missing from batch results"
-            write_job(project_id, sid, "error", error=message)
-            mark_cohort_session(project_id, cohort, entry, "error", error=message)
+            await write_job(project_id, sid, "error", error=message)
+            await mark_cohort_session(project_id, cohort, entry, "error", error=message)
         elif hit.get("error"):
-            write_job(project_id, sid, "error", error=hit["error"])
-            mark_cohort_session(project_id, cohort, entry, "error", error=hit["error"])
+            await write_job(project_id, sid, "error", error=hit["error"])
+            await mark_cohort_session(project_id, cohort, entry, "error", error=hit["error"])
         else:
-            session.write_analysis_result(
+            await session.write_analysis_result(
                 project_id,
                 sid,
                 hit["text"],
                 frame_count=len(digest.get("frames") or []),
                 warnings=digest.get("warnings") or [],
             )
-            mark_cohort_session(project_id, cohort, entry, "done", analysis=ANALYSIS_FILE)
+            await mark_cohort_session(project_id, cohort, entry, "done", analysis=ANALYSIS_FILE)
 
 
 async def _cohort_sync_model(
@@ -423,28 +478,33 @@ async def _cohort_sync_model(
 
     async def one(entry: dict, digest: dict) -> None:
         sid = entry["session_id"]
-        write_job(project_id, sid, "running")
-        mark_cohort_session(project_id, cohort, entry, "running")
+        await write_job(project_id, sid, "running")
+        await mark_cohort_session(project_id, cohort, entry, "running")
         try:
+            # Fetched before the gate is taken: this is a database round trip,
+            # and holding one of the few model permits across it would idle a
+            # slot that another session's Gemini call could be using.
+            # Through the module — `session_metadata` is a patched name.
+            meta = await gemini.session_metadata(project_id, sid)
             _, model_gate = runtime._gates()
             async with model_gate:
                 text = await gemini.call_gemini(
                     digest,
                     digest.get("frames") or [],
-                    gemini.session_metadata(project_id, sid),
+                    meta,
                 )
-            session.write_analysis_result(
+            await session.write_analysis_result(
                 project_id,
                 sid,
                 text,
                 frame_count=len(digest.get("frames") or []),
                 warnings=digest.get("warnings") or [],
             )
-            mark_cohort_session(project_id, cohort, entry, "done", analysis=ANALYSIS_FILE)
+            await mark_cohort_session(project_id, cohort, entry, "done", analysis=ANALYSIS_FILE)
         except Exception as exc:
             message = str(exc) or "analysis failed"
-            write_job(project_id, sid, "error", error=message)
-            mark_cohort_session(project_id, cohort, entry, "error", error=message)
+            await write_job(project_id, sid, "error", error=message)
+            await mark_cohort_session(project_id, cohort, entry, "error", error=message)
 
     await asyncio.gather(
         *(one(entry, digest) for entry, digest in prepared),
@@ -452,10 +512,10 @@ async def _cohort_sync_model(
     )
 
 
-def cohorts_needing_batch_resume() -> list:
+async def cohorts_needing_batch_resume() -> list:
     """(project_id, cohort) pairs with an in-flight Batch job name.
 
     An index lookup over every project. Identity is the project UUID;
     sessions_root is `project.pool` when a caller needs the filesystem.
     """
-    return analyze_store.resumable_cohorts(analyze_store.connect())
+    return await analyze_store.resumable_cohorts(analyze_store.connect())

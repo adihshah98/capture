@@ -8,6 +8,7 @@ The index is the record of truth; legacy_sessions is the fallback for recordings
 made before it existed. That fallback is bridge code — see capture/legacy_sessions.py.
 """
 
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -40,7 +41,7 @@ def list_projects(request: Request):
 
 
 @router.get("/api/sessions")
-def list_sessions(
+async def list_sessions(
     found: projects.Project = Depends(readable_project),
     limit: int = Query(100, ge=1, le=500),
     cursor: str | None = Query(None),
@@ -48,14 +49,14 @@ def list_sessions(
     q: str | None = Query(None),
 ):
     try:
-        return sessionstore.listing(found.id, limit=limit, cursor=cursor, filter=filter, q=q)
+        return await sessionstore.listing(found.id, limit=limit, cursor=cursor, filter=filter, q=q)
     except ValueError as exc:
         raise ApiError(400, "bad cursor") from exc
 
 
 @router.get("/api/sessions/{session_id}")
-def get_session(session_id: str, found: projects.Project = Depends(readable_project)):
-    info = sessionstore.get(found.id, session_id) or legacy_sessions.session_info(
+async def get_session(session_id: str, found: projects.Project = Depends(readable_project)):
+    info = await sessionstore.get(found.id, session_id) or legacy_sessions.session_info(
         session_dir(found, session_id)
     )
     if info is None:
@@ -64,16 +65,17 @@ def get_session(session_id: str, found: projects.Project = Depends(readable_proj
 
 
 @router.delete("/api/sessions/{session_id}")
-def delete_session(session_id: str, found: projects.Project = Depends(readable_project)):
+async def delete_session(session_id: str, found: projects.Project = Depends(readable_project)):
     # Called for its 404: deleting an unknown session must not report success.
     session_dir(found, session_id)
-    freed = storage.delete_session(found.storage_prefix, session_id)
-    sessionstore.forget(found.id, session_id)
+    # Blocking S3 deletes, so off the loop rather than awaited.
+    freed = await asyncio.to_thread(storage.delete_session, found.storage_prefix, session_id)
+    await sessionstore.forget(found.id, session_id)
     # Cohort membership references a recording that no longer exists. Left
     # behind, enrich_cohort_status falls back to the stored status and keeps
     # counting the session as analyzed.
     try:
-        ap.forget_session(found, session_id)
+        await ap.forget_session(found, session_id)
     except Exception as exc:
         # The session is already gone from the index; a failure here leaves a
         # stale membership row, which is bad but not worth failing the delete.
@@ -136,11 +138,11 @@ def session_chunk(
     )
 
 
-def _analysis_session_info(found: projects.Project, session_id: str) -> dict | None:
+async def _analysis_session_info(found: projects.Project, session_id: str) -> dict | None:
     """Order/attribution for a write-up. The index is the record; the directory
     is only a pre-Postgres fallback. Analysis must not require a local folder —
     staging is S3-backed and never ingested onto this disk."""
-    info = sessionstore.get(found.id, session_id)
+    info = await sessionstore.get(found.id, session_id)
     if info:
         return info
     directory = found.pool / session_id
@@ -150,14 +152,14 @@ def _analysis_session_info(found: projects.Project, session_id: str) -> dict | N
 
 
 @router.get("/api/sessions/{session_id}/analysis")
-def get_analysis(session_id: str, found: projects.Project = Depends(readable_project)):
+async def get_analysis(session_id: str, found: projects.Project = Depends(readable_project)):
     if not SAFE_ID.match(session_id):
         raise ApiError(400, "invalid session_id")
-    cached = ap.session_analysis(found, session_id)
+    cached = await ap.session_analysis(found, session_id)
     if cached:
         if "status" not in cached:
             cached = {**cached, "status": "done"}
-        info = _analysis_session_info(found, session_id)
+        info = await _analysis_session_info(found, session_id)
         if info:
             if info.get("order"):
                 cached = {**cached, "order": info["order"]}
@@ -168,7 +170,7 @@ def get_analysis(session_id: str, found: projects.Project = Depends(readable_pro
                 if attr:
                     cached = {**cached, "attribution": attr}
         return cached
-    job = ap.job(found, session_id)
+    job = await ap.job(found, session_id)
     if job and job.get("status") in ("running", "error"):
         return job
     raise ApiError(404, "not analyzed yet")

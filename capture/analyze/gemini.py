@@ -40,7 +40,7 @@ def _clock(ms) -> str:
 _session_attribution = attribution.parse
 
 
-def session_metadata(project_id: str, session_id: str) -> dict:
+async def session_metadata(project_id: str, session_id: str) -> dict:
     """How this visitor arrived and how the session ended.
 
     The digest describes what happened on screen and says nothing about where
@@ -56,7 +56,9 @@ def session_metadata(project_id: str, session_id: str) -> dict:
     meta: dict = {}
 
     try:
-        entry, order = analyze_store.session_facts(analyze_store.connect(), project_id, session_id)
+        entry, order = await analyze_store.session_facts(
+            analyze_store.connect(), project_id, session_id
+        )
     except Exception as exc:
         print(f"session metadata unavailable for {session_id}: {exc}")
         entry, order = None, None
@@ -287,16 +289,31 @@ async def submit_prepared_gemini_batch(
     tmp = _batch_jsonl_path(work_dir)
     uploaded = None
     try:
-        with tmp.open("w") as out:
-            for entry, digest in prepared:
-                sid = entry["session_id"]
-                meta = session_metadata(project_id, sid)
-                req = build_inlined_session_request(sid, digest, digest.get("frames") or [], meta)
-                key, payload = _batch_file_request(req)
-                del req
-                out.write(json.dumps({"key": key, "request": payload}, separators=(",", ":")))
-                out.write("\n")
-                del payload
+        # Metadata first, for the whole cohort at once. It is one indexed read
+        # per session, and gathering them lets the pool overlap the round trips
+        # instead of paying MAX_SESSIONS of them back to back. Called through
+        # the module so `patch.object(gemini, "session_metadata", ...)` lands.
+        metas = await asyncio.gather(
+            *(session_metadata(project_id, entry["session_id"]) for entry, _ in prepared)
+        )
+
+        # The file is then written in one pass, streaming into a single handle
+        # so peak memory stays at roughly one session's frames rather than the
+        # whole cohort's. Blocking file I/O, so it goes to a worker thread.
+        def _write() -> None:
+            with tmp.open("w") as out:
+                for (entry, digest), meta in zip(prepared, metas, strict=True):
+                    sid = entry["session_id"]
+                    req = build_inlined_session_request(
+                        sid, digest, digest.get("frames") or [], meta
+                    )
+                    key, payload = _batch_file_request(req)
+                    del req
+                    out.write(json.dumps({"key": key, "request": payload}, separators=(",", ":")))
+                    out.write("\n")
+                    del payload
+
+        await asyncio.to_thread(_write)
         # `jsonl` becomes application/jsonl, which the Files API 400s. JSONL
         # content with application/json is the workaround that actually uploads.
         uploaded = await client.aio.files.upload(

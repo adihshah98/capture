@@ -61,7 +61,7 @@ def chunk_name(ts: int, window: str = "aaaa1111", suffix: str = "abc123") -> str
     return f"{ts}-{window}-{suffix}.json"
 
 
-class StorageCase(unittest.TestCase):
+class StorageCase(unittest.IsolatedAsyncioTestCase):
     s3 = False
 
     def setUp(self):
@@ -214,7 +214,7 @@ class TestDualReadDuringMigration(StorageCase):
         names = [c.name for c in storage.list_chunks("cap_a", "s1")]
         self.assertEqual(names, [self.copied, self.pending])
 
-    def test_delete_clears_both(self):
+    async def test_delete_clears_both(self):
         freed = storage.delete_session("cap_a", "s1")
         self.assertGreater(freed, 0)
         self.assertEqual(self.fake.objects, {})
@@ -252,7 +252,7 @@ class TestAnalysisOnS3(StorageCase):
             [c.name for c in storage.list_analysis_files("cap_a", "s1")], ["digest.json"]
         )
 
-    def test_delete_session_removes_the_digest_too(self):
+    async def test_delete_session_removes_the_digest_too(self):
         """Retention used to rebuild keys from chunk names, which misses
         `.analysis/` and would orphan every persisted reconstruction."""
         storage.put_chunk("cap_a", "s1", chunk_name(1000), b"chunk")

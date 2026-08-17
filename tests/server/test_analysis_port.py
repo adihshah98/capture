@@ -51,10 +51,13 @@ _PORT_MODULES = (
 )
 
 
-class PortCase(unittest.TestCase):
+class PortCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         for name in _PORT_MODULES:
-            mock.patch.object(port, name).start()
+            # autospec so each replaced attribute keeps its real sync/async
+            # nature: the port awaits the database-backed ones, and a plain
+            # MagicMock standing in for a coroutine function is not awaitable.
+            mock.patch.object(port, name, autospec=True).start()
         self.addCleanup(mock.patch.stopall)
         self.storage = port.storage
         self.runtime = port.runtime
@@ -65,38 +68,38 @@ class PortCase(unittest.TestCase):
 class TestProjectIsTheIdentity(PortCase):
     """capture.analyze addresses Postgres by project.id; Path only for recordings."""
 
-    def test_cohort_calls_are_addressed_by_project_id(self):
-        port.cohort(NAMED, "c1")
+    async def test_cohort_calls_are_addressed_by_project_id(self):
+        await port.cohort(NAMED, "c1")
         self.storage.read_cohort.assert_called_once_with(NAMED.id, "c1")
 
-    def test_status_updates_are_addressed_by_project_id(self):
+    async def test_status_updates_are_addressed_by_project_id(self):
         cohort = {"id": "c1", "status": "idle"}
-        port.set_cohort_status(NAMED, cohort, "running")
+        await port.set_cohort_status(NAMED, cohort, "running")
         self.storage.set_cohort_status.assert_called_once_with(
             NAMED.id, cohort, "running", batch=None, clear_batch=False
         )
 
-    def test_the_default_project_uses_its_uuid(self):
-        port.cohort(DEFAULT, "c1")
+    async def test_the_default_project_uses_its_uuid(self):
+        await port.cohort(DEFAULT, "c1")
         self.storage.read_cohort.assert_called_once_with(DEFAULT.id, "c1")
 
-    def test_sampling_calls_are_addressed_by_project_id(self):
+    async def test_sampling_calls_are_addressed_by_project_id(self):
         conn = object()
-        port.pool_facets(conn, NAMED, min_duration_ms=5000)
+        await port.pool_facets(conn, NAMED, min_duration_ms=5000)
         self.sampling.pool_facets.assert_called_once_with(conn, NAMED.id, min_duration_ms=5000)
 
-    def test_classified_rows_are_addressed_by_project_id(self):
+    async def test_classified_rows_are_addressed_by_project_id(self):
         conn = object()
-        port.classified_rows(conn, NAMED, ["s1", "s2"])
+        await port.classified_rows(conn, NAMED, ["s1", "s2"])
         self.sampling.classified_rows.assert_called_once_with(conn, NAMED.id, ["s1", "s2"])
 
-    def test_session_jobs_are_addressed_by_project_id(self):
-        port.job(NAMED, "sess1")
+    async def test_session_jobs_are_addressed_by_project_id(self):
+        await port.job(NAMED, "sess1")
         self.storage.read_job.assert_called_once_with(NAMED.id, "sess1")
 
-    def test_two_projects_never_share_a_job_key(self):
-        port.job(DEFAULT, "sess1")
-        port.job(NAMED, "sess1")
+    async def test_two_projects_never_share_a_job_key(self):
+        await port.job(DEFAULT, "sess1")
+        await port.job(NAMED, "sess1")
         first, second = (c[0][:2] for c in self.storage.read_job.call_args_list)
         self.assertNotEqual(first, second)
         self.assertEqual(first[1], second[1])  # same session_id
@@ -148,7 +151,7 @@ class TestPrivateAccessIsContained(PortCase):
         self.assertEqual(privates, ["_gates"])
 
 
-class TestVocabularyIsExposed(unittest.TestCase):
+class TestVocabularyIsExposed(unittest.IsolatedAsyncioTestCase):
     """Query() defaults read these at import, so they must be plain values."""
 
     def test_the_cohort_limits_are_concrete(self):
@@ -162,7 +165,7 @@ class TestVocabularyIsExposed(unittest.TestCase):
         self.assertIn(port.ORDER_LATEST, port.ORDERS)
 
 
-class TestNoOneElseImportsAnalyze(unittest.TestCase):
+class TestNoOneElseImportsAnalyze(unittest.IsolatedAsyncioTestCase):
     """The rule the port exists to make true. capture/analyze/ may import itself;
     nothing else in capture/ may, except this module."""
 

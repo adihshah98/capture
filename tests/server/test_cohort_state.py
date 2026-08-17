@@ -36,7 +36,7 @@ BASELINE = json.loads(
 KNOWN_DIVERGENCES: dict = {}
 
 
-def cohort_of(stored, done, error, queued, *, writeups=True, project_id=None):
+async def cohort_of(stored, done, error, queued, *, writeups=True, project_id=None):
     """A cohort with the given tallies.
 
     `writeups` decides whether the done rows have an analysis write-up behind them.
@@ -48,7 +48,7 @@ def cohort_of(stored, done, error, queued, *, writeups=True, project_id=None):
         sid = f"d{i}"
         sessions.append({"session_id": sid, "status": "done"})
         if writeups and project_id is not None:
-            storage.write_analysis(project_id, sid, {"text": "write-up"})
+            await storage.write_analysis(project_id, sid, {"text": "write-up"})
     sessions += [{"session_id": f"e{i}", "status": "error"} for i in range(error)]
     sessions += [{"session_id": f"q{i}", "status": "queued"} for i in range(queued)]
     cohort = {"id": "c", "sessions": sessions}
@@ -57,7 +57,7 @@ def cohort_of(stored, done, error, queued, *, writeups=True, project_id=None):
     return cohort
 
 
-class TestStatusBaseline(pgfixture.CohortStoreMixin, unittest.TestCase):
+class TestStatusBaseline(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     """Every case the old inference engine decided, decided the same way."""
 
     def setUp(self):
@@ -71,14 +71,14 @@ class TestStatusBaseline(pgfixture.CohortStoreMixin, unittest.TestCase):
     def test_the_baseline_is_not_empty(self):
         self.assertGreater(len(BASELINE), 100)
 
-    def build(self, case):
+    async def build(self, case):
         """Rebuild one recorded case in a clean pool."""
         for path in self.pool.iterdir():
             shutil.rmtree(path, ignore_errors=True)
         # Write-ups live in the store now, so clearing directories no longer
         # resets them and a case with writeups=False would inherit the last one.
-        storage.forget_analyses(self.project_id)
-        return cohort_of(
+        await storage.forget_analyses(self.project_id)
+        return await cohort_of(
             case["stored"],
             case["done"],
             case["error"],
@@ -87,20 +87,24 @@ class TestStatusBaseline(pgfixture.CohortStoreMixin, unittest.TestCase):
             project_id=self.project_id,
         )
 
-    def test_every_recorded_case_still_decides_the_same_way(self):
+    async def test_every_recorded_case_still_decides_the_same_way(self):
         mismatches = []
         for case in BASELINE:
             key = (case["writeups"], case["stored"], case["done"], case["error"], case["queued"])
-            got = cohort_state.enrich_cohort_status(self.project_id, self.build(case))["status"]
+            got = (
+                await cohort_state.enrich_cohort_status(self.project_id, await self.build(case))
+            )["status"]
             expect = KNOWN_DIVERGENCES.get(key, (case["expect"], None))[0]
             if got != expect:
                 mismatches.append(f"{key}: expected {expect}, got {got}")
         self.assertEqual(mismatches, [], f"{len(mismatches)} status changes")
 
-    def test_progress_tallies_are_unchanged(self):
+    async def test_progress_tallies_are_unchanged(self):
         for case in BASELINE:
             key = (case["writeups"], case["stored"], case["done"], case["error"], case["queued"])
-            got = cohort_state.enrich_cohort_status(self.project_id, self.build(case))["progress"]
+            got = (
+                await cohort_state.enrich_cohort_status(self.project_id, await self.build(case))
+            )["progress"]
             self.assertEqual(got, case["progress"], f"progress changed for {key}")
 
     def test_the_baseline_covers_both_the_write_up_and_stale_cases(self):
@@ -122,7 +126,7 @@ class TestStatusBaseline(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.assertTrue(differing, "the two halves must not be identical")
 
 
-class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
+class TestStaleRows(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     """A row claiming done with no analysis.json behind it.
 
     The old fall-through counted it as done, so a cohort reported a completed
@@ -138,8 +142,8 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.project_id = self._pg_project
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
-    def cohort(self, n=1, status="done"):
-        storage.write_cohort(
+    async def cohort(self, n=1, status="done"):
+        await storage.write_cohort(
             self.project_id,
             {
                 "id": "c",
@@ -154,79 +158,79 @@ class TestStaleRows(pgfixture.CohortStoreMixin, unittest.TestCase):
         for i in range(n):
             directory = self.pool / f"s{i}"
             directory.mkdir(exist_ok=True)
-            storage.write_analysis(self.project_id, directory.name, {"text": "write-up"})
-        return storage.read_cohort(self.project_id, "c")
+            await storage.write_analysis(self.project_id, directory.name, {"text": "write-up"})
+        return await storage.read_cohort(self.project_id, "c")
 
-    def live(self):
-        return cohort_state.enrich_cohort_status(
-            self.project_id, storage.read_cohort(self.project_id, "c")
+    async def live(self):
+        return await cohort_state.enrich_cohort_status(
+            self.project_id, await storage.read_cohort(self.project_id, "c")
         )
 
-    def test_a_missing_write_up_is_not_counted_as_done(self):
-        self.cohort(n=1)
-        self.assertEqual(self.live()["progress"]["done"], 1)
-        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
-        live = self.live()
+    async def test_a_missing_write_up_is_not_counted_as_done(self):
+        await self.cohort(n=1)
+        self.assertEqual((await self.live())["progress"]["done"], 1)
+        await storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        live = await self.live()
         self.assertEqual(live["progress"]["done"], 0)
         self.assertEqual(live["progress"]["stale"], 1)
         self.assertEqual(live["sessions"][0]["status"], cohort_state.SESSION_STALE)
 
-    def test_the_cohort_stops_reporting_done(self):
+    async def test_the_cohort_stops_reporting_done(self):
         """The whole point: no claiming a result that cannot be shown."""
-        self.cohort(n=1)
-        self.assertEqual(self.live()["status"], "done")
-        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
-        self.assertNotEqual(self.live()["status"], "done")
+        await self.cohort(n=1)
+        self.assertEqual((await self.live())["status"], "done")
+        await storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        self.assertNotEqual((await self.live())["status"], "done")
 
-    def test_one_stale_row_among_finished_ones_still_blocks_done(self):
-        self.cohort(n=3)
-        storage.clear_analysis(self.project_id, "s1", session_dir=self.pool / "s1")
-        live = self.live()
+    async def test_one_stale_row_among_finished_ones_still_blocks_done(self):
+        await self.cohort(n=3)
+        await storage.clear_analysis(self.project_id, "s1", session_dir=self.pool / "s1")
+        live = await self.live()
         self.assertEqual(live["progress"]["done"], 2)
         self.assertEqual(live["progress"]["stale"], 1)
         self.assertNotEqual(live["status"], "done")
 
-    def test_a_stale_row_explains_itself(self):
-        self.cohort(n=1)
-        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
-        self.assertIn("re-analyze", self.live()["sessions"][0]["error"])
+    async def test_a_stale_row_explains_itself(self):
+        await self.cohort(n=1)
+        await storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        self.assertIn("re-analyze", (await self.live())["sessions"][0]["error"])
 
-    def test_restoring_the_write_up_restores_done(self):
-        self.cohort(n=1)
-        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
-        self.assertNotEqual(self.live()["status"], "done")
-        storage.write_analysis(self.project_id, "s0", {"text": "back"})
-        live = self.live()
+    async def test_restoring_the_write_up_restores_done(self):
+        await self.cohort(n=1)
+        await storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        self.assertNotEqual((await self.live())["status"], "done")
+        await storage.write_analysis(self.project_id, "s0", {"text": "back"})
+        live = await self.live()
         self.assertEqual(live["status"], "done")
         self.assertEqual(live["progress"]["stale"], 0)
 
-    def test_a_running_job_takes_precedence_over_stale(self):
+    async def test_a_running_job_takes_precedence_over_stale(self):
         """The normal re-analyze path clears the write-up and immediately
         writes a running job, so it must read as running, not stale."""
-        self.cohort(n=1)
-        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
-        storage.write_job(self.project_id, "s0", "running")
-        live = self.live()
+        await self.cohort(n=1)
+        await storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        await storage.write_job(self.project_id, "s0", "running")
+        live = await self.live()
         self.assertEqual(live["sessions"][0]["status"], "running")
         self.assertEqual(live["progress"]["stale"], 0)
 
-    def test_a_stale_row_is_never_persisted(self):
+    async def test_a_stale_row_is_never_persisted(self):
         """It is a read-time observation about the disk, not durable state."""
-        self.cohort(n=1)
-        storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
-        live = self.live()
-        storage.write_cohort(
+        await self.cohort(n=1)
+        await storage.clear_analysis(self.project_id, "s0", session_dir=self.pool / "s0")
+        live = await self.live()
+        await storage.write_cohort(
             self.project_id,
-            cohort_state.persistable_cohort(live, storage.read_cohort(self.project_id, "c")),
+            cohort_state.persistable_cohort(live, await storage.read_cohort(self.project_id, "c")),
         )
-        stored = storage.read_cohort(self.project_id, "c")
+        stored = await storage.read_cohort(self.project_id, "c")
         self.assertEqual(stored["sessions"][0]["status"], cohort_state.SESSION_STALE)
         # Restoring the file must clear it again with no manual intervention.
-        storage.write_analysis(self.project_id, "s0", {"text": "back"})
-        self.assertEqual(self.live()["sessions"][0]["status"], "done")
+        await storage.write_analysis(self.project_id, "s0", {"text": "back"})
+        self.assertEqual((await self.live())["sessions"][0]["status"], "done")
 
 
-class TestTransitionTable(pgfixture.CohortStoreMixin, unittest.TestCase):
+class TestTransitionTable(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     """The table is only worth something if the real code obeys it.
 
     cohort_transition logs rather than raises, because it runs inside a live
@@ -253,15 +257,15 @@ class TestTransitionTable(pgfixture.CohortStoreMixin, unittest.TestCase):
     def test_every_state_has_a_row(self):
         self.assertEqual(set(cohort_state.COHORT_TRANSITIONS), set(cohort_state.COHORT_STATES))
 
-    def test_the_whole_baseline_makes_only_declared_transitions(self):
+    async def test_the_whole_baseline_makes_only_declared_transitions(self):
         """Replaying every case the old engine could produce must not trip the
         table — otherwise the table describes something other than this code."""
         for case in BASELINE:
             for path in self.pool.iterdir():
                 shutil.rmtree(path, ignore_errors=True)
-            cohort_state.enrich_cohort_status(
+            await cohort_state.enrich_cohort_status(
                 self.project_id,
-                cohort_of(
+                await cohort_of(
                     case["stored"],
                     case["done"],
                     case["error"],
@@ -289,7 +293,7 @@ class TestTransitionTable(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.assertEqual(cohort_state._undeclared_transitions, [])
 
 
-class TestTerminalRecompute(pgfixture.CohortStoreMixin, unittest.TestCase):
+class TestTerminalRecompute(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     """Two behaviors that look like bugs and are not, so nobody 'fixes' them.
 
     A terminal status is recomputed from the tallies rather than frozen: the
@@ -305,35 +309,37 @@ class TestTerminalRecompute(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.project_id = self._pg_project
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
-    def status(self, stored, done, error, queued):
+    async def status(self, stored, done, error, queued):
         """Decide with the write-ups actually present, so `done` rows count."""
         for path in self.pool.iterdir():
             shutil.rmtree(path, ignore_errors=True)
         # Write-ups live in the store now, so clearing directories no longer
         # resets them and a case with writeups=False would inherit the last one.
-        storage.forget_analyses(self.project_id)
-        return cohort_state.enrich_cohort_status(
-            self.project_id,
-            cohort_of(stored, done, error, queued, project_id=self.project_id),
+        await storage.forget_analyses(self.project_id)
+        return (
+            await cohort_state.enrich_cohort_status(
+                self.project_id,
+                await cohort_of(stored, done, error, queued, project_id=self.project_id),
+            )
         )["status"]
 
-    def test_a_done_cohort_whose_sessions_all_failed_reports_error(self):
-        self.assertEqual(self.status("done", 0, 3, 0), "error")
+    async def test_a_done_cohort_whose_sessions_all_failed_reports_error(self):
+        self.assertEqual(await self.status("done", 0, 3, 0), "error")
 
-    def test_a_done_cohort_with_any_success_stays_done(self):
-        self.assertEqual(self.status("done", 1, 2, 0), "done")
+    async def test_a_done_cohort_with_any_success_stays_done(self):
+        self.assertEqual(await self.status("done", 1, 2, 0), "done")
 
-    def test_an_error_cohort_reports_done_once_a_retry_succeeds(self):
-        self.assertEqual(self.status("error", 1, 2, 0), "done")
+    async def test_an_error_cohort_reports_done_once_a_retry_succeeds(self):
+        self.assertEqual(await self.status("error", 1, 2, 0), "done")
 
-    def test_an_error_cohort_with_queued_work_stays_in_error(self):
+    async def test_an_error_cohort_with_queued_work_stays_in_error(self):
         """A queued row does not silently revive an errored cohort: only
         `running` and `queued` are revivable, and `error` is not in that set.
         The user has to retry, which is the intended contract."""
-        self.assertEqual(self.status("error", 1, 1, 1), "error")
+        self.assertEqual(await self.status("error", 1, 1, 1), "error")
 
-    def test_a_queued_cohort_with_work_left_reports_running(self):
-        self.assertEqual(self.status("queued", 1, 0, 2), "running")
+    async def test_a_queued_cohort_with_work_left_reports_running(self):
+        self.assertEqual(await self.status("queued", 1, 0, 2), "running")
 
 
 if __name__ == "__main__":

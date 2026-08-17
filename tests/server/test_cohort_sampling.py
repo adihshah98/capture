@@ -9,14 +9,40 @@ from capture.analyze import cohort_state, cohorts, sampling, spec
 from capture.analyze.spec import CohortSpec
 
 
+class _AsyncCursor:
+    """A sqlite cursor wearing psycopg's async surface.
+
+    `AsyncConnection.execute` is a coroutine returning a cursor whose
+    `fetchone`/`fetchall` are themselves coroutines. sqlite3 gives all three
+    synchronously, so this adapts the shape without adding real concurrency —
+    the sampler only needs the calls to be awaitable, not genuinely parallel.
+    """
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    async def fetchall(self):
+        return self._cursor.fetchall()
+
+    async def fetchone(self):
+        return self._cursor.fetchone()
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
 class _PsycopgStyleSqlite:
     """sqlite3 accepts `?`; production SQL uses `%s`. Translate at execute time."""
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
 
-    def execute(self, sql: str, params=()):
-        return self._conn.execute(sql.replace("%s", "?"), params)
+    async def execute(self, sql: str, params=()):
+        return _AsyncCursor(self._conn.execute(sql.replace("%s", "?"), params))
 
     def executemany(self, sql: str, params_seq):
         return self._conn.executemany(sql.replace("%s", "?"), params_seq)
@@ -25,8 +51,21 @@ class _PsycopgStyleSqlite:
         return getattr(self._conn, name)
 
 
-class TestCohortSampling(unittest.TestCase):
-    def _insert(self, conn, rows):
+class TestCohortSampling(unittest.IsolatedAsyncioTestCase):
+    def _insert(self, adapter, rows):
+        # Writes go straight to sqlite rather than through the adapter: its
+        # `execute` is a coroutine (it mimics psycopg's async surface for the
+        # sampler under test), and calling it without awaiting would silently
+        # insert nothing. The `%s` → `?` translation the adapter normally does
+        # has to happen here instead.
+        class _Sync:
+            def __init__(self, raw):
+                self._raw = raw
+
+            def execute(self, sql, params=()):
+                return self._raw.execute(sql.replace("%s", "?"), params)
+
+        conn = _Sync(adapter._conn)
         # Fixtures still pass the pre-normalised 12-tuple:
         # (project_id, session_id, first_seen, last_seen, chunk_count, bytes,
         #  visitor_id, url, order_json, interactions_json, device, attribution)
@@ -169,7 +208,7 @@ class TestCohortSampling(unittest.TestCase):
             self._insert(conn, rows)
         return conn
 
-    def test_sample_prefers_newest_and_splits_filters(self):
+    async def test_sample_prefers_newest_and_splits_filters(self):
         conn = self._conn(
             [
                 (
@@ -244,7 +283,7 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = sampling.sample_cohort_rows(
+        sampled = await sampling.sample_cohort_rows(
             conn,
             "",
             CohortSpec(
@@ -260,7 +299,7 @@ class TestCohortSampling(unittest.TestCase):
             [("newbuy" + "x" * 26, "a"), ("newall" + "x" * 26, "b")],
         )
 
-    def test_clicks_break_last_seen_ties(self):
+    async def test_clicks_break_last_seen_ties(self):
         conn = self._conn(
             [
                 (
@@ -293,13 +332,13 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = sampling.sample_cohort_rows(conn, "", CohortSpec(a_n=2, url_contains=""))
+        sampled = await sampling.sample_cohort_rows(conn, "", CohortSpec(a_n=2, url_contains=""))
         self.assertEqual(
             [s["session_id"] for s in sampled],
             ["busy" + "x" * 28, "quiet" + "x" * 27],
         )
 
-    def test_pool_facets_caps_the_scan(self):
+    async def test_pool_facets_caps_the_scan(self):
         """An unbounded fetchall grew with every session in the project."""
         from capture.analyze import spec as cohort_spec
 
@@ -323,14 +362,14 @@ class TestCohortSampling(unittest.TestCase):
         ]
         self._insert(conn, rows)
         with mock.patch.object(cohort_spec, "CANDIDATE_CAP", 3):
-            facets = sampling.pool_facets(conn, "", min_duration_ms=0)
+            facets = await sampling.pool_facets(conn, "", min_duration_ms=0)
         self.assertEqual(facets["n"], 3)
         # Newest three: widths alternate starting mobile at i=0.
         devices = {item["value"]: item["count"] for item in facets["device"]}
         self.assertEqual(devices.get("mobile"), 2)
         self.assertEqual(devices.get("desktop"), 1)
 
-    def test_classified_rows_are_scoped_to_the_requested_ids(self):
+    async def test_classified_rows_are_scoped_to_the_requested_ids(self):
         """Cuts used to SELECT every session, then re-classify from raw JSON."""
         keep = "keep" + "x" * 28
         skip = "skip" + "x" * 28
@@ -381,7 +420,7 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        facts = sampling.classified_rows(conn, "", [keep, "gone" + "x" * 28])
+        facts = await sampling.classified_rows(conn, "", [keep, "gone" + "x" * 28])
         self.assertEqual(set(facts), {keep})
         row = facts[keep]
         self.assertEqual(row["outcome"], "purchased")
@@ -389,12 +428,12 @@ class TestCohortSampling(unittest.TestCase):
         self.assertEqual(row["page"], "/p")
         self.assertEqual(row["attribution"].get("utm_source"), "google")
 
-    def test_classified_rows_skip_sql_when_the_id_list_is_empty(self):
+    async def test_classified_rows_skip_sql_when_the_id_list_is_empty(self):
         conn = mock.Mock()
-        self.assertEqual(sampling.classified_rows(conn, "proj", []), {})
+        self.assertEqual(await sampling.classified_rows(conn, "proj", []), {})
         conn.execute.assert_not_called()
 
-    def test_sample_honours_the_url_filter_and_min_duration(self):
+    async def test_sample_honours_the_url_filter_and_min_duration(self):
         conn = self._conn(
             [
                 (
@@ -458,7 +497,7 @@ class TestCohortSampling(unittest.TestCase):
         # url_contains is passed explicitly: it is a per-cohort choice, not a
         # global default. It used to default to one customer's landing page,
         # which silently scoped every cohort sampled without an override.
-        sampled = sampling.sample_cohort_rows(
+        sampled = await sampling.sample_cohort_rows(
             conn,
             "",
             CohortSpec(
@@ -474,7 +513,7 @@ class TestCohortSampling(unittest.TestCase):
             {("okbuy" + "x" * 27, "a"), ("okall" + "x" * 27, "b")},
         )
 
-    def test_an_empty_url_filter_samples_every_page(self):
+    async def test_an_empty_url_filter_samples_every_page(self):
         """The default. A pool with no ashwamag URLs still yields a cohort --
         the regression that the old hardcoded default caused for every tenant
         that was not that one customer."""
@@ -496,14 +535,14 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = sampling.sample_cohort_rows(
+        sampled = await sampling.sample_cohort_rows(
             conn,
             "",
             CohortSpec(a_n=1, url_contains="", slice_spec={"outcome": ["purchased"]}),
         )
         self.assertEqual([s["session_id"] for s in sampled], ["onbrand" + "x" * 25])
 
-    def test_sample_any_mixes_outcomes_up_to_limit(self):
+    async def test_sample_any_mixes_outcomes_up_to_limit(self):
         conn = self._conn(
             [
                 (
@@ -550,13 +589,13 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = sampling.sample_cohort_rows(conn, "", CohortSpec(a_n=2, url_contains=""))
+        sampled = await sampling.sample_cohort_rows(conn, "", CohortSpec(a_n=2, url_contains=""))
         self.assertEqual(
             [(s["session_id"], s["filter"]) for s in sampled],
             [("buy1" + "x" * 28, "a"), ("rest1" + "x" * 27, "a")],
         )
 
-    def test_sample_honors_cut_style_slice_filters(self):
+    async def test_sample_honors_cut_style_slice_filters(self):
         conn = self._conn(
             [
                 (
@@ -603,7 +642,7 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = sampling.sample_cohort_rows(
+        sampled = await sampling.sample_cohort_rows(
             conn,
             "",
             CohortSpec(
@@ -621,7 +660,7 @@ class TestCohortSampling(unittest.TestCase):
             ["mob" + "x" * 29],
         )
 
-    def test_sample_groups_a_and_b_with_independent_slices(self):
+    async def test_sample_groups_a_and_b_with_independent_slices(self):
         conn = self._conn(
             [
                 (
@@ -668,7 +707,7 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        sampled = sampling.sample_cohort_rows(
+        sampled = await sampling.sample_cohort_rows(
             conn,
             "",
             CohortSpec(
@@ -684,7 +723,7 @@ class TestCohortSampling(unittest.TestCase):
             [("buy" + "x" * 29, "a"), ("rest" + "x" * 28, "b")],
         )
 
-    def test_group_b_does_not_burn_its_window_on_a(self):
+    async def test_group_b_does_not_burn_its_window_on_a(self):
         """A's members must not occupy B's LIMIT — exclude_ids is pushed into SQL."""
         conn = self._conn([])
         rows = []
@@ -724,7 +763,7 @@ class TestCohortSampling(unittest.TestCase):
                 )
             )
         self._insert(conn, rows)
-        result = sampling.sample_cohort(
+        result = await sampling.sample_cohort(
             conn,
             "",
             CohortSpec(
@@ -746,7 +785,7 @@ class TestCohortSampling(unittest.TestCase):
         # Each arm is its own LIMIT 3 — B does not re-read A's purchased rows.
         self.assertEqual(result.sample.scanned, 6)
 
-    def test_sample_time_window_and_earliest_order(self):
+    async def test_sample_time_window_and_earliest_order(self):
         conn = self._conn(
             [
                 (
@@ -793,14 +832,14 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        windowed = sampling.sample_cohort_rows(
+        windowed = await sampling.sample_cohort_rows(
             conn,
             "",
             CohortSpec(a_n=5, url_contains="", start_ms=15_000, end_ms=25_000),
         )
         self.assertEqual([s["session_id"] for s in windowed], ["mid" + "x" * 29])
 
-        earliest = sampling.sample_cohort_rows(
+        earliest = await sampling.sample_cohort_rows(
             conn,
             "",
             CohortSpec(a_n=2, url_contains="", order=spec.ORDER_EARLIEST),
@@ -810,7 +849,7 @@ class TestCohortSampling(unittest.TestCase):
             ["old" + "x" * 29, "mid" + "x" * 29],
         )
 
-    def test_sample_reports_a_genuine_pool_shortfall(self):
+    async def test_sample_reports_a_genuine_pool_shortfall(self):
         """Fewer matches than asked for, but the index was fully scanned."""
         conn = self._conn(
             [
@@ -830,7 +869,7 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        result = sampling.sample_cohort(
+        result = await sampling.sample_cohort(
             conn,
             "",
             CohortSpec(a_n=5, url_contains="", slice_spec={"device": ["mobile"]}),
@@ -841,7 +880,7 @@ class TestCohortSampling(unittest.TestCase):
             {"requested": 5, "matched": 1, "scanned": 1, "capped": False},
         )
 
-    def test_sample_sql_finds_a_rare_slice_without_scanning_misses(self):
+    async def test_sample_sql_finds_a_rare_slice_without_scanning_misses(self):
         """Slice predicates are columns: LIMIT 1 never walks past non-matches."""
         conn = self._conn([])
         rows = []
@@ -879,7 +918,7 @@ class TestCohortSampling(unittest.TestCase):
             )
         )
         self._insert(conn, rows)
-        result = sampling.sample_cohort(
+        result = await sampling.sample_cohort(
             conn,
             "",
             CohortSpec(
@@ -894,7 +933,7 @@ class TestCohortSampling(unittest.TestCase):
             {"requested": 1, "matched": 1, "scanned": 1, "capped": False},
         )
 
-    def test_sample_empty_slice_is_a_pool_shortfall_not_a_scan_cap(self):
+    async def test_sample_empty_slice_is_a_pool_shortfall_not_a_scan_cap(self):
         """No matching rows → matched=0; SQL does not invent a scan-cap shortfall."""
         conn = self._conn([])
         rows = [
@@ -915,7 +954,7 @@ class TestCohortSampling(unittest.TestCase):
             for i in range(8)
         ]
         self._insert(conn, rows)
-        result = sampling.sample_cohort(
+        result = await sampling.sample_cohort(
             conn,
             "",
             CohortSpec(
@@ -930,7 +969,7 @@ class TestCohortSampling(unittest.TestCase):
             {"requested": 2, "matched": 0, "scanned": 0, "capped": False},
         )
 
-    def test_build_cohort_persists_sample_stats(self):
+    async def test_build_cohort_persists_sample_stats(self):
         conn = self._conn(
             [
                 (
@@ -949,7 +988,9 @@ class TestCohortSampling(unittest.TestCase):
                 ),
             ]
         )
-        cohort = cohorts.build_cohort(conn, "", CohortSpec(a_n=3, url_contains=""), label="probe")
+        cohort = await cohorts.build_cohort(
+            conn, "", CohortSpec(a_n=3, url_contains=""), label="probe"
+        )
         self.assertEqual(
             cohort["sample"],
             {"requested": 3, "matched": 1, "scanned": 1, "capped": False},

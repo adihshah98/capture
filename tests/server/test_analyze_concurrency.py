@@ -29,7 +29,7 @@ class GateProbe:
         self.active -= 1
 
 
-class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
+class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
@@ -51,7 +51,7 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
         runtime._gate_loop = None
         self.tmp.cleanup()
 
-    def run_cohort(self, n=4, extract_n=1, model_n=3):
+    async def run_cohort(self, n=4, extract_n=1, model_n=3):
         runtime.ANALYZE_EXTRACT_CONCURRENCY = extract_n
         runtime.ANALYZE_MODEL_CONCURRENCY = model_n
         runtime._gate_loop = None
@@ -77,6 +77,9 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
         project_id = self._pg_project
 
         async def main():
+            # No `await` inside the generator: gather wants the coroutine
+            # objects themselves, and awaiting here would both serialise them
+            # and make this an async generator, which gather cannot unpack.
             await asyncio.gather(
                 *(session.analyze_session(project_id, d, ["chunk.json"], force=True) for d in dirs)
             )
@@ -85,23 +88,23 @@ class TestAnalyzeGates(pgfixture.CohortStoreMixin, unittest.TestCase):
             patch.object(session, "run_extractor", fake_extract),
             patch.object(gemini, "call_gemini", fake_gemini),
         ):
-            asyncio.run(main())
+            await main()
         return extract_probe, model_probe, dirs
 
-    def test_extraction_stays_serialized_while_model_calls_overlap(self):
-        extract, model, _ = self.run_cohort(n=4, extract_n=1, model_n=3)
+    async def test_extraction_stays_serialized_while_model_calls_overlap(self):
+        extract, model, _ = await self.run_cohort(n=4, extract_n=1, model_n=3)
         self.assertEqual(extract.peak, 1, "extraction must not run concurrently")
         self.assertGreater(model.peak, 1, "model calls should overlap")
         self.assertLessEqual(model.peak, 3)
 
-    def test_model_concurrency_is_bounded_by_its_setting(self):
-        _, model, _ = self.run_cohort(n=6, extract_n=1, model_n=2)
+    async def test_model_concurrency_is_bounded_by_its_setting(self):
+        _, model, _ = await self.run_cohort(n=6, extract_n=1, model_n=2)
         self.assertLessEqual(model.peak, 2)
 
-    def test_each_session_still_writes_its_results(self):
-        _, _, dirs = self.run_cohort(n=3)
+    async def test_each_session_still_writes_its_results(self):
+        _, _, dirs = await self.run_cohort(n=3)
         for d in dirs:
-            saved = storage.read_analysis(self._pg_project, d.name)
+            saved = await storage.read_analysis(self._pg_project, d.name)
             self.assertEqual(saved["status"], "done")
             self.assertIn("What stands out", saved["text"])
 

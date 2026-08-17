@@ -16,7 +16,6 @@ Nothing rebinds pipeline edges by assignment on the package namespace.
 """
 
 import ast
-import asyncio
 import unittest
 from pathlib import Path
 
@@ -73,7 +72,7 @@ class TestPatchableNamesAreNotBoundAtImport(unittest.TestCase):
 class TestPatchingReachesTheCallSite(unittest.TestCase):
     """The contract, demonstrated end to end rather than only asserted."""
 
-    def test_the_gate_loop_is_rebindable_from_runtime(self):
+    async def test_the_gate_loop_is_rebindable_from_runtime(self):
         """`_gates` must read `_gate_loop` out of the namespace tests assign to.
 
         Test sites reset the gates with `runtime._gate_loop = None` so a
@@ -89,9 +88,9 @@ class TestPatchingReachesTheCallSite(unittest.TestCase):
         previous = runtime._gate_loop
         try:
             runtime._gate_loop = None
-            first = asyncio.run(gates())
+            first = await gates()
             runtime._gate_loop = None
-            second = asyncio.run(gates())
+            second = await gates()
             # Fresh objects, or the rebind did not reach the reader.
             self.assertIsNot(first[0], second[0])
             self.assertIsNot(first[1], second[1])

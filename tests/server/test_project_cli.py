@@ -20,20 +20,18 @@ class TestProjectCli(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.data_dir, ignore_errors=True)
         self.admin_url, self.app_url = pgfixture.fresh_database()
 
-    def projects_in_db(self) -> dict:
+    async def projects_in_db(self) -> dict:
         import psycopg
 
         with psycopg.connect(self.admin_url) as conn:
-            rows = conn.execute("SELECT p.storage_prefix, p.domains FROM projects p").fetchall()
+            rows = conn.execute("SELECT p.storage_prefix, p.domains FROM projects p")
         return dict(rows)
 
-    def live_tokens(self) -> list:
+    async def live_tokens(self) -> list:
         import psycopg
 
         with psycopg.connect(self.admin_url) as conn:
-            rows = conn.execute(
-                "SELECT token FROM project_tokens WHERE revoked_at IS NULL"
-            ).fetchall()
+            rows = conn.execute("SELECT token FROM project_tokens WHERE revoked_at IS NULL")
         return [r[0] for r in rows]
 
     def run_cli(self, *args, env=None):
@@ -100,18 +98,18 @@ class TestProjectCli(unittest.TestCase):
         self.assertIn("capture.example.com", out)
         self.assertIn("placeholder host", out)
 
-    def test_set_domains_round_trip(self):
+    async def test_set_domains_round_trip(self):
         created = self.run_cli("add-project", "Acme")
         token = created.split("token: ")[1].split()[0]
         out = self.run_cli("set-domains", token, "https://Brand.com/path", "shop.example")
         self.assertIn("brand.com, shop.example", out)
-        self.assertEqual(self.projects_in_db()[token], ["brand.com", "shop.example"])
+        self.assertEqual(await self.projects_in_db()[token], ["brand.com", "shop.example"])
 
         out = self.run_cli("set-domains", token)
         self.assertIn("any domain", out)
-        self.assertEqual(self.projects_in_db()[token], [])
+        self.assertEqual(await self.projects_in_db()[token], [])
 
-    def test_list_and_remove_round_trip(self):
+    async def test_list_and_remove_round_trip(self):
         created = self.run_cli("add-project", "Acme")
         token = created.split("token: ")[1].split()[0]
         self.assertIn(token, self.run_cli("list-projects"))
@@ -126,7 +124,7 @@ class TestProjectCli(unittest.TestCase):
         # The project stays listed with its token revoked. Dropping the row
         # outright would orphan recordings that are still on disk.
         self.assertIn("no live token", self.run_cli("list-projects"))
-        self.assertEqual(self.live_tokens(), [])
+        self.assertEqual(await self.live_tokens(), [])
 
     def test_purge_deletes_the_recordings(self):
         created = self.run_cli("add-project", "Acme")

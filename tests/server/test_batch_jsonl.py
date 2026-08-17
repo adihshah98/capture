@@ -4,7 +4,6 @@ Dumping the SDK's InlinedRequest wrapper (`config`, snake_case) is a 400, and
 every cohort then falls back to sync Gemini at full price.
 """
 
-import asyncio
 import json
 import sys
 import unittest
@@ -26,7 +25,7 @@ class FakeInlinedRequest:
         return json.loads(json.dumps(self._dumped))
 
 
-class TestBatchFileRequest(unittest.TestCase):
+class TestBatchFileRequest(unittest.IsolatedAsyncioTestCase):
     def test_config_is_lifted_into_generation_config(self):
         req = FakeInlinedRequest(
             {
@@ -77,7 +76,7 @@ class TestBatchFileRequest(unittest.TestCase):
             gemini._batch_file_request(req)
 
 
-class TestSubmitPreparedGeminiBatch(unittest.TestCase):
+class TestSubmitPreparedGeminiBatch(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         import google.genai as genai
 
@@ -90,7 +89,7 @@ class TestSubmitPreparedGeminiBatch(unittest.TestCase):
         runtime.GEMINI_API_KEY = "test-key"
         self.addCleanup(lambda: setattr(runtime, "GEMINI_API_KEY", self._saved_key))
 
-    def test_uploaded_jsonl_is_a_generate_content_request(self):
+    async def test_uploaded_jsonl_is_a_generate_content_request(self):
         captured = {}
 
         class Files:
@@ -121,13 +120,11 @@ class TestSubmitPreparedGeminiBatch(unittest.TestCase):
         entry = {"session_id": "session-1"}
 
         with patch.object(gemini, "session_metadata", return_value={"entry_url": "https://x"}):
-            name = asyncio.run(
-                gemini.submit_prepared_gemini_batch(
-                    [(entry, digest)],
-                    display_name="capture-c",
-                    work_dir=Path(self.tmp.name),
-                    project_id="proj",
-                )
+            name = await gemini.submit_prepared_gemini_batch(
+                [(entry, digest)],
+                display_name="capture-c",
+                work_dir=Path(self.tmp.name),
+                project_id="proj",
             )
 
         self.assertEqual(name, "batches/j")
@@ -146,7 +143,7 @@ class TestSubmitPreparedGeminiBatch(unittest.TestCase):
         self.assertEqual(inline[0]["inlineData"]["mimeType"], "image/jpeg")
         self.assertEqual(captured.get("deleted"), ["files/in"])
 
-    def test_the_uploaded_file_is_deleted_even_when_create_fails(self):
+    async def test_the_uploaded_file_is_deleted_even_when_create_fails(self):
         deleted = []
 
         class Files:
@@ -168,51 +165,43 @@ class TestSubmitPreparedGeminiBatch(unittest.TestCase):
         digest = {"frames": [], "warnings": [], "session": {}}
         with patch.object(gemini, "session_metadata", return_value={}):
             with self.assertRaises(RuntimeError):
-                asyncio.run(
-                    gemini.submit_prepared_gemini_batch(
-                        [({"session_id": "s1"}, digest)],
-                        display_name="capture-c",
-                        work_dir=Path(self.tmp.name),
-                        project_id="proj",
-                    )
+                await gemini.submit_prepared_gemini_batch(
+                    [({"session_id": "s1"}, digest)],
+                    display_name="capture-c",
+                    work_dir=Path(self.tmp.name),
+                    project_id="proj",
                 )
         self.assertEqual(deleted, ["files/in"])
 
-    def test_project_id_cannot_be_omitted(self):
+    async def test_project_id_cannot_be_omitted(self):
         with self.assertRaises(TypeError):
-            asyncio.run(
-                gemini.submit_prepared_gemini_batch(
-                    [({"session_id": "s1"}, {"frames": []})],
-                    display_name="capture-c",
-                    work_dir=Path(self.tmp.name),
-                )
+            await gemini.submit_prepared_gemini_batch(
+                [({"session_id": "s1"}, {"frames": []})],
+                display_name="capture-c",
+                work_dir=Path(self.tmp.name),
             )
 
-    def test_a_blank_project_id_is_refused(self):
+    async def test_a_blank_project_id_is_refused(self):
         with self.assertRaises(ValueError) as ctx:
-            asyncio.run(
-                gemini.submit_prepared_gemini_batch(
-                    [({"session_id": "s1"}, {"frames": []})],
-                    display_name="capture-c",
-                    work_dir=Path(self.tmp.name),
-                    project_id="",
-                )
+            await gemini.submit_prepared_gemini_batch(
+                [({"session_id": "s1"}, {"frames": []})],
+                display_name="capture-c",
+                work_dir=Path(self.tmp.name),
+                project_id="",
             )
         self.assertIn("project_id", str(ctx.exception))
 
 
-class TestSessionMetadata(unittest.TestCase):
-    def _meta(self, entry, order):
+class TestSessionMetadata(unittest.IsolatedAsyncioTestCase):
+    async def _meta(self, entry, order):
         with (
             patch.object(gemini.analyze_store, "connect", return_value=object()),
-            patch.object(
-                gemini.analyze_store, "session_facts", return_value=(entry, order)
-            ),
+            patch.object(gemini.analyze_store, "session_facts", return_value=(entry, order)),
         ):
-            return gemini.session_metadata("proj", "s1")
+            return await gemini.session_metadata("proj", "s1")
 
-    def test_purchase_total_is_exposed_as_order_value(self):
-        meta = self._meta(
+    async def test_purchase_total_is_exposed_as_order_value(self):
+        meta = await self._meta(
             "https://shop.test/",
             {"purchased_at": 1, "total": 59.5, "currency": "USD"},
         )
@@ -222,8 +211,8 @@ class TestSessionMetadata(unittest.TestCase):
         self.assertNotIn("products", meta)
         self.assertNotIn("total", meta)
 
-    def test_checkout_without_a_total_omits_order_fields(self):
-        meta = self._meta("https://shop.test/", {"checkout_started_at": 1})
+    async def test_checkout_without_a_total_omits_order_fields(self):
+        meta = await self._meta("https://shop.test/", {"checkout_started_at": 1})
         self.assertEqual(meta["outcome"], "reached checkout")
         self.assertNotIn("order_value", meta)
         self.assertNotIn("currency", meta)

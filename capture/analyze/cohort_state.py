@@ -195,13 +195,13 @@ def _member_ids(cohort: dict) -> list:
     return [e["session_id"] for e in cohort.get("sessions") or [] if e.get("session_id")]
 
 
-def enrich_cohort_status(project_id: str, cohort: dict) -> dict:
+async def enrich_cohort_status(project_id: str, cohort: dict) -> dict:
     """Refresh per-session status from analyses / analysis_jobs in Postgres."""
     sessions = []
     done = running = queued = errors = stale = 0
     ids = _member_ids(cohort)
-    analyses = storage.read_analyses(project_id, ids)
-    jobs = storage.read_jobs(project_id, ids)
+    analyses = await storage.read_analyses(project_id, ids)
+    jobs = await storage.read_jobs(project_id, ids)
     for entry in cohort.get("sessions") or []:
         row = dict(entry)
         # Insights text is attached on read for the API — never persist it here.
@@ -343,7 +343,7 @@ def standout_line(text: str) -> str:
     return ""
 
 
-def attach_cohort_insights(project_id: str, cohort: dict) -> dict:
+async def attach_cohort_insights(project_id: str, cohort: dict) -> dict:
     """Attach analysis write-ups — response-only, never written to the cohort file."""
     members = cohort.get("sessions") or []
     done_ids = [
@@ -351,7 +351,7 @@ def attach_cohort_insights(project_id: str, cohort: dict) -> dict:
         for row in members
         if row.get("status") == "done" and row.get("session_id")
     ]
-    analyses = storage.read_analyses(project_id, done_ids)
+    analyses = await storage.read_analyses(project_id, done_ids)
     sessions = []
     for entry in members:
         row = dict(entry)

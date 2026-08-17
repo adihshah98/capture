@@ -22,8 +22,8 @@ class TestCohort(ServerCase):
         "ANALYZE_BATCH": "0",
     }
 
-    def seed_analysis(self, sid):
-        storage.write_analysis(
+    async def seed_analysis(self, sid):
+        await storage.write_analysis(
             self.project_id,
             sid,
             {
@@ -91,7 +91,7 @@ class TestCohort(ServerCase):
         self.assertEqual(status, 404)
         self.assertIn("no such cohort", json.loads(body)["error"])
 
-    def test_get_persists_a_crashed_runners_status_without_rewriting_membership(self):
+    async def test_get_persists_a_crashed_runners_status_without_rewriting_membership(self):
         sid = "getpers" + "x" * 25
         self.assertEqual(self.ingest(sid), 200)
         self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
@@ -99,21 +99,21 @@ class TestCohort(ServerCase):
         self.assertEqual(status, 201, body)
         cohort_id = json.loads(body)["id"]
 
-        saved = self.stored_cohort(cohort_id)
+        saved = await self.stored_cohort(cohort_id)
         saved["status"] = "running"
         saved["sessions"][0]["status"] = "running"
         saved["sessions"][0]["filter"] = "a"
         saved.pop("selection", None)
-        self.store_cohort(saved)
+        await self.store_cohort(saved)
 
-        self.seed_analysis(sid)
+        await self.seed_analysis(sid)
         status, body = request(f"{self.base}/api/cohorts/{cohort_id}")
         self.assertEqual(status, 200, body)
         live = json.loads(body)
         self.assertEqual(live["status"], "done")
         self.assertEqual(live["sessions"][0]["status"], "done")
 
-        stored = self.stored_cohort(cohort_id)
+        stored = await self.stored_cohort(cohort_id)
         self.assertEqual(stored["status"], "done")
         self.assertEqual(stored["sessions"][0]["status"], "done")
         # Sampling extras must survive: GET used to DELETE+INSERT the whole list.
@@ -122,9 +122,9 @@ class TestCohort(ServerCase):
         self.assertIsNone(stored.get("selection"))
         self.assertTrue(live.get("selection"))
 
-    def test_list_reports_every_cohort_with_its_progress(self):
+    async def test_list_reports_every_cohort_with_its_progress(self):
         sid = "listed" + "x" * 26
-        cohort_id = self._cohort_of_one(sid)
+        cohort_id = await self._cohort_of_one(sid)
         listed = {c["id"]: c for c in self.cohorts()}
         self.assertIn(cohort_id, listed)
         row = listed[cohort_id]
@@ -135,16 +135,16 @@ class TestCohort(ServerCase):
         self.assertEqual(row["progress"], detail["progress"])
         self.assertEqual(row["progress"]["done"], len(detail["sessions"]))
 
-    def test_samples_purchased_and_all_and_reuses_cached_analysis(self):
+    async def test_samples_purchased_and_all_and_reuses_cached_analysis(self):
         purchased = [f"buy{i}" + "x" * 28 for i in range(3)]
         plain = [f"all{i}" + "x" * 28 for i in range(4)]
         for sid in purchased:
             self.assertEqual(self.ingest(sid), 200)
             self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-            self.seed_analysis(sid)
+            await self.seed_analysis(sid)
         for sid in plain:
             self.assertEqual(self.ingest(sid), 200)
-            self.seed_analysis(sid)
+            await self.seed_analysis(sid)
 
         cohort = self.create_and_analyze(a=2, b=2, outcome="purchased", b_outcome="checkout,rest")
         self.assertEqual(cohort["a_n"], 2)
@@ -169,20 +169,20 @@ class TestCohort(ServerCase):
             self.assertTrue(entry.get("text", "").startswith("write-up for"))
             self.assertIn("standout", entry)
 
-        saved = self.stored_cohort(cohort["id"])
+        saved = await self.stored_cohort(cohort["id"])
         self.assertEqual(saved["id"], cohort["id"])
         self.assertEqual(len(saved["sessions"]), 4)
         # Write-ups are response-only — not bloating the cohort file on disk.
         for entry in saved["sessions"]:
             self.assertNotIn("text", entry)
 
-    def test_rejects_cohorts_over_500_and_samples_a_mixed_group(self):
+    async def test_rejects_cohorts_over_500_and_samples_a_mixed_group(self):
         for i in range(3):
             sid = f"any{i}" + "x" * 28
             self.assertEqual(self.ingest(sid), 200)
             if i == 0:
                 self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-            self.seed_analysis(sid)
+            await self.seed_analysis(sid)
 
         status, body = request(
             self.create_cohort_url(a=300, b=250),
@@ -211,7 +211,7 @@ class TestCohort(ServerCase):
         self.assertEqual(len(cohort["sessions"]), 2)
         self.assertIn("for A", cohort.get("selection", ""))
 
-    def test_pool_facets_and_slice_filtered_create(self):
+    async def test_pool_facets_and_slice_filtered_create(self):
         mobile = "facetm" + "x" * 26
         desktop = "facetd" + "x" * 26
         nonbuy = "facetn" + "x" * 26
@@ -253,9 +253,9 @@ class TestCohort(ServerCase):
             ),
             200,
         )
-        self.seed_analysis(mobile)
-        self.seed_analysis(desktop)
-        self.seed_analysis(nonbuy)
+        await self.seed_analysis(mobile)
+        await self.seed_analysis(desktop)
+        await self.seed_analysis(nonbuy)
 
         status, body = request(
             f"{self.base}/api/facets?" + urllib.parse.urlencode({"min_duration_ms": 0})
@@ -318,10 +318,10 @@ class TestCohort(ServerCase):
         self.assertEqual(by_filter.get("a"), mobile)
         self.assertEqual(by_filter.get("b"), nonbuy)
 
-    def test_create_cohort_accepts_a_custom_label(self):
+    async def test_create_cohort_accepts_a_custom_label(self):
         sid = "named" + "x" * 27
         self.assertEqual(self.ingest(sid), 200)
-        self.seed_analysis(sid)
+        await self.seed_analysis(sid)
         status, body = request(
             f"{self.base}/api/cohorts?"
             + urllib.parse.urlencode(
@@ -340,12 +340,12 @@ class TestCohort(ServerCase):
         self.assertEqual(cohort["label"], "Checkout check")
         self.assertEqual(len(cohort["sessions"]), 1)
 
-    def test_cohorts_accumulate_rather_than_overwrite(self):
+    async def test_cohorts_accumulate_rather_than_overwrite(self):
         for i in range(2):
             sid = f"acc{i}" + "x" * 28
             self.assertEqual(self.ingest(sid), 200)
             self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-            self.seed_analysis(sid)
+            await self.seed_analysis(sid)
 
         ids = []
         for _ in range(2):
@@ -364,12 +364,12 @@ class TestCohort(ServerCase):
         # Newest first, so the later run sorts ahead of the earlier one.
         self.assertLess(listed.index(ids[1]), listed.index(ids[0]))
         # First cohort still exists with its membership.
-        first = self.stored_cohort(ids[0])
+        first = await self.stored_cohort(ids[0])
         self.assertEqual(len(first["sessions"]), 1)
 
-    def test_rename_sets_the_label_and_keeps_membership(self):
+    async def test_rename_sets_the_label_and_keeps_membership(self):
         sid = "rename" + "x" * 26
-        cohort_id = self._cohort_of_one(sid)
+        cohort_id = await self._cohort_of_one(sid)
         before = json.loads(request(f"{self.base}/api/cohorts/{cohort_id}")[1])
 
         status, body = request(
@@ -387,9 +387,9 @@ class TestCohort(ServerCase):
         )
         self.assertEqual(self.cohorts()[0]["label"], "Spring campaign check")
 
-    def test_rename_rejects_an_empty_label(self):
+    async def test_rename_rejects_an_empty_label(self):
         sid = "rename2" + "x" * 25
-        cohort_id = self._cohort_of_one(sid)
+        cohort_id = await self._cohort_of_one(sid)
         status, body = request(
             f"{self.base}/api/cohorts/{cohort_id}",
             method="PATCH",
@@ -399,7 +399,7 @@ class TestCohort(ServerCase):
         self.assertEqual(status, 400)
         self.assertIn("empty", json.loads(body)["error"])
 
-    def test_the_cohort_lifecycle_makes_only_declared_transitions(self):
+    async def test_the_cohort_lifecycle_makes_only_declared_transitions(self):
         """Drive create → start → pause → start over HTTP and check the server
         never reported a status move COHORT_TRANSITIONS does not declare.
 
@@ -410,7 +410,7 @@ class TestCohort(ServerCase):
         sid = "lifecyc" + "x" * 25
         self.assertEqual(self.ingest(sid), 200)
         self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-        self.seed_analysis(sid)
+        await self.seed_analysis(sid)
         cohort = self.create_and_analyze(a=1, outcome="purchased")
         cohort_id = cohort["id"]
         self.wait_done(cohort_id)
@@ -424,11 +424,11 @@ class TestCohort(ServerCase):
         ]
         self.assertEqual(offenders, [])
 
-    def test_deleting_a_session_removes_it_from_its_cohorts(self):
+    async def test_deleting_a_session_removes_it_from_its_cohorts(self):
         """Otherwise the membership row outlives the recording, and
         enrich_cohort_status keeps counting it as a completed analysis."""
         sid = "delsess" + "x" * 25
-        cohort_id = self._cohort_of_one(sid)
+        cohort_id = await self._cohort_of_one(sid)
         _, body = request(f"{self.base}/api/cohorts/{cohort_id}")
         self.assertEqual(json.loads(body)["progress"]["done"], 1)
 
@@ -440,17 +440,17 @@ class TestCohort(ServerCase):
         self.assertEqual([s["session_id"] for s in cohort["sessions"]], [])
         self.assertEqual(cohort["progress"]["total"], 0)
         self.assertEqual(cohort["progress"]["done"], 0)
-        self.assertEqual(self.stored_cohort(cohort_id)["sessions"], [])
+        self.assertEqual((await self.stored_cohort(cohort_id))["sessions"], [])
 
-    def test_deleting_one_session_leaves_the_others_in_place(self):
+    async def test_deleting_one_session_leaves_the_others_in_place(self):
         sids = ["multi1" + "x" * 26, "multi2" + "x" * 26]
         for sid in sids:
             self.assertEqual(self.ingest(sid), 200)
             self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-            self.seed_analysis(sid)
+            await self.seed_analysis(sid)
         cohort = self.create_and_analyze(a=2, outcome="purchased")
         self.wait_done(cohort["id"])
-        self.assertEqual(len(self.stored_cohort(cohort["id"])["sessions"]), 2)
+        self.assertEqual(len((await self.stored_cohort(cohort["id"]))["sessions"]), 2)
 
         self.assertEqual(request(f"{self.base}/api/sessions/{sids[0]}", method="DELETE")[0], 200)
 
@@ -459,55 +459,57 @@ class TestCohort(ServerCase):
         self.assertEqual([s["session_id"] for s in live["sessions"]], [sids[1]])
         self.assertEqual(live["progress"]["done"], 1)
 
-    def test_delete_removes_cohort_and_keeps_session_writeups(self):
+    async def test_delete_removes_cohort_and_keeps_session_writeups(self):
         sid = "delcoh" + "x" * 26
-        cohort_id = self._cohort_of_one(sid)
-        analyze_store.write_cut(
+        cohort_id = await self._cohort_of_one(sid)
+        await analyze_store.write_cut(
             self.cohort_store(), self.project_id, cohort_id, "some-cut", {"label": "x"}
         )
-        self.assertIsNotNone(storage.read_analysis(self.project_id, sid))
+        self.assertIsNotNone(await storage.read_analysis(self.project_id, sid))
 
         status, body = request(f"{self.base}/api/cohorts/{cohort_id}", method="DELETE")
         self.assertEqual(status, 200, body)
         self.assertTrue(json.loads(body)["ok"])
         self.assertNotIn(cohort_id, [c["id"] for c in self.cohorts()])
-        self.assertIsNone(self.stored_cohort(cohort_id))
-        self.assertEqual(self.stored_cuts(cohort_id), {})
+        self.assertIsNone(await self.stored_cohort(cohort_id))
+        self.assertEqual(await self.stored_cuts(cohort_id), {})
         # Deleting a cohort must not take the write-ups of its members with it.
-        self.assertIsNotNone(storage.read_analysis(self.project_id, sid))
+        self.assertIsNotNone(await storage.read_analysis(self.project_id, sid))
 
         status, body = request(f"{self.base}/api/cohorts/{cohort_id}", method="DELETE")
         self.assertEqual(status, 404, body)
 
-    def _cohort_of_one(self, sid):
+    async def _cohort_of_one(self, sid):
         """A settled one-session cohort, with cached analysis so it lands done."""
         self.assertEqual(self.ingest(sid), 200)
         self.assertEqual(self.order(sid, {"event": "checkout_completed"}), 200)
-        self.seed_analysis(sid)
+        await self.seed_analysis(sid)
         cohort = self.create_and_analyze(a=1, outcome="purchased")
         cohort_id = cohort["id"]
         self.wait_done(cohort_id)
         return cohort_id
 
-    def test_retry_clears_the_recorded_error_for_that_row(self):
+    async def test_retry_clears_the_recorded_error_for_that_row(self):
         sid = "retry1" + "x" * 26
-        cohort_id = self._cohort_of_one(sid)
+        cohort_id = await self._cohort_of_one(sid)
 
         # Simulate a row that failed during the run: status is re-derived from
         # store, so the cached analysis has to go along with the error marker.
-        storage.clear_analysis(self.project_id, sid)
-        storage.write_job(self.project_id, sid, "error", error="page reconstruction timed out")
-        saved = self.stored_cohort(cohort_id)
+        await storage.clear_analysis(self.project_id, sid)
+        await storage.write_job(
+            self.project_id, sid, "error", error="page reconstruction timed out"
+        )
+        saved = await self.stored_cohort(cohort_id)
         saved["sessions"][0]["status"] = "error"
         saved["sessions"][0]["error"] = "page reconstruction timed out"
         saved["status"] = "error"
-        self.store_cohort(saved)
+        await self.store_cohort(saved)
 
         _, body = request(f"{self.base}/api/cohorts/{cohort_id}")
         self.assertEqual(json.loads(body)["sessions"][0]["status"], "error")
 
         # Restore the cache so the retry settles without a real Gemini call.
-        self.seed_analysis(sid)
+        await self.seed_analysis(sid)
 
         status, body = request(
             f"{self.base}/api/cohorts/{cohort_id}/sessions/{sid}/retry",
@@ -521,9 +523,9 @@ class TestCohort(ServerCase):
         self.assertEqual(entry["status"], "done")
         self.assertNotIn("error", entry)
 
-    def test_retry_rejects_a_session_outside_the_cohort(self):
+    async def test_retry_rejects_a_session_outside_the_cohort(self):
         sid = "retry2" + "x" * 26
-        cohort_id = self._cohort_of_one(sid)
+        cohort_id = await self._cohort_of_one(sid)
         other = "nother" + "x" * 26
         self.assertEqual(self.ingest(other), 200)
 
@@ -569,15 +571,15 @@ class TestCohortUnavailable(ServerCase):
         self.assertEqual(status, 503)
         self.assertIn("not configured", json.loads(body)["error"])
 
-    def test_a_refusable_refresh_keeps_the_cached_answer(self):
+    async def test_a_refusable_refresh_keeps_the_cached_answer(self):
         """Without a key the refresh cannot be served — it must leave the good
         answer standing rather than delete what it cannot replace."""
-        cohort = storage.write_cohort(
+        cohort = await storage.write_cohort(
             self.project_id,
             {"id": "cohort-keyless", "status": "done", "sessions": []},
         )
         key = cuts.cut_key({"outcome": "purchased"})
-        storage.write_cut(
+        await storage.write_cut(
             self.project_id,
             cohort["id"],
             key,
@@ -587,7 +589,7 @@ class TestCohortUnavailable(ServerCase):
             f"{self.base}/api/cohorts/{cohort['id']}/cut?outcome=purchased&refresh=1"
         )
         self.assertEqual(status, 503)
-        still = storage.read_cut(self.project_id, cohort["id"], key)
+        still = await storage.read_cut(self.project_id, cohort["id"], key)
         self.assertEqual(still["analysis"]["headline"], "old")
 
 

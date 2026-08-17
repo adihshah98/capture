@@ -8,6 +8,21 @@ It is deliberately leaf-ward. Nothing here reads a name the tests patch -- no
 prompts, no model config, no `_gates` -- and nothing calls back into
 orchestration. That is what makes it separable at all; see
 `tests/server/test_patch_contract.py`.
+
+**Everything that touches Postgres here is a coroutine.** The driver is async
+(`db.connection` yields an `AsyncConnection`), so awaiting a query hands the
+event loop back for the duration of the round trip and other requests run while
+this one waits. There is one surface, not a sync one plus an async mirror: the
+server is an asyncio process and this is its shape.
+
+The exceptions are the handful of functions below that never reach the database
+-- `analysis_paths`, `cohorts_dir`, `safe_cohort_id`, `sessions_root`,
+`session_dir`. Those are string and path arithmetic over an already-cached
+project registry, so making them coroutines would buy nothing and cost every
+caller an `await`.
+
+Callers with no event loop at all (the CLI, migrations) do not come through
+here; they use `db.sync_connection` directly.
 """
 
 import re
@@ -44,53 +59,59 @@ def session_dir(project_id: str, session_id: str) -> Path:
     return sessions_root(project_id) / session_id
 
 
-def read_analysis(project_id: str, session_id: str) -> dict | None:
-    return analyze_store.read_analysis(analyze_store.connect(), project_id, session_id)
+async def read_analysis(project_id: str, session_id: str) -> dict | None:
+    return await analyze_store.read_analysis(analyze_store.connect(), project_id, session_id)
 
 
-def read_analyses(project_id: str, session_ids) -> dict:
+async def read_analyses(project_id: str, session_ids) -> dict:
     """session_id → write-up for the ids that have one. One query, not N."""
-    return analyze_store.read_analyses(analyze_store.connect(), project_id, session_ids)
+    return await analyze_store.read_analyses(analyze_store.connect(), project_id, session_ids)
 
 
-def write_analysis(project_id: str, session_id: str, result: dict) -> dict:
-    return analyze_store.write_analysis(analyze_store.connect(), project_id, session_id, result)
+async def write_analysis(project_id: str, session_id: str, result: dict) -> dict:
+    return await analyze_store.write_analysis(
+        analyze_store.connect(), project_id, session_id, result
+    )
 
 
-def forget_analyses(project_id: str) -> int:
+async def forget_analyses(project_id: str) -> int:
     """Drop every write-up in a project. For a whole-project reset."""
-    return analyze_store.forget_analyses(analyze_store.connect(), project_id)
+    return await analyze_store.forget_analyses(analyze_store.connect(), project_id)
 
 
-def read_job(project_id: str, session_id: str) -> dict | None:
+async def read_job(project_id: str, session_id: str) -> dict | None:
     """In-progress or failed async analysis job, if any."""
-    return analyze_store.read_job(analyze_store.connect(), project_id, session_id)
+    return await analyze_store.read_job(analyze_store.connect(), project_id, session_id)
 
 
-def read_jobs(project_id: str, session_ids) -> dict:
+async def read_jobs(project_id: str, session_ids) -> dict:
     """session_id → job row for the ids that have one. One query, not N."""
-    return analyze_store.read_jobs(analyze_store.connect(), project_id, session_ids)
+    return await analyze_store.read_jobs(analyze_store.connect(), project_id, session_ids)
 
 
-def write_job(project_id: str, session_id: str, status: str, error: str | None = None) -> dict:
+async def write_job(
+    project_id: str, session_id: str, status: str, error: str | None = None
+) -> dict:
     job = {"status": status, "updated_at": int(time.time() * 1000)}
     if error:
         job["error"] = error
-    return analyze_store.write_job(analyze_store.connect(), project_id, session_id, job)
+    return await analyze_store.write_job(analyze_store.connect(), project_id, session_id, job)
 
 
-def clear_job(project_id: str, session_id: str) -> None:
-    analyze_store.clear_job(analyze_store.connect(), project_id, session_id)
+async def clear_job(project_id: str, session_id: str) -> None:
+    await analyze_store.clear_job(analyze_store.connect(), project_id, session_id)
 
 
-def clear_analysis(project_id: str, session_id: str, *, session_dir: Path | None = None) -> None:
+async def clear_analysis(
+    project_id: str, session_id: str, *, session_dir: Path | None = None
+) -> None:
     """Drop a finished result so a re-analyze starts clean.
 
     Also clears local `.analysis` scratch (and best-effort legacy sidecars) when
     the session directory exists on disk, and the persisted digest in S3 so a
     later stage cannot revive the reconstruction this call just discarded.
     """
-    analyze_store.clear_analysis(analyze_store.connect(), project_id, session_id)
+    await analyze_store.clear_analysis(analyze_store.connect(), project_id, session_id)
     root = session_dir
     if root is None:
         try:
@@ -121,21 +142,21 @@ def safe_cohort_id(cohort_id: str) -> str:
     return raw
 
 
-def read_cohort(project_id: str, cohort_id: str) -> dict | None:
+async def read_cohort(project_id: str, cohort_id: str) -> dict | None:
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return None
-    return analyze_store.read_cohort(analyze_store.connect(), project_id, cohort_id)
+    return await analyze_store.read_cohort(analyze_store.connect(), project_id, cohort_id)
 
 
-def write_cohort(project_id: str, cohort: dict) -> dict:
-    return analyze_store.write_cohort(
+async def write_cohort(project_id: str, cohort: dict) -> dict:
+    return await analyze_store.write_cohort(
         analyze_store.connect(), project_id, {**cohort, "id": safe_cohort_id(cohort["id"])}
     )
 
 
-def set_cohort_status(
+async def set_cohort_status(
     project_id: str,
     cohort: dict,
     status: str,
@@ -155,7 +176,7 @@ def set_cohort_status(
         cohort.pop("batch", None)
     elif batch is not None:
         cohort["batch"] = batch
-    analyze_store.set_cohort_status(
+    await analyze_store.set_cohort_status(
         analyze_store.connect(),
         project_id,
         safe_cohort_id(str(cohort["id"])),
@@ -165,14 +186,14 @@ def set_cohort_status(
     )
 
 
-def set_cohort_label(project_id: str, cohort_id: str, label: str) -> bool:
+async def set_cohort_label(project_id: str, cohort_id: str, label: str) -> bool:
     """Set a cohort's display name without rewriting its membership."""
-    return analyze_store.set_cohort_label(
+    return await analyze_store.set_cohort_label(
         analyze_store.connect(), project_id, safe_cohort_id(cohort_id), label
     )
 
 
-def persist_cohort_refresh(project_id: str, stored: dict, live: dict) -> bool:
+async def persist_cohort_refresh(project_id: str, stored: dict, live: dict) -> bool:
     """Persist enrich's durable status without replacing membership.
 
     The status refresh is a durable fact — a crashed runner leaves rows saying
@@ -205,7 +226,7 @@ def persist_cohort_refresh(project_id: str, stored: dict, live: dict) -> bool:
 
     if status is None and not sessions:
         return False
-    analyze_store.persist_cohort_refresh(
+    await analyze_store.persist_cohort_refresh(
         analyze_store.connect(),
         project_id,
         cohort_id,
@@ -215,56 +236,56 @@ def persist_cohort_refresh(project_id: str, stored: dict, live: dict) -> bool:
     return True
 
 
-def list_cohorts(project_id: str) -> list:
+async def list_cohorts(project_id: str) -> list:
     """Every cohort in this project, newest first. Membership only — no write-ups."""
-    return analyze_store.list_cohorts(analyze_store.connect(), project_id)
+    return await analyze_store.list_cohorts(analyze_store.connect(), project_id)
 
 
-def latest_cohort(project_id: str) -> dict | None:
-    cohorts = list_cohorts(project_id)
+async def latest_cohort(project_id: str) -> dict | None:
+    cohorts = await list_cohorts(project_id)
     return cohorts[0] if cohorts else None
 
 
-def read_cuts(project_id: str, cohort_id: str) -> dict:
+async def read_cuts(project_id: str, cohort_id: str) -> dict:
     """All cached cut analyses for a cohort, keyed by cut_key()."""
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return {}
-    return analyze_store.read_cuts(analyze_store.connect(), project_id, cohort_id)
+    return await analyze_store.read_cuts(analyze_store.connect(), project_id, cohort_id)
 
 
-def read_cut(project_id: str, cohort_id: str, key: str) -> dict | None:
+async def read_cut(project_id: str, cohort_id: str, key: str) -> dict | None:
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return None
-    return analyze_store.read_cut(analyze_store.connect(), project_id, cohort_id, key)
+    return await analyze_store.read_cut(analyze_store.connect(), project_id, cohort_id, key)
 
 
-def write_cut(project_id: str, cohort_id: str, key: str, cut: dict) -> dict:
+async def write_cut(project_id: str, cohort_id: str, key: str, cut: dict) -> dict:
     """Cache one cut. A done cohort is immutable, so this only needs busting
     when the question changes (a reworded prompt), never when the data does.
 
     One row per cut: two cuts of the same cohort finishing together no longer
     race through a read-mutate-write of the whole map.
     """
-    return analyze_store.write_cut(
+    return await analyze_store.write_cut(
         analyze_store.connect(), project_id, safe_cohort_id(cohort_id), key, cut
     )
 
 
-def clear_cut(project_id: str, cohort_id: str, key: str) -> bool:
+async def clear_cut(project_id: str, cohort_id: str, key: str) -> bool:
     """Drop one cached cut so the next run re-asks the model. Returns whether
     anything was actually dropped."""
     try:
         cohort_id = safe_cohort_id(cohort_id)
     except ValueError:
         return False
-    return analyze_store.clear_cut(analyze_store.connect(), project_id, cohort_id, key)
+    return await analyze_store.clear_cut(analyze_store.connect(), project_id, cohort_id, key)
 
 
-def forget_session(project_id: str, session_id: str) -> int:
+async def forget_session(project_id: str, session_id: str) -> int:
     """Remove a deleted session from every cohort in this project.
 
     Call this wherever a session's recording is removed. A membership row
@@ -272,15 +293,15 @@ def forget_session(project_id: str, session_id: str) -> int:
     unsupportable — and `enrich_cohort_status` trusts the stored status when it
     finds nothing, so the row would keep counting as done.
     """
-    return analyze_store.forget_session(analyze_store.connect(), project_id, str(session_id))
+    return await analyze_store.forget_session(analyze_store.connect(), project_id, str(session_id))
 
 
-def forget_pool_cohorts(project_id: str) -> int:
+async def forget_pool_cohorts(project_id: str) -> int:
     """Drop every cohort in a project, for a whole-project index reset."""
-    return analyze_store.forget_pool(analyze_store.connect(), project_id)
+    return await analyze_store.forget_pool(analyze_store.connect(), project_id)
 
 
-def mark_cohort_session(
+async def mark_cohort_session(
     project_id: str,
     cohort: dict,
     entry: dict,
@@ -309,7 +330,7 @@ def mark_cohort_session(
     else:
         entry["error"] = error
 
-    analyze_store.update_session_status(
+    await analyze_store.update_session_status(
         analyze_store.connect(),
         project_id,
         str(cohort["id"]),

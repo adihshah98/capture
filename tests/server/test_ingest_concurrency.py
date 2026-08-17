@@ -25,7 +25,7 @@ CONCURRENCY = 8
 
 
 @unittest.skipUnless(pgfixture.available(), pgfixture.UNAVAILABLE)
-class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
+class TestIngestDoesNotBlockTheEventLoop(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         import shutil
@@ -94,7 +94,7 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
             ).encode()
         )
 
-    def test_concurrent_ingests_overlap_instead_of_queueing(self):
+    async def test_concurrent_ingests_overlap_instead_of_queueing(self):
         """Every write must be in flight at once.
 
         This used to time the batch and require it to beat 60% of the serialised
@@ -144,7 +144,7 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
                 results = await asyncio.gather(*(one(n) for n in range(CONCURRENCY)))
                 return [r.status_code for r in results]
 
-        codes = asyncio.run(main())
+        codes = await main()
         self.assertEqual(codes, [200] * CONCURRENCY)
         self.assertEqual(
             len(overlapped),
@@ -153,7 +153,7 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
             "— the write is blocking the event loop",
         )
 
-    def test_every_chunk_still_lands(self):
+    async def test_every_chunk_still_lands(self):
         import httpx
 
         payload = self.body()
@@ -172,7 +172,7 @@ class TestIngestDoesNotBlockTheEventLoop(unittest.TestCase):
                     )
                 )
 
-        asyncio.run(main())
+        await main()
         import psycopg
 
         with psycopg.connect(self.admin_url) as conn:

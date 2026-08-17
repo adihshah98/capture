@@ -1,16 +1,67 @@
+"""Postgres connections, in two flavours for two kinds of caller.
+
+The server is an asyncio process, so its database work goes through
+`AsyncConnectionPool` and `async with connection(...)`. A coroutine that awaits
+a query hands control back to the event loop for the duration of the round
+trip, which is what lets one process serve other tenants while this one waits.
+That is the primary path and nearly all traffic uses it.
+
+The sync pool exists for callers that have no event loop and cannot get one:
+the `capture` CLI, `migrate()`, and the retention sweep when it is run as a
+script. Those are batch jobs where blocking is the correct behaviour — there is
+nothing else for the thread to do.
+
+Both pools point at the same database with the same RLS setup; they differ only
+in how the caller waits. Do not reach for the sync pool from inside a coroutine:
+it blocks the event loop, which is the bug this split exists to make impossible
+to write by accident. `tests/server/test_event_loop_contract.py` enforces it.
+
+**Sizing.** `CAPTURE_DB_POOL_MAX` caps *each* pool, not the process, and a
+server opens both: the async one for requests, the sync one for the project
+registry (`projects.py`, which the CLI shares and which caches for
+CAPTURE_PROJECT_CACHE_TTL_S, so it is a rare reader rather than a hot path).
+Budget `2 * CAPTURE_DB_POOL_MAX` per process against Postgres's
+`max_connections`, and remember `min_size=1` means each pool holds one backend
+open even while idle.
+"""
+
+import asyncio
 import json
 import os
 import threading
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 import psycopg
-from psycopg_pool import ConnectionPool
+from psycopg_pool import AsyncConnectionPool, ConnectionPool
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 _pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()
+
+# The async pool is created inside the running loop and belongs to it. A pool
+# bound to a loop that has closed is useless, and reusing one across loops (as
+# tests create and discard loops freely) is a source of "attached to a different
+# loop" errors, so the loop identity is part of the cache key.
+_apool: AsyncConnectionPool | None = None
+_apool_loop: asyncio.AbstractEventLoop | None = None
+# Guards the create-and-open sequence. `open()` awaits, so without this every
+# coroutine that arrives during a cold start gets past the None check and builds
+# its own pool; the losers are then dropped on the floor still holding
+# connections. A threading.Lock would not help — these race on one thread, at an
+# await point — and the lock itself is created per loop for the same reason the
+# pool is.
+_apool_lock: asyncio.Lock | None = None
+_apool_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _loop_lock(loop) -> asyncio.Lock:
+    global _apool_lock, _apool_lock_loop
+    if _apool_lock is None or _apool_lock_loop is not loop:
+        _apool_lock = asyncio.Lock()
+        _apool_lock_loop = loop
+    return _apool_lock
 
 
 def database_url() -> str:
@@ -50,6 +101,38 @@ def pool() -> ConnectionPool:
     return _pool
 
 
+def pool_wait_s() -> float:
+    return float(os.environ.get("CAPTURE_DB_WAIT_S", "5"))
+
+
+async def apool() -> AsyncConnectionPool:
+    """The async pool, opened on first use and bound to the running loop."""
+    global _apool, _apool_loop
+    loop = asyncio.get_running_loop()
+    if _apool is not None and _apool_loop is loop:
+        return _apool
+    async with _loop_lock(loop):
+        # Re-checked inside the lock: several coroutines can queue here on a
+        # cold start, and only the first should build anything.
+        if _apool is not None and _apool_loop is loop:
+            return _apool
+        created = AsyncConnectionPool(
+            database_url(),
+            min_size=1,
+            max_size=pool_max(),
+            # Same reasoning as the sync pool: fail fast rather than queue
+            # every request behind an outage.
+            timeout=pool_wait_s(),
+            open=False,
+        )
+        await created.open()
+        # Published only once it is open and usable. A pool from a previous
+        # loop cannot be closed from this one, so the reference is simply
+        # replaced and its connections lapse with the loop that owned them.
+        _apool, _apool_loop = created, loop
+        return _apool
+
+
 def close_pool(timeout: float = 3.0) -> None:
     """Bounded on purpose: with the database unreachable the pool's workers are
     mid-retry, and an unbounded close makes the process impossible to stop
@@ -64,20 +147,105 @@ def close_pool(timeout: float = 3.0) -> None:
             _pool = None
 
 
-@contextmanager
-def connection(project_id=None, admin: bool = False):
-    """A transaction scoped to one project. Every RLS-protected table is invisible
-    unless project_id matches or admin is set, so a query that forgets its WHERE
-    clause returns nothing instead of another tenant's rows."""
+def forget_apool() -> None:
+    """Drop the async pool reference without awaiting a close.
+
+    For teardown paths that have no loop to await on — chiefly tests, where each
+    case runs on its own `asyncio.run` loop and a pool held over from a closed
+    one is unusable. The connections are released when the loop that owned them
+    is collected; there is nothing to wait for here.
+    """
+    global _apool, _apool_loop
+    _apool = None
+    _apool_loop = None
+
+
+async def close_apool(timeout: float = 3.0) -> None:
+    """Close the async pool. Bounded for the same reason as `close_pool`."""
+    global _apool, _apool_loop
+    if _apool is not None:
+        try:
+            await asyncio.wait_for(_apool.close(), timeout=timeout)
+        except Exception as exc:
+            # TimeoutError included: a pool that will not drain must not stop
+            # the process from exiting.
+            print(f"db: async pool did not close cleanly: {exc}")
+        _apool = None
+        _apool_loop = None
+
+
+def _scope_sql(project_id, admin: bool) -> tuple:
+    """The RLS statement that scopes a connection, as (sql, params).
+
+    Shared by both connection helpers so the sync and async paths cannot drift
+    on the one thing that keeps tenants apart.
+    """
+    if admin:
+        return "SELECT set_config('app.admin', 'on', true)", ()
+    return "SELECT set_config('app.project_id', %s, true)", (str(project_id),)
+
+
+@asynccontextmanager
+async def connection(project_id=None, admin: bool = False):
+    """A transaction scoped to one project, awaited rather than blocking.
+
+    Every RLS-protected table is invisible unless project_id matches or admin is
+    set, so a query that forgets its WHERE clause returns nothing instead of
+    another tenant's rows.
+
+    This is the path the server uses. Awaiting the round trip hands the event
+    loop back, so other requests run while this one waits on Postgres.
+    """
     if not admin and project_id is None:
         raise ValueError("connection() needs a project_id, or admin=True")
+    sql, params = _scope_sql(project_id, admin)
+    pool_ = await apool()
+    async with pool_.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(sql, params)
+            # `set_config` is a SELECT, so it returns a row. Drain it before
+            # handing the connection on: psycopg refuses a second statement
+            # while a result set is still pending ("another command is already
+            # in progress"), which turned every scoped query into a 500.
+            await cur.fetchall()
+        yield conn
+
+
+@contextmanager
+def sync_connection(project_id=None, admin: bool = False):
+    """The blocking equivalent, for callers with no event loop.
+
+    The CLI, `migrate()`, and script-mode retention run here: batch work where
+    there is nothing else for the thread to be doing. Never call this from a
+    coroutine — it blocks the loop, and the async `connection()` above exists
+    precisely so you do not have to.
+    """
+    if not admin and project_id is None:
+        raise ValueError("sync_connection() needs a project_id, or admin=True")
+    sql, params = _scope_sql(project_id, admin)
     with pool().connection() as conn:
         with conn.cursor() as cur:
-            if admin:
-                cur.execute("SELECT set_config('app.admin', 'on', true)")
-            else:
-                cur.execute("SELECT set_config('app.project_id', %s, true)", (str(project_id),))
+            cur.execute(sql, params)
         yield conn
+
+
+async def fetchone(conn, sql: str, params=()):
+    """Run a query and return its first row, or None.
+
+    The sync driver allowed `conn.execute(...).fetchone()`; on an async
+    connection both halves are coroutines, and `await conn.execute(...).fetchone()`
+    binds the await to the whole expression — reading `.fetchone` off a
+    coroutine object rather than a cursor. That fails at runtime, not import,
+    so these two helpers exist to keep the mistake unwritable at call sites.
+    """
+    cur = await conn.execute(sql, params)
+    return await cur.fetchone()
+
+
+async def fetchall(conn, sql: str, params=()) -> list:
+    """Run a query and return every row. See `fetchone`."""
+    cur = await conn.execute(sql, params)
+    return await cur.fetchall()
 
 
 def applied_versions(conn) -> set:
@@ -202,8 +370,7 @@ def rewrite_legacy_cohort_fields(conn) -> None:
             updates.append((json.dumps(rewritten), project_id, cohort_id))
     if updates:
         conn.cursor().executemany(
-            "UPDATE cohorts SET fields = %s::jsonb"
-            " WHERE project_id = %s AND cohort_id = %s",
+            "UPDATE cohorts SET fields = %s::jsonb" " WHERE project_id = %s AND cohort_id = %s",
             updates,
         )
 

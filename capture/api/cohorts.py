@@ -27,25 +27,25 @@ from .deps import readable_project, session_dir
 router = APIRouter()
 
 
-def _resolve_cohort_or_404(project: projects.Project, cohort_id: str | None) -> dict:
+async def _resolve_cohort_or_404(project: projects.Project, cohort_id: str | None) -> dict:
     """A cohort by id, or the newest one when the caller did not name one."""
     if cohort_id:
-        cohort = ap.cohort(project, cohort_id)
+        cohort = await ap.cohort(project, cohort_id)
         if not cohort:
             raise ApiError(404, "no such cohort")
         return cohort
-    cohort = ap.latest_cohort(project)
+    cohort = await ap.latest_cohort(project)
     if not cohort:
         raise ApiError(404, "no cohort yet")
     return cohort
 
 
 @router.get("/api/cohorts")
-def list_cohorts(found: projects.Project = Depends(readable_project)):
+async def list_cohorts(found: projects.Project = Depends(readable_project)):
     """Every cohort in this pool, newest first — membership counts only."""
     out = []
-    for cohort in ap.cohorts(found):
-        live = ap.cohort_view(found, cohort)
+    for cohort in await ap.cohorts(found):
+        live = await ap.cohort_view(found, cohort)
         out.append(
             {
                 "id": live["id"],
@@ -60,14 +60,14 @@ def list_cohorts(found: projects.Project = Depends(readable_project)):
 
 
 @router.get("/api/cohorts/{cohort_id}")
-def get_cohort(cohort_id: str, found: projects.Project = Depends(readable_project)):
-    cohort = _resolve_cohort_or_404(found, cohort_id)
-    live = ap.cohort_view(found, cohort)
+async def get_cohort(cohort_id: str, found: projects.Project = Depends(readable_project)):
+    cohort = await _resolve_cohort_or_404(found, cohort_id)
+    live = await ap.cohort_view(found, cohort)
     # Persist refreshed status so a crashed runner still shows accurate counts.
     # Row-at-a-time, not write_cohort: DELETE+INSERT of membership races
     # mark_cohort_session, and a poll during extract can drop in-flight marks.
-    ap.persist_cohort_refresh(found, cohort, live)
-    return cohort_response(found, live)
+    await ap.persist_cohort_refresh(found, cohort, live)
+    return await cohort_response(found, live)
 
 
 @router.patch("/api/cohorts/{cohort_id}")
@@ -84,18 +84,18 @@ async def rename_cohort(
     if not isinstance(payload, dict) or not isinstance(payload.get("label"), str):
         raise ApiError(400, "label is required")
     try:
-        renamed = ap.rename_cohort(found, cohort_id, payload["label"])
+        renamed = await ap.rename_cohort(found, cohort_id, payload["label"])
     except ValueError as exc:
         raise ApiError(400, str(exc)) from exc
     if not renamed:
         raise ApiError(404, "no such cohort")
-    return cohort_response(found, ap.cohort_view(found, renamed))
+    return await cohort_response(found, await ap.cohort_view(found, renamed))
 
 
 @router.delete("/api/cohorts/{cohort_id}")
 async def delete_cohort(cohort_id: str, found: projects.Project = Depends(readable_project)):
     """Delete a cohort and its cached cuts. Per-session write-ups are kept."""
-    cohort = ap.cohort(found, cohort_id)
+    cohort = await ap.cohort(found, cohort_id)
     if not cohort:
         raise ApiError(404, "no such cohort")
 
@@ -118,30 +118,29 @@ async def delete_cohort(cohort_id: str, found: projects.Project = Depends(readab
         if cut_key[:2] == key and cut_task and not cut_task.done():
             cut_task.cancel()
 
-    if not ap.delete_cohort(found, cohort_id):
+    if not await ap.delete_cohort(found, cohort_id):
         raise ApiError(404, "no such cohort")
     return {"ok": True, "id": cohort_id}
 
 
 @router.get("/api/facets")
-def get_pool_facets(
+async def get_pool_facets(
     found: projects.Project = Depends(readable_project),
     min_duration_ms: int = Query(ap.MIN_DURATION_MS, ge=0),
 ):
     """Facet values available in the pool — same fields as the Insights cut picker."""
-    with db.connection(found.id) as conn:
-        return ap.pool_facets(conn, found, min_duration_ms=min_duration_ms)
+    async with db.connection(found.id) as conn:
+        return await ap.pool_facets(conn, found, min_duration_ms=min_duration_ms)
 
 
-def _sample_cohort(found: projects.Project, selection: ap.CohortSpec, label: str) -> dict:
-    """Sample a cohort, synchronously. Called via asyncio.to_thread.
+async def _sample_cohort(found: projects.Project, selection: ap.CohortSpec, label: str) -> dict:
+    """Sample a cohort inside one scoped transaction.
 
-    Every step here blocks: the pool checkout waits up to CAPTURE_DB_WAIT_S, and
-    the sampling query sorts over the candidate window before any of it reaches
-    Python.
+    The sampling query sorts over the candidate window in Postgres, so this is
+    one round trip whose wait belongs to the loop rather than to a thread.
     """
-    with db.connection(found.id) as conn:
-        return ap.build_cohort(conn, found, selection, label=label or None)
+    async with db.connection(found.id) as conn:
+        return await ap.build_cohort(conn, found, selection, label=label or None)
 
 
 @router.post("/api/cohorts")
@@ -197,17 +196,16 @@ async def create_cohort(
         slice_spec=slice_a,
         slice_b=slice_b if b_n > 0 else {},
     )
-    # Off the event loop: this is a pooled psycopg checkout (up to
-    # CAPTURE_DB_WAIT_S) plus a sorted scan, and running it inline stalls every
-    # other request the worker is serving.
-    cohort = await asyncio.to_thread(_sample_cohort, found, selection, chosen_label)
+    # A pooled checkout plus a sorted scan. Awaited rather than threaded: the
+    # driver is async, so the loop is free for other requests while this waits.
+    cohort = await _sample_cohort(found, selection, chosen_label)
 
     if not cohort["sessions"]:
         raise ApiError(400, "no sessions matched the sample filters")
 
-    ap.save_cohort(found, cohort)
+    await ap.save_cohort(found, cohort)
     return JSONResponse(
-        cohort_response(found, ap.cohort_view(found, cohort)),
+        await cohort_response(found, await ap.cohort_view(found, cohort)),
         status_code=201,
     )
 
@@ -220,22 +218,22 @@ async def start_cohort_analysis(
 ):
     """Start (or resume) analysis for an existing idle/paused cohort."""
     jobs.require_runtime()
-    cohort = _resolve_cohort_or_404(found, cohort_id)
+    cohort = await _resolve_cohort_or_404(found, cohort_id)
 
     key = jobs.cohort_key(found, cohort["id"])
     existing = jobs.cohort_tasks.get(key)
     if existing and not existing.done():
         return JSONResponse(
-            cohort_response(found, ap.cohort_view(found, cohort)),
+            await cohort_response(found, await ap.cohort_view(found, cohort)),
             status_code=202,
         )
 
-    ap.set_cohort_status(found, cohort, "running")
+    await ap.set_cohort_status(found, cohort, "running")
     task = asyncio.create_task(jobs.run_cohort(found, cohort["id"], force=force))
     jobs.cohort_tasks[key] = task
-    live = ap.cohort(found, cohort["id"]) or cohort
+    live = await ap.cohort(found, cohort["id"]) or cohort
     return JSONResponse(
-        cohort_response(found, ap.cohort_view(found, live)),
+        await cohort_response(found, await ap.cohort_view(found, live)),
         status_code=202,
     )
 
@@ -246,7 +244,7 @@ async def pause_cohort_analysis(
     found: projects.Project = Depends(readable_project),
 ):
     """Pause an in-flight cohort analysis; completed session write-ups are kept."""
-    cohort = _resolve_cohort_or_404(found, cohort_id)
+    cohort = await _resolve_cohort_or_404(found, cohort_id)
 
     key = jobs.cohort_key(found, cohort["id"])
     task = jobs.cohort_tasks.get(key)
@@ -260,10 +258,10 @@ async def pause_cohort_analysis(
         batch_name = (cohort.get("batch") or {}).get("name")
         if batch_name:
             await ap.cancel_batch(batch_name)
-        ap.mark_paused(found, cohort)
+        await ap.mark_paused(found, cohort)
 
-    live = ap.cohort(found, cohort_id) or cohort
-    return cohort_response(found, ap.cohort_view(found, live))
+    live = await ap.cohort(found, cohort_id) or cohort
+    return await cohort_response(found, await ap.cohort_view(found, live))
 
 
 @router.post("/api/cohorts/{cohort_id}/sessions/{session_id}/retry")
@@ -274,7 +272,7 @@ async def retry_cohort_session(
 ):
     """Re-run one cohort row after it failed, without re-sampling the cohort."""
     jobs.require_runtime()
-    cohort = _resolve_cohort_or_404(found, cohort_id)
+    cohort = await _resolve_cohort_or_404(found, cohort_id)
 
     entry = next(
         (e for e in cohort.get("sessions") or [] if e.get("session_id") == session_id),
@@ -287,9 +285,9 @@ async def retry_cohort_session(
     # Drop the recorded failure first, so a poll landing mid-retry does not
     # re-read the old error back over the running status. One row, not the
     # whole membership: write_cohort would DELETE+INSERT everyone else.
-    ap.mark_cohort_session(found, cohort, entry, "queued")
-    ap.clear_job(found, session_id)
-    ap.set_cohort_status(found, cohort, "running")
+    await ap.mark_cohort_session(found, cohort, entry, "queued")
+    await ap.clear_job(found, session_id)
+    await ap.set_cohort_status(found, cohort, "running")
 
     key = jobs.cohort_key(found, cohort["id"])
     existing = jobs.cohort_tasks.get(key)
@@ -300,9 +298,9 @@ async def retry_cohort_session(
         task = asyncio.create_task(_retry_cohort_session_job(found, cohort["id"], session_id))
         jobs.cohort_tasks[key] = task
 
-    live = ap.cohort(found, cohort["id"]) or cohort
+    live = await ap.cohort(found, cohort["id"]) or cohort
     return JSONResponse(
-        cohort_response(found, ap.cohort_view(found, live)),
+        await cohort_response(found, await ap.cohort_view(found, live)),
         status_code=202,
     )
 
@@ -312,29 +310,29 @@ async def _retry_cohort_session_job(
 ) -> None:
     key = jobs.cohort_key(found, cohort_id)
     try:
-        cohort = ap.cohort(found, cohort_id) or {}
+        cohort = await ap.cohort(found, cohort_id) or {}
         row = next(
             (e for e in cohort.get("sessions") or [] if e.get("session_id") == session_id),
             None,
         )
         if row is None:
             return
-        ap.mark_cohort_session(found, cohort, row, "running")
+        await ap.mark_cohort_session(found, cohort, row, "running")
         try:
             # Not forced: a failed row has nothing cached to bust, and if it
             # succeeded meanwhile the retry should settle on that result.
             await jobs.await_session(found, session_id)
-            ap.mark_cohort_session(found, cohort, row, "done", analysis=ap.ANALYSIS_FILE)
+            await ap.mark_cohort_session(found, cohort, row, "done", analysis=ap.ANALYSIS_FILE)
         except Exception as exc:
-            ap.mark_cohort_session(
+            await ap.mark_cohort_session(
                 found,
                 cohort,
                 row,
                 "error",
                 error=getattr(exc, "message", None) or str(exc) or "analysis failed",
             )
-        live = ap.cohort_view(found, cohort)
-        ap.persist_cohort_refresh(found, cohort, live)
+        live = await ap.cohort_view(found, cohort)
+        await ap.persist_cohort_refresh(found, cohort, live)
     finally:
         jobs.cohort_tasks.pop(key, None)
 
@@ -356,7 +354,7 @@ async def _run_cut_job(
     task_key = _cut_task_key(project, cohort_id, key)
     try:
         cut = await ap.build_cut(rows, slice_spec)
-        ap.save_cut(project, cohort_id, key, cut)
+        await ap.save_cut(project, cohort_id, key, cut)
         _cut_errors.pop(task_key, None)
     except Exception as exc:
         _cut_errors[task_key] = getattr(exc, "message", None) or str(exc) or "cut analysis failed"
@@ -388,7 +386,7 @@ async def get_cut(
     escape hatch for a reworded prompt or a new model, and the only way to
     spend a second call on a cut.
     """
-    cohort = _resolve_cohort_or_404(found, cohort_id)
+    cohort = await _resolve_cohort_or_404(found, cohort_id)
     cohort_id = cohort["id"]
 
     slice_spec = (
@@ -417,7 +415,7 @@ async def get_cut(
             {"status": "running", "cut": key, "cohort_id": cohort_id}, status_code=202
         )
 
-    cached = ap.cut(found, cohort_id, key)
+    cached = await ap.cut(found, cohort_id, key)
     if cached and not refresh:
         return {**cached, "cohort_id": cohort_id, "cached": True}
 
@@ -436,15 +434,15 @@ async def get_cut(
 
     jobs.require_runtime()
     _cut_errors.pop(task_key, None)
-    live = ap.cohort_view(found, cohort)
-    rows = _cut_rows(found, live)
+    live = await ap.cohort_view(found, cohort)
+    rows = await _cut_rows(found, live)
     if not rows:
         raise ApiError(400, "no analyzed sessions in this cohort yet")
 
     # Only now, with the call certain to be queued: a refresh that fails its
     # preconditions must leave the old answer standing rather than delete it.
     if refresh:
-        ap.clear_cut(found, cohort_id, key)
+        await ap.clear_cut(found, cohort_id, key)
 
     task = asyncio.create_task(_run_cut_job(found, cohort_id, rows, slice_spec, key))
     _cut_tasks[task_key] = task
@@ -478,7 +476,7 @@ async def post_cohort_chat(
     is a fresh call. Text-only, so this needs the model but not the headless
     reconstruction runtime a per-session analysis does.
     """
-    cohort = _resolve_cohort_or_404(found, cohort_id)
+    cohort = await _resolve_cohort_or_404(found, cohort_id)
     cohort_id = cohort["id"]
 
     if not ap.enabled():
@@ -510,8 +508,8 @@ async def post_cohort_chat(
         or None
     )
 
-    live = ap.cohort_view(found, cohort)
-    rows = _cut_rows(found, live)
+    live = await ap.cohort_view(found, cohort)
+    rows = await _cut_rows(found, live)
     if not rows:
         raise ApiError(400, "no analyzed sessions in this cohort yet")
 
@@ -560,9 +558,9 @@ async def post_cohort_chat(
     )
 
 
-def stamp_cohort_attribution(found: projects.Project, cohort: dict) -> dict:
+async def stamp_cohort_attribution(found: projects.Project, cohort: dict) -> dict:
     """Attach attribution, device, outcome and page so the UI can slice client-side."""
-    facts = _session_facts(found, cohort)
+    facts = await _session_facts(found, cohort)
     sessions = []
     for entry in cohort.get("sessions") or []:
         row = dict(entry)
@@ -582,23 +580,23 @@ def stamp_cohort_attribution(found: projects.Project, cohort: dict) -> dict:
     return {**cohort, "sessions": sessions}
 
 
-def cohort_response(found: projects.Project, cohort: dict) -> dict:
-    return stamp_cohort_attribution(found, ap.with_insights(found, cohort))
+async def cohort_response(found: projects.Project, cohort: dict) -> dict:
+    return await stamp_cohort_attribution(found, await ap.with_insights(found, cohort))
 
 
-def _session_facts(found: projects.Project, cohort: dict) -> dict:
+async def _session_facts(found: projects.Project, cohort: dict) -> dict:
     """session_id → classified row from materialised columns, this cohort only."""
     ids = [e.get("session_id") for e in cohort.get("sessions") or [] if e.get("session_id")]
     if not ids:
         return {}
-    with db.connection(found.id) as conn:
-        return ap.classified_rows(conn, found, ids)
+    async with db.connection(found.id) as conn:
+        return await ap.classified_rows(conn, found, ids)
 
 
-def _cut_rows(found: projects.Project, cohort: dict) -> list:
+async def _cut_rows(found: projects.Project, cohort: dict) -> list:
     """Analyzed sessions in this cohort, with the write-up a cut reasons over."""
-    facts = _session_facts(found, cohort)
-    analyses = ap.session_analyses(
+    facts = await _session_facts(found, cohort)
+    analyses = await ap.session_analyses(
         found, [e["session_id"] for e in cohort.get("sessions") or [] if e.get("session_id")]
     )
     rows = []

@@ -30,9 +30,7 @@ class TestGroupsFieldsFromLegacy(unittest.TestCase):
         self.assertEqual(out["slice_b"]["outcome"], ["checkout", "rest"])
         self.assertEqual(out["slice"]["device"], ["mobile"])
         self.assertNotIn("purchased_n", out)
-        self.assertEqual(
-            out["selection"], "Chosen as the latest 2 purchased + 3 non-purchase"
-        )
+        self.assertEqual(out["selection"], "Chosen as the latest 2 purchased + 3 non-purchase")
 
     def test_any_becomes_group_a(self):
         out = db.groups_fields_from_legacy({"any_n": 7, "slice": {"page": "/p"}})
@@ -49,7 +47,7 @@ class TestGroupsFieldsFromLegacy(unittest.TestCase):
 
 
 class TestCohortGroupsBackfill(pgfixture.CohortStoreMixin, unittest.TestCase):
-    def test_rewrites_stored_fields_and_session_tags(self):
+    async def test_rewrites_stored_fields_and_session_tags(self):
         with psycopg.connect(self._pg_admin) as conn:
             conn.execute(
                 """
@@ -93,7 +91,7 @@ class TestCohortGroupsBackfill(pgfixture.CohortStoreMixin, unittest.TestCase):
                 for row in conn.execute(
                     "SELECT fields->>'filter' FROM cohort_sessions"
                     " WHERE cohort_id = 'cohort-legacy' ORDER BY position"
-                ).fetchall()
+                )
             ]
 
         self.assertEqual(fields["a_n"], 2)
@@ -102,7 +100,7 @@ class TestCohortGroupsBackfill(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.assertNotIn("purchased_n", fields)
         self.assertEqual(tags, ["a", "b"])
 
-    def test_rewrite_is_idempotent(self):
+    async def test_rewrite_is_idempotent(self):
         with psycopg.connect(self._pg_admin) as conn:
             conn.execute(
                 """

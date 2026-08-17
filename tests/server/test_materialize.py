@@ -5,7 +5,6 @@ pin the two properties that makes safe: results survive, and nothing the shim
 fetched is left behind.
 """
 
-import asyncio
 import json
 import sys
 import tempfile
@@ -25,7 +24,7 @@ class Project:
         self.storage_prefix = storage_prefix
 
 
-class MaterializeCase(unittest.TestCase):
+class MaterializeCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         from capture import jobs
 
@@ -52,20 +51,20 @@ class MaterializeCase(unittest.TestCase):
     def put_remote(self, name: str, body: bytes):
         self.fake.objects[f"sessions/cap_a/{self.session}/{name}"] = body
 
-    def run_with_staging(self, body):
+    async def run_with_staging(self, body):
         async def main():
             async with self.jobs.chunks_on_disk(self.project, [self.session]):
                 body()
 
-        asyncio.run(main())
+        await main()
 
 
 class TestStaging(MaterializeCase):
-    def test_chunks_are_present_inside_the_block(self):
+    async def test_chunks_are_present_inside_the_block(self):
         name = chunk_name(1000)
         self.put_remote(name, b'{"events":[]}')
         seen = {}
-        self.run_with_staging(
+        await self.run_with_staging(
             lambda: seen.update(
                 exists=(self.dir / name).exists(),
                 body=(self.dir / name).read_bytes(),
@@ -74,13 +73,13 @@ class TestStaging(MaterializeCase):
         self.assertTrue(seen["exists"])
         self.assertEqual(seen["body"], b'{"events":[]}')
 
-    def test_fetched_chunks_are_removed_afterwards(self):
+    async def test_fetched_chunks_are_removed_afterwards(self):
         name = chunk_name(1000)
         self.put_remote(name, b"x")
-        self.run_with_staging(lambda: None)
+        await self.run_with_staging(lambda: None)
         self.assertFalse((self.dir / name).exists())
 
-    def test_results_written_during_the_block_survive(self):
+    async def test_results_written_during_the_block_survive(self):
         """The reason chunks stage into the real directory rather than a temp
         one: analyze.py writes its frame cache here and it must outlive the run."""
         name = chunk_name(1000)
@@ -90,12 +89,12 @@ class TestStaging(MaterializeCase):
             (self.dir / ".analysis").mkdir(exist_ok=True)
             (self.dir / ".analysis" / "digest.json").write_text('{"kept": true}')
 
-        self.run_with_staging(write_result)
+        await self.run_with_staging(write_result)
         self.assertEqual(
             json.loads((self.dir / ".analysis" / "digest.json").read_text())["kept"], True
         )
 
-    def test_a_chunk_already_on_disk_is_not_deleted(self):
+    async def test_a_chunk_already_on_disk_is_not_deleted(self):
         """Only what the shim fetched is cleaned up, or staging would destroy
         the local copy of a session that has not been migrated yet."""
         from capture.fsutil import atomic_write_bytes
@@ -104,11 +103,11 @@ class TestStaging(MaterializeCase):
         atomic_write_bytes(self.dir / local, b"local-copy")
         self.put_remote(local, b"remote-copy")
 
-        self.run_with_staging(lambda: None)
+        await self.run_with_staging(lambda: None)
         self.assertTrue((self.dir / local).exists())
         self.assertEqual((self.dir / local).read_bytes(), b"local-copy")
 
-    def test_staging_covers_every_session_in_a_cohort(self):
+    async def test_staging_covers_every_session_in_a_cohort(self):
         for sid in ("s1", "s2", "s3"):
             self.fake.objects[f"sessions/cap_a/{sid}/{chunk_name(1000)}"] = b"x"
 
@@ -119,12 +118,12 @@ class TestStaging(MaterializeCase):
                 for sid in ("s1", "s2", "s3"):
                     present[sid] = (self.project.pool / sid / chunk_name(1000)).exists()
 
-        asyncio.run(main())
+        await main()
         self.assertEqual(present, {"s1": True, "s2": True, "s3": True})
         for sid in ("s1", "s2", "s3"):
             self.assertFalse((self.project.pool / sid / chunk_name(1000)).exists())
 
-    def test_cleanup_happens_even_when_the_body_raises(self):
+    async def test_cleanup_happens_even_when_the_body_raises(self):
         name = chunk_name(1000)
         self.put_remote(name, b"x")
 
@@ -133,23 +132,23 @@ class TestStaging(MaterializeCase):
                 raise RuntimeError("analysis blew up")
 
         with self.assertRaises(RuntimeError):
-            asyncio.run(main())
+            await main()
         self.assertFalse((self.dir / name).exists())
 
-    def test_it_is_a_no_op_without_a_bucket(self):
+    async def test_it_is_a_no_op_without_a_bucket(self):
         storage.BUCKET = ""
         from capture.fsutil import atomic_write_bytes
 
         name = chunk_name(1000)
         atomic_write_bytes(self.dir / name, b"local")
-        self.run_with_staging(lambda: None)
+        await self.run_with_staging(lambda: None)
         self.assertTrue((self.dir / name).exists())
 
-    def test_a_persisted_digest_is_present_inside_the_block(self):
+    async def test_a_persisted_digest_is_present_inside_the_block(self):
         self.put_remote(".analysis/digest.json", b'{"frames":[]}')
         self.put_remote(".analysis/f0000.jpg", b"jpeg")
         seen = {}
-        self.run_with_staging(
+        await self.run_with_staging(
             lambda: seen.update(
                 digest=(self.dir / ".analysis" / "digest.json").read_bytes(),
                 frame=(self.dir / ".analysis" / "f0000.jpg").read_bytes(),
@@ -158,7 +157,7 @@ class TestStaging(MaterializeCase):
         self.assertEqual(seen["digest"], b'{"frames":[]}')
         self.assertEqual(seen["frame"], b"jpeg")
 
-    def test_resume_staging_skips_chunks_and_still_fetches_the_digest(self):
+    async def test_resume_staging_skips_chunks_and_still_fetches_the_digest(self):
         """Batch resume reads digest.json. Fetching every rrweb chunk first is
         why a 100-session cohort blocked boot on a full S3 download."""
         name = chunk_name(1000)
@@ -171,29 +170,29 @@ class TestStaging(MaterializeCase):
                 seen["chunk"] = (self.dir / name).exists()
                 seen["digest"] = (self.dir / ".analysis" / "digest.json").read_bytes()
 
-        asyncio.run(main())
+        await main()
         self.assertFalse(seen["chunk"])
         self.assertEqual(seen["digest"], b'{"frames":[]}')
         self.assertFalse((self.dir / ".analysis" / "digest.json").exists())
 
-    def test_resume_staging_does_not_reupload_the_digest(self):
+    async def test_resume_staging_does_not_reupload_the_digest(self):
         self.put_remote(".analysis/digest.json", b'{"frames":[]}')
 
         async def main():
             async with self.jobs.chunks_on_disk(self.project, [self.session], analysis_only=True):
                 (self.dir / ".analysis" / "digest.json").write_bytes(b'{"frames":[1]}')
 
-        asyncio.run(main())
+        await main()
         self.assertEqual(
             self.fake.objects["sessions/cap_a/s1/.analysis/digest.json"], b'{"frames":[]}'
         )
 
-    def test_fetched_digest_is_removed_afterwards(self):
+    async def test_fetched_digest_is_removed_afterwards(self):
         self.put_remote(".analysis/digest.json", b"{}")
-        self.run_with_staging(lambda: None)
+        await self.run_with_staging(lambda: None)
         self.assertFalse((self.dir / ".analysis" / "digest.json").exists())
 
-    def test_a_digest_written_during_the_block_is_uploaded(self):
+    async def test_a_digest_written_during_the_block_is_uploaded(self):
         name = chunk_name(1000)
         self.put_remote(name, b"x")
 
@@ -203,14 +202,14 @@ class TestStaging(MaterializeCase):
             (analysis / "digest.json").write_text('{"kept": true}')
             (analysis / "f0000.jpg").write_bytes(b"jpeg")
 
-        self.run_with_staging(write_digest)
+        await self.run_with_staging(write_digest)
         self.assertEqual(
             self.fake.objects["sessions/cap_a/s1/.analysis/digest.json"],
             b'{"kept": true}',
         )
         self.assertEqual(self.fake.objects["sessions/cap_a/s1/.analysis/f0000.jpg"], b"jpeg")
 
-    def test_a_failed_run_does_not_upload_a_partial_digest(self):
+    async def test_a_failed_run_does_not_upload_a_partial_digest(self):
         name = chunk_name(1000)
         self.put_remote(name, b"x")
 
@@ -222,11 +221,11 @@ class TestStaging(MaterializeCase):
                 raise RuntimeError("analysis blew up")
 
         with self.assertRaises(RuntimeError):
-            asyncio.run(main())
+            await main()
         self.assertNotIn("sessions/cap_a/s1/.analysis/digest.json", self.fake.objects)
 
 
-class TestCohortSessionIds(unittest.TestCase):
+class TestCohortSessionIds(unittest.IsolatedAsyncioTestCase):
     def test_it_reads_ids_and_skips_malformed_rows(self):
         from capture import jobs
 
@@ -239,8 +238,8 @@ class TestCohortSessionIds(unittest.TestCase):
         self.assertEqual(jobs.cohort_session_ids({}), [])
 
 
-class TestResumeCohortStaging(unittest.TestCase):
-    def test_resume_asks_for_analysis_files_only(self):
+class TestResumeCohortStaging(unittest.IsolatedAsyncioTestCase):
+    async def test_resume_asks_for_analysis_files_only(self):
         from contextlib import asynccontextmanager
         from unittest.mock import AsyncMock, patch
 
@@ -262,12 +261,12 @@ class TestResumeCohortStaging(unittest.TestCase):
             patch.object(jobs.ap, "cohort", return_value=cohort),
             patch.object(jobs.ap, "resume_cohort", new_callable=AsyncMock),
         ):
-            asyncio.run(jobs.resume_cohort(project, "c1"))
+            await jobs.resume_cohort(project, "c1")
 
         self.assertEqual(seen["analysis_only"], True)
         self.assertEqual(seen["ids"], ["s1"])
 
-    def _run_staging_flag(self, cohort, *, force=False):
+    async def _run_staging_flag(self, cohort, *, force=False):
         from contextlib import asynccontextmanager
         from unittest.mock import AsyncMock, patch
 
@@ -287,32 +286,32 @@ class TestResumeCohortStaging(unittest.TestCase):
             patch.object(jobs.ap, "cohort", return_value=cohort),
             patch.object(jobs.ap, "run_cohort", new_callable=AsyncMock),
         ):
-            asyncio.run(jobs.run_cohort(project, "c1", force=force))
+            await jobs.run_cohort(project, "c1", force=force)
         return seen.get("analysis_only")
 
-    def test_run_skips_chunks_when_collecting_an_existing_batch(self):
+    async def test_run_skips_chunks_when_collecting_an_existing_batch(self):
         """Start on a resumable cohort must not fetch rrweb chunks first."""
         cohort = {
             "id": "c1",
             "sessions": [{"session_id": "s1"}],
             "batch": {"name": "batches/x"},
         }
-        self.assertTrue(self._run_staging_flag(cohort))
+        self.assertTrue(await self._run_staging_flag(cohort))
 
-    def test_run_stages_chunks_for_a_fresh_extract(self):
+    async def test_run_stages_chunks_for_a_fresh_extract(self):
         cohort = {"id": "c1", "sessions": [{"session_id": "s1"}]}
-        self.assertFalse(self._run_staging_flag(cohort))
+        self.assertFalse(await self._run_staging_flag(cohort))
 
-    def test_force_run_stages_chunks_even_with_a_batch(self):
+    async def test_force_run_stages_chunks_even_with_a_batch(self):
         cohort = {
             "id": "c1",
             "sessions": [{"session_id": "s1"}],
             "batch": {"name": "batches/x"},
         }
-        self.assertFalse(self._run_staging_flag(cohort, force=True))
+        self.assertFalse(await self._run_staging_flag(cohort, force=True))
 
 
-class TestLoadSessionDigest(unittest.TestCase):
+class TestLoadSessionDigest(unittest.IsolatedAsyncioTestCase):
     def test_frame_paths_are_rewritten_to_this_directory(self):
         """A digest restored from S3 still names files on the box that wrote it."""
         from capture.analyze import session

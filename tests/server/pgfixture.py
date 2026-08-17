@@ -155,8 +155,7 @@ def fresh_database() -> tuple:
         conn.execute(f'GRANT CONNECT ON DATABASE "{name}" TO {APP_ROLE}')
         conn.execute(f"GRANT USAGE ON SCHEMA public TO {APP_ROLE}")
         conn.execute(
-            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA"
-            f" public TO {APP_ROLE}"
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA" f" public TO {APP_ROLE}"
         )
         conn.execute(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {APP_ROLE}")
 
@@ -269,6 +268,10 @@ class CohortStoreMixin:
     @classmethod
     def tearDownClass(cls):
         cls._pg_db.close_pool()
+        # The async pool binds to whichever loop opened it. Each test method
+        # runs on its own loop, so dropping the reference here stops a later
+        # class from finding a pool attached to a loop that has since closed.
+        cls._pg_db.forget_apool()
         if cls._pg_saved is None:
             os.environ.pop("CAPTURE_DATABASE_URL", None)
         else:

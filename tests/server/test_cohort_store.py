@@ -6,10 +6,10 @@ concurrent writers that do not drop each other, and reads that never see a torn
 cohort.
 """
 
+import asyncio
 import shutil
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -33,7 +33,7 @@ def cohort(cohort_id="cohort-1", n=3, **extra):
     }
 
 
-class StoreCase(pgfixture.CohortStoreMixin, unittest.TestCase):
+class StoreCase(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
@@ -48,12 +48,12 @@ class StoreCase(pgfixture.CohortStoreMixin, unittest.TestCase):
 
 
 class TestRoundTrip(StoreCase):
-    def test_a_cohort_survives_a_write_read_cycle_intact(self):
-        written = storage.write_cohort(
+    async def test_a_cohort_survives_a_write_read_cycle_intact(self):
+        written = await storage.write_cohort(
             self.project_id,
             cohort(a_n=5, b_n=5, label="Sample", slice={"outcome": "purchased"}),
         )
-        got = storage.read_cohort(self.project_id, "cohort-1")
+        got = await storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual(got["label"], "Sample")
         self.assertEqual(got["a_n"], 5)
         # Sampling fields ride in the fields blob; they must survive the trip.
@@ -61,89 +61,89 @@ class TestRoundTrip(StoreCase):
         self.assertEqual([s["session_id"] for s in got["sessions"]], ["s0", "s1", "s2"])
         self.assertEqual(written["updated_at"], got["updated_at"])
 
-    def test_membership_order_is_preserved(self):
+    async def test_membership_order_is_preserved(self):
         ids = [f"s{i}" for i in range(30)]
-        storage.write_cohort(
+        await storage.write_cohort(
             self.project_id,
             {**cohort(n=0), "sessions": [{"session_id": i} for i in ids]},
         )
-        got = storage.read_cohort(self.project_id, "cohort-1")
+        got = await storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual([s["session_id"] for s in got["sessions"]], ids)
 
-    def test_per_session_extras_are_not_dropped(self):
-        storage.write_cohort(
+    async def test_per_session_extras_are_not_dropped(self):
+        await storage.write_cohort(
             self.project_id,
             {
                 **cohort(n=0),
                 "sessions": [{"session_id": "s0", "filter": "a", "qa_status": "ok"}],
             },
         )
-        row = storage.read_cohort(self.project_id, "cohort-1")["sessions"][0]
+        row = (await storage.read_cohort(self.project_id, "cohort-1"))["sessions"][0]
         self.assertEqual(row["filter"], "a")
         self.assertEqual(row["qa_status"], "ok")
 
-    def test_absent_batch_is_absent_rather_than_null(self):
+    async def test_absent_batch_is_absent_rather_than_null(self):
         """Callers test `cohort.get("batch")` to mean "a job is in flight"."""
-        storage.write_cohort(self.project_id, cohort())
-        self.assertNotIn("batch", storage.read_cohort(self.project_id, "cohort-1"))
+        await storage.write_cohort(self.project_id, cohort())
+        self.assertNotIn("batch", await storage.read_cohort(self.project_id, "cohort-1"))
 
-    def test_batch_round_trips_and_clears(self):
-        storage.write_cohort(
+    async def test_batch_round_trips_and_clears(self):
+        await storage.write_cohort(
             self.project_id, cohort(batch={"name": "batches/J1", "session_ids": ["s0"]})
         )
         self.assertEqual(
-            storage.read_cohort(self.project_id, "cohort-1")["batch"]["name"], "batches/J1"
+            (await storage.read_cohort(self.project_id, "cohort-1"))["batch"]["name"], "batches/J1"
         )
-        stored = storage.read_cohort(self.project_id, "cohort-1")
+        stored = await storage.read_cohort(self.project_id, "cohort-1")
         stored.pop("batch")
-        storage.write_cohort(self.project_id, stored)
-        self.assertNotIn("batch", storage.read_cohort(self.project_id, "cohort-1"))
+        await storage.write_cohort(self.project_id, stored)
+        self.assertNotIn("batch", await storage.read_cohort(self.project_id, "cohort-1"))
 
-    def test_progress_never_reaches_storage(self):
+    async def test_progress_never_reaches_storage(self):
         """`progress` is a tally of `sessions`; a second copy on disk is the
         one any other writer updates out from under."""
-        storage.write_cohort(self.project_id, cohort(progress={"total": 3, "done": 3}))
-        self.assertNotIn("progress", storage.read_cohort(self.project_id, "cohort-1"))
+        await storage.write_cohort(self.project_id, cohort(progress={"total": 3, "done": 3}))
+        self.assertNotIn("progress", await storage.read_cohort(self.project_id, "cohort-1"))
 
-    def test_unknown_cohort_reads_as_none(self):
-        self.assertIsNone(storage.read_cohort(self.project_id, "cohort-nope"))
+    async def test_unknown_cohort_reads_as_none(self):
+        self.assertIsNone(await storage.read_cohort(self.project_id, "cohort-nope"))
 
-    def test_a_bad_cohort_id_is_refused_not_looked_up(self):
-        self.assertIsNone(storage.read_cohort(self.project_id, "../../etc/passwd"))
-        self.assertEqual(storage.read_cuts(self.project_id, "../../etc/passwd"), {})
+    async def test_a_bad_cohort_id_is_refused_not_looked_up(self):
+        self.assertIsNone(await storage.read_cohort(self.project_id, "../../etc/passwd"))
+        self.assertEqual(await storage.read_cuts(self.project_id, "../../etc/passwd"), {})
 
-    def test_listing_is_newest_first(self):
-        storage.write_cohort(self.project_id, cohort("cohort-old", created_at=1))
-        storage.write_cohort(self.project_id, cohort("cohort-new", created_at=2))
+    async def test_listing_is_newest_first(self):
+        await storage.write_cohort(self.project_id, cohort("cohort-old", created_at=1))
+        await storage.write_cohort(self.project_id, cohort("cohort-new", created_at=2))
         self.assertEqual(
-            [c["id"] for c in storage.list_cohorts(self.project_id)],
+            [c["id"] for c in await storage.list_cohorts(self.project_id)],
             ["cohort-new", "cohort-old"],
         )
 
-    def test_delete_removes_membership_and_cuts(self):
-        storage.write_cohort(self.project_id, cohort())
-        storage.write_cut(self.project_id, "cohort-1", "k", {"n": 1})
-        self.assertTrue(cohorts.delete_cohort(self.project_id, "cohort-1"))
-        self.assertIsNone(storage.read_cohort(self.project_id, "cohort-1"))
-        self.assertEqual(storage.read_cuts(self.project_id, "cohort-1"), {})
+    async def test_delete_removes_membership_and_cuts(self):
+        await storage.write_cohort(self.project_id, cohort())
+        await storage.write_cut(self.project_id, "cohort-1", "k", {"n": 1})
+        self.assertTrue(await cohorts.delete_cohort(self.project_id, "cohort-1"))
+        self.assertIsNone(await storage.read_cohort(self.project_id, "cohort-1"))
+        self.assertEqual(await storage.read_cuts(self.project_id, "cohort-1"), {})
         # Second delete reports nothing was there, so the API can 404.
-        self.assertFalse(cohorts.delete_cohort(self.project_id, "cohort-1"))
+        self.assertFalse(await cohorts.delete_cohort(self.project_id, "cohort-1"))
 
-    def test_created_at_is_not_clobbered_by_a_later_write(self):
-        storage.write_cohort(self.project_id, cohort(created_at=1700000000000))
-        stored = storage.read_cohort(self.project_id, "cohort-1")
+    async def test_created_at_is_not_clobbered_by_a_later_write(self):
+        await storage.write_cohort(self.project_id, cohort(created_at=1700000000000))
+        stored = await storage.read_cohort(self.project_id, "cohort-1")
         stored.pop("created_at")
-        storage.write_cohort(self.project_id, {**stored, "status": "running"})
+        await storage.write_cohort(self.project_id, {**stored, "status": "running"})
         self.assertEqual(
-            storage.read_cohort(self.project_id, "cohort-1")["created_at"], 1700000000000
+            (await storage.read_cohort(self.project_id, "cohort-1"))["created_at"], 1700000000000
         )
 
 
 class TestRowLevelUpdates(StoreCase):
     """Status, batch and label are columns. Updating them must not replace membership."""
 
-    def seed(self, **extra):
-        storage.write_cohort(
+    async def seed(self, **extra):
+        await storage.write_cohort(
             self.project_id,
             cohort(
                 sessions=[
@@ -153,57 +153,59 @@ class TestRowLevelUpdates(StoreCase):
                 **extra,
             ),
         )
-        return storage.read_cohort(self.project_id, "cohort-1")
+        return await storage.read_cohort(self.project_id, "cohort-1")
 
-    def test_set_cohort_status_does_not_rewrite_membership(self):
-        stored = self.seed()
-        storage.mark_cohort_session(
+    async def test_set_cohort_status_does_not_rewrite_membership(self):
+        stored = await self.seed()
+        await storage.mark_cohort_session(
             self.project_id, stored, stored["sessions"][0], "done", analysis="analysis.json"
         )
-        storage.set_cohort_status(self.project_id, stored, "running")
-        got = storage.read_cohort(self.project_id, "cohort-1")
+        await storage.set_cohort_status(self.project_id, stored, "running")
+        got = await storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual(got["status"], "running")
         self.assertEqual(got["sessions"][0]["status"], "done")
         self.assertEqual(got["sessions"][0]["filter"], "a")
         self.assertEqual(got["sessions"][1]["status"], "queued")
 
-    def test_set_cohort_status_keeps_the_callers_dict_in_step(self):
-        stored = self.seed()
-        storage.set_cohort_status(self.project_id, stored, "running", batch={"name": "batches/J1"})
+    async def test_set_cohort_status_keeps_the_callers_dict_in_step(self):
+        stored = await self.seed()
+        await storage.set_cohort_status(
+            self.project_id, stored, "running", batch={"name": "batches/J1"}
+        )
         self.assertEqual(stored["status"], "running")
         self.assertEqual(stored["batch"]["name"], "batches/J1")
-        storage.set_cohort_status(self.project_id, stored, "paused", clear_batch=True)
+        await storage.set_cohort_status(self.project_id, stored, "paused", clear_batch=True)
         self.assertEqual(stored["status"], "paused")
         self.assertNotIn("batch", stored)
-        self.assertNotIn("batch", storage.read_cohort(self.project_id, "cohort-1"))
+        self.assertNotIn("batch", await storage.read_cohort(self.project_id, "cohort-1"))
 
-    def test_status_only_leaves_the_batch_handle_in_place(self):
-        stored = self.seed(batch={"name": "batches/J1"})
-        storage.set_cohort_status(self.project_id, stored, "running")
+    async def test_status_only_leaves_the_batch_handle_in_place(self):
+        stored = await self.seed(batch={"name": "batches/J1"})
+        await storage.set_cohort_status(self.project_id, stored, "running")
         self.assertEqual(
-            storage.read_cohort(self.project_id, "cohort-1")["batch"]["name"], "batches/J1"
+            (await storage.read_cohort(self.project_id, "cohort-1"))["batch"]["name"], "batches/J1"
         )
 
-    def test_rename_does_not_clobber_in_flight_marks(self):
-        stored = self.seed()
-        storage.mark_cohort_session(self.project_id, stored, stored["sessions"][1], "running")
+    async def test_rename_does_not_clobber_in_flight_marks(self):
+        stored = await self.seed()
+        await storage.mark_cohort_session(self.project_id, stored, stored["sessions"][1], "running")
         self.assertEqual(
-            cohorts.rename_cohort(self.project_id, "cohort-1", "Spring")["label"], "Spring"
+            (await cohorts.rename_cohort(self.project_id, "cohort-1", "Spring"))["label"], "Spring"
         )
-        got = storage.read_cohort(self.project_id, "cohort-1")
+        got = await storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual(got["label"], "Spring")
         self.assertEqual(got["sessions"][1]["status"], "running")
         self.assertEqual(got["sessions"][0]["filter"], "a")
 
 
 class TestBulkReads(StoreCase):
-    def test_analyses_and_jobs_are_read_in_one_query_each(self):
+    async def test_analyses_and_jobs_are_read_in_one_query_each(self):
         for i in range(4):
-            storage.write_analysis(self.project_id, f"s{i}", {"text": f"up-{i}"})
-        storage.write_job(self.project_id, "s1", "running")
-        storage.write_job(self.project_id, "s2", "error", error="boom")
-        analyses = storage.read_analyses(self.project_id, ["s0", "s1", "s2", "s3", "missing"])
-        jobs = storage.read_jobs(self.project_id, ["s0", "s1", "s2", "missing"])
+            await storage.write_analysis(self.project_id, f"s{i}", {"text": f"up-{i}"})
+        await storage.write_job(self.project_id, "s1", "running")
+        await storage.write_job(self.project_id, "s2", "error", error="boom")
+        analyses = await storage.read_analyses(self.project_id, ["s0", "s1", "s2", "s3", "missing"])
+        jobs = await storage.read_jobs(self.project_id, ["s0", "s1", "s2", "missing"])
         self.assertEqual(
             {sid: a["text"] for sid, a in analyses.items()},
             {"s0": "up-0", "s1": "up-1", "s2": "up-2", "s3": "up-3"},
@@ -213,24 +215,24 @@ class TestBulkReads(StoreCase):
         self.assertEqual(jobs["s1"]["status"], "running")
         self.assertEqual(jobs["s2"]["error"], "boom")
 
-    def test_empty_id_list_is_a_no_op(self):
-        self.assertEqual(storage.read_analyses(self.project_id, []), {})
-        self.assertEqual(storage.read_jobs(self.project_id, []), {})
+    async def test_empty_id_list_is_a_no_op(self):
+        self.assertEqual(await storage.read_analyses(self.project_id, []), {})
+        self.assertEqual(await storage.read_jobs(self.project_id, []), {})
 
-    def test_enrich_does_not_round_trip_per_session(self):
-        storage.write_cohort(self.project_id, cohort(n=5))
+    async def test_enrich_does_not_round_trip_per_session(self):
+        await storage.write_cohort(self.project_id, cohort(n=5))
         for i in range(5):
-            storage.write_analysis(self.project_id, f"s{i}", {"text": "write-up"})
+            await storage.write_analysis(self.project_id, f"s{i}", {"text": "write-up"})
         with (
             patch.object(
                 storage, "read_analysis", side_effect=AssertionError("per-session analysis")
             ),
             patch.object(storage, "read_job", side_effect=AssertionError("per-session job")),
         ):
-            live = cohort_state.enrich_cohort_status(
-                self.project_id, storage.read_cohort(self.project_id, "cohort-1")
+            live = await cohort_state.enrich_cohort_status(
+                self.project_id, await storage.read_cohort(self.project_id, "cohort-1")
             )
-            insights = cohort_state.attach_cohort_insights(self.project_id, live)
+            insights = await cohort_state.attach_cohort_insights(self.project_id, live)
         self.assertEqual(live["progress"]["done"], 5)
         self.assertEqual(insights["sessions"][0]["text"], "write-up")
 
@@ -238,81 +240,78 @@ class TestBulkReads(StoreCase):
 class TestConcurrency(StoreCase):
     """The reason for the move. Each of these lost data as JSON."""
 
-    def run_threads(self, fn, n):
-        errors = []
+    async def run_concurrent(self, make_coro, n):
+        """Run `n` overlapping writers and return whatever went wrong.
 
-        def wrapped(i):
-            try:
-                fn(i)
-            except Exception as exc:
-                errors.append(repr(exc))
+        These used to be OS threads because the store was synchronous. The
+        driver is async now, so real overlap comes from putting `n` coroutines
+        in flight at once against the pool — which is also how the production
+        pipeline reaches this code (`asyncio.gather` over a cohort's sessions),
+        so the test now exercises the same shape it is guarding.
+        """
+        results = await asyncio.gather(*(make_coro(i) for i in range(n)), return_exceptions=True)
+        return [repr(r) for r in results if isinstance(r, BaseException)]
 
-        threads = [threading.Thread(target=wrapped, args=(i,)) for i in range(n)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        return errors
-
-    def test_concurrent_session_marks_all_land(self):
+    async def test_concurrent_session_marks_all_land(self):
         """apply_cohort_batch and extract_one mark sessions from inside loops.
         Under JSON each mark rewrote the whole document, so marks raced."""
-        storage.write_cohort(self.project_id, cohort(n=50))
+        await storage.write_cohort(self.project_id, cohort(n=50))
         store = analyze_store.connect()
-        errors = self.run_threads(
+        errors = await self.run_concurrent(
             lambda i: analyze_store.update_session_status(
                 store, self.project_id, "cohort-1", f"s{i}", status="done", analysis="analysis.json"
             ),
             50,
         )
         self.assertEqual(errors, [])
-        rows = storage.read_cohort(self.project_id, "cohort-1")["sessions"]
+        rows = (await storage.read_cohort(self.project_id, "cohort-1"))["sessions"]
         self.assertEqual([r["status"] for r in rows], ["done"] * 50)
         self.assertEqual([r["session_id"] for r in rows], [f"s{i}" for i in range(50)])
 
-    def test_concurrent_cuts_do_not_drop_each_other(self):
+    async def test_concurrent_cuts_do_not_drop_each_other(self):
         """The textbook lost update: read_cuts → mutate → write the whole map.
         _cut_tasks is keyed per cut, so two cuts of one cohort really do finish
         together."""
-        storage.write_cohort(self.project_id, cohort())
-        errors = self.run_threads(
+        await storage.write_cohort(self.project_id, cohort())
+        errors = await self.run_concurrent(
             lambda i: storage.write_cut(self.project_id, "cohort-1", f"key-{i}", {"n": i}), 40
         )
         self.assertEqual(errors, [])
-        cuts = storage.read_cuts(self.project_id, "cohort-1")
+        cuts = await storage.read_cuts(self.project_id, "cohort-1")
         self.assertEqual(len(cuts), 40)
         self.assertEqual({k: v["n"] for k, v in cuts.items()}, {f"key-{i}": i for i in range(40)})
 
-    def test_a_read_never_sees_a_torn_cohort(self):
+    async def test_a_read_never_sees_a_torn_cohort(self):
         """A truncated JSON write used to make a cohort vanish from the UI
         along with its in-flight batch job name. Every read is now all 50
         members or nothing in between — never None, never a partial membership."""
-        storage.write_cohort(self.project_id, cohort(n=50))
-        stop = threading.Event()
+        await storage.write_cohort(self.project_id, cohort(n=50))
+        stop = asyncio.Event()
         seen, errors = [], []
 
-        def writer():
+        async def writer():
             while not stop.is_set():
                 try:
-                    storage.write_cohort(self.project_id, cohort(n=50, status="running"))
+                    await storage.write_cohort(self.project_id, cohort(n=50, status="running"))
                 except Exception as exc:
                     errors.append(repr(exc))
 
-        def reader():
+        async def reader():
             while not stop.is_set():
                 try:
-                    got = storage.read_cohort(self.project_id, "cohort-1")
+                    got = await storage.read_cohort(self.project_id, "cohort-1")
                     seen.append(None if got is None else len(got["sessions"]))
                 except Exception as exc:
                     errors.append(repr(exc))
 
-        threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
-        for t in threads:
-            t.start()
-        time.sleep(1.0)
+        # Two coroutines rather than two threads: the writer's DELETE+INSERT of
+        # membership and the reader's SELECT now interleave on the event loop,
+        # which is exactly how they meet in the server. The guarantee under test
+        # is the transaction's, and it holds either way.
+        tasks = [asyncio.create_task(writer()), asyncio.create_task(reader())]
+        await asyncio.sleep(1.0)
         stop.set()
-        for t in threads:
-            t.join()
+        await asyncio.gather(*tasks)
 
         self.assertEqual(errors, [])
         self.assertTrue(seen, "reader never ran")
@@ -324,11 +323,11 @@ class TestSessionDeletion(StoreCase):
     row cannot be substantiated — and enrich_cohort_status trusts the stored
     status when it finds nothing on disk, so it would keep counting as done."""
 
-    def seed(self):
+    async def seed(self):
         for sid in ("s0", "s1"):
             (self.pool / sid).mkdir()
-            storage.write_analysis(self.project_id, sid, {"text": "write-up"})
-        storage.write_cohort(
+            await storage.write_analysis(self.project_id, sid, {"text": "write-up"})
+        await storage.write_cohort(
             self.project_id,
             {
                 "id": "c-A",
@@ -340,7 +339,7 @@ class TestSessionDeletion(StoreCase):
                 ],
             },
         )
-        storage.write_cohort(
+        await storage.write_cohort(
             self.project_id,
             {
                 "id": "c-B",
@@ -350,72 +349,80 @@ class TestSessionDeletion(StoreCase):
             },
         )
 
-    def test_a_deleted_session_leaves_every_cohort_it_was_in(self):
-        self.seed()
+    async def test_a_deleted_session_leaves_every_cohort_it_was_in(self):
+        await self.seed()
         shutil.rmtree(self.pool / "s0")
-        self.assertEqual(storage.forget_session(self.project_id, "s0"), 2)
+        self.assertEqual(await storage.forget_session(self.project_id, "s0"), 2)
         self.assertEqual(
-            [s["session_id"] for s in storage.read_cohort(self.project_id, "c-A")["sessions"]],
+            [
+                s["session_id"]
+                for s in (await storage.read_cohort(self.project_id, "c-A"))["sessions"]
+            ],
             ["s1"],
         )
-        self.assertEqual(storage.read_cohort(self.project_id, "c-B")["sessions"], [])
+        self.assertEqual((await storage.read_cohort(self.project_id, "c-B"))["sessions"], [])
 
-    def test_the_cohort_stops_counting_it_as_analyzed(self):
+    async def test_the_cohort_stops_counting_it_as_analyzed(self):
         """The failure this prevents: a cohort reporting a completed analysis
         for a session whose write-up no longer exists."""
-        self.seed()
+        await self.seed()
         shutil.rmtree(self.pool / "s0")
-        storage.forget_session(self.project_id, "s0")
-        live = cohort_state.enrich_cohort_status(
-            self.project_id, storage.read_cohort(self.project_id, "c-A")
+        await storage.forget_session(self.project_id, "s0")
+        live = await cohort_state.enrich_cohort_status(
+            self.project_id, await storage.read_cohort(self.project_id, "c-A")
         )
         self.assertEqual(live["progress"]["total"], 1)
         self.assertEqual(live["progress"]["done"], 1)
 
-    def test_surviving_members_are_untouched(self):
-        self.seed()
-        storage.forget_session(self.project_id, "s0")
-        row = storage.read_cohort(self.project_id, "c-A")["sessions"][0]
+    async def test_surviving_members_are_untouched(self):
+        await self.seed()
+        await storage.forget_session(self.project_id, "s0")
+        row = (await storage.read_cohort(self.project_id, "c-A"))["sessions"][0]
         self.assertEqual(row["session_id"], "s1")
         self.assertEqual(row["status"], "done")
 
-    def test_forgetting_is_idempotent_and_scoped(self):
-        self.seed()
-        self.assertEqual(storage.forget_session(self.project_id, "s0"), 2)
-        self.assertEqual(storage.forget_session(self.project_id, "s0"), 0)
-        self.assertEqual(storage.forget_session(self.project_id, "never-existed"), 0)
+    async def test_forgetting_is_idempotent_and_scoped(self):
+        await self.seed()
+        self.assertEqual(await storage.forget_session(self.project_id, "s0"), 2)
+        self.assertEqual(await storage.forget_session(self.project_id, "s0"), 0)
+        self.assertEqual(await storage.forget_session(self.project_id, "never-existed"), 0)
 
-    def test_the_owning_cohorts_are_touched_so_pollers_notice(self):
-        self.seed()
-        before = storage.read_cohort(self.project_id, "c-A")["updated_at"]
+    async def test_the_owning_cohorts_are_touched_so_pollers_notice(self):
+        await self.seed()
+        before = (await storage.read_cohort(self.project_id, "c-A"))["updated_at"]
         time.sleep(0.005)
-        storage.forget_session(self.project_id, "s0")
-        self.assertGreater(storage.read_cohort(self.project_id, "c-A")["updated_at"], before)
+        await storage.forget_session(self.project_id, "s0")
+        self.assertGreater(
+            (await storage.read_cohort(self.project_id, "c-A"))["updated_at"], before
+        )
 
-    def test_cached_cuts_survive_a_membership_change(self):
+    async def test_cached_cuts_survive_a_membership_change(self):
         """A cut records what the model said when it ran; rewriting it to match
         a changed membership would be a second fabrication."""
-        self.seed()
-        storage.write_cut(self.project_id, "c-A", "k", {"headline": "as analyzed"})
-        storage.forget_session(self.project_id, "s0")
-        self.assertEqual(storage.read_cut(self.project_id, "c-A", "k"), {"headline": "as analyzed"})
+        await self.seed()
+        await storage.write_cut(self.project_id, "c-A", "k", {"headline": "as analyzed"})
+        await storage.forget_session(self.project_id, "s0")
+        self.assertEqual(
+            await storage.read_cut(self.project_id, "c-A", "k"), {"headline": "as analyzed"}
+        )
 
-    def test_forgetting_a_pool_drops_its_cohorts_and_cuts(self):
-        self.seed()
-        storage.write_cut(self.project_id, "c-A", "k", {"n": 1})
-        storage.forget_pool_cohorts(self.project_id)
-        self.assertEqual(storage.list_cohorts(self.project_id), [])
-        self.assertEqual(storage.read_cuts(self.project_id, "c-A"), {})
+    async def test_forgetting_a_pool_drops_its_cohorts_and_cuts(self):
+        await self.seed()
+        await storage.write_cut(self.project_id, "c-A", "k", {"n": 1})
+        await storage.forget_pool_cohorts(self.project_id)
+        self.assertEqual(await storage.list_cohorts(self.project_id), [])
+        self.assertEqual(await storage.read_cuts(self.project_id, "c-A"), {})
 
-    def test_another_pool_is_not_affected(self):
-        self.seed()
-        storage.write_cohort(
+    async def test_another_pool_is_not_affected(self):
+        await self.seed()
+        await storage.write_cohort(
             self.acme_id,
             {"id": "c-A", "created_at": 1, "sessions": [{"session_id": "s0"}]},
         )
-        storage.forget_session(self.project_id, "s0")
+        await storage.forget_session(self.project_id, "s0")
         self.assertEqual(
-            [s["session_id"] for s in storage.read_cohort(self.acme_id, "c-A")["sessions"]], ["s0"]
+            [s["session_id"] for s in (await storage.read_cohort(self.acme_id, "c-A"))["sessions"]],
+            ["s0"],
         )
 
 
@@ -424,8 +431,8 @@ class TestConcurrentMarks(StoreCase):
     the cohort dict. Marking through write_cohort meant every mark rewrote all
     N rows from the writer's copy, so two marks landing together lost one."""
 
-    def cohort(self, n=4):
-        storage.write_cohort(
+    async def cohort(self, n=4):
+        await storage.write_cohort(
             self.project_id,
             {
                 "id": "c",
@@ -434,40 +441,40 @@ class TestConcurrentMarks(StoreCase):
                 "sessions": [{"session_id": f"s{i}", "status": "queued"} for i in range(n)],
             },
         )
-        return storage.read_cohort(self.project_id, "c")
+        return await storage.read_cohort(self.project_id, "c")
 
-    def test_marks_from_stale_copies_do_not_overwrite_each_other(self):
-        self.cohort()
+    async def test_marks_from_stale_copies_do_not_overwrite_each_other(self):
+        await self.cohort()
         # Two holders of the same cohort, as the pipeline's coroutines have.
-        a = storage.read_cohort(self.project_id, "c")
-        b = storage.read_cohort(self.project_id, "c")
-        storage.mark_cohort_session(
+        a = await storage.read_cohort(self.project_id, "c")
+        b = await storage.read_cohort(self.project_id, "c")
+        await storage.mark_cohort_session(
             self.project_id, a, a["sessions"][0], "done", analysis="analysis.json"
         )
-        storage.mark_cohort_session(
+        await storage.mark_cohort_session(
             self.project_id, b, b["sessions"][1], "done", analysis="analysis.json"
         )
 
-        got = [s["status"] for s in storage.read_cohort(self.project_id, "c")["sessions"]]
+        got = [s["status"] for s in (await storage.read_cohort(self.project_id, "c"))["sessions"]]
         self.assertEqual(got, ["done", "done", "queued", "queued"])
 
-    def test_a_mark_keeps_the_callers_dict_in_step(self):
-        cohort = self.cohort()
+    async def test_a_mark_keeps_the_callers_dict_in_step(self):
+        cohort = await self.cohort()
         entry = cohort["sessions"][0]
-        storage.mark_cohort_session(self.project_id, cohort, entry, "error", error="boom")
+        await storage.mark_cohort_session(self.project_id, cohort, entry, "error", error="boom")
         self.assertEqual(entry["status"], "error")
         self.assertEqual(entry["error"], "boom")
         # And clearing it on the way to done drops the error in both places.
-        storage.mark_cohort_session(
+        await storage.mark_cohort_session(
             self.project_id, cohort, entry, "done", analysis="analysis.json"
         )
         self.assertNotIn("error", entry)
-        stored = storage.read_cohort(self.project_id, "c")["sessions"][0]
+        stored = (await storage.read_cohort(self.project_id, "c"))["sessions"][0]
         self.assertEqual(stored["status"], "done")
         self.assertNotIn("error", stored)
 
-    def test_a_mark_does_not_disturb_the_sampling_tag(self):
-        storage.write_cohort(
+    async def test_a_mark_does_not_disturb_the_sampling_tag(self):
+        await storage.write_cohort(
             self.project_id,
             {
                 "id": "c",
@@ -475,18 +482,18 @@ class TestConcurrentMarks(StoreCase):
                 "sessions": [{"session_id": "s0", "status": "queued", "filter": "a"}],
             },
         )
-        cohort = storage.read_cohort(self.project_id, "c")
-        storage.mark_cohort_session(
+        cohort = await storage.read_cohort(self.project_id, "c")
+        await storage.mark_cohort_session(
             self.project_id, cohort, cohort["sessions"][0], "done", analysis="analysis.json"
         )
         self.assertEqual(
-            storage.read_cohort(self.project_id, "c")["sessions"][0]["filter"], "a"
+            (await storage.read_cohort(self.project_id, "c"))["sessions"][0]["filter"], "a"
         )
 
-    def test_a_status_refresh_does_not_clobber_in_flight_marks(self):
+    async def test_a_status_refresh_does_not_clobber_in_flight_marks(self):
         """GET used to persist enrich via write_cohort, which DELETE+INSERTed
         membership from a stale snapshot and dropped marks that landed in between."""
-        snapshot = self.cohort()
+        snapshot = await self.cohort()
         live = {
             **snapshot,
             "status": "running",
@@ -496,21 +503,21 @@ class TestConcurrentMarks(StoreCase):
             ],
         }
         # The pipeline holds a different copy, the way GET's poll and extract do.
-        pipeline = storage.read_cohort(self.project_id, "c")
-        storage.mark_cohort_session(
+        pipeline = await storage.read_cohort(self.project_id, "c")
+        await storage.mark_cohort_session(
             self.project_id, pipeline, pipeline["sessions"][0], "done", analysis="analysis.json"
         )
-        self.assertTrue(storage.persist_cohort_refresh(self.project_id, snapshot, live))
+        self.assertTrue(await storage.persist_cohort_refresh(self.project_id, snapshot, live))
 
-        got = storage.read_cohort(self.project_id, "c")
+        got = await storage.read_cohort(self.project_id, "c")
         self.assertEqual(got["status"], "running")
         self.assertEqual(
             [s["status"] for s in got["sessions"]],
             ["done", "running", "queued", "queued"],
         )
 
-    def test_a_status_refresh_still_persists_corrected_rows(self):
-        storage.write_cohort(
+    async def test_a_status_refresh_still_persists_corrected_rows(self):
+        await storage.write_cohort(
             self.project_id,
             {
                 "id": "c",
@@ -522,7 +529,7 @@ class TestConcurrentMarks(StoreCase):
                 ],
             },
         )
-        stored = storage.read_cohort(self.project_id, "c")
+        stored = await storage.read_cohort(self.project_id, "c")
         live = {
             **stored,
             "status": "done",
@@ -531,84 +538,92 @@ class TestConcurrentMarks(StoreCase):
                 stored["sessions"][1],
             ],
         }
-        self.assertTrue(storage.persist_cohort_refresh(self.project_id, stored, live))
-        got = storage.read_cohort(self.project_id, "c")
+        self.assertTrue(await storage.persist_cohort_refresh(self.project_id, stored, live))
+        got = await storage.read_cohort(self.project_id, "c")
         self.assertEqual(got["status"], "done")
         self.assertEqual(got["sessions"][0]["status"], "done")
         self.assertEqual(got["sessions"][0]["analysis"], "analysis.json")
         self.assertEqual(got["sessions"][0]["filter"], "a")
         self.assertEqual(got["sessions"][1]["status"], "queued")
 
-    def test_a_matching_view_does_not_touch_the_store(self):
-        stored = self.cohort()
-        before = storage.read_cohort(self.project_id, "c")["updated_at"]
-        self.assertFalse(storage.persist_cohort_refresh(self.project_id, stored, stored))
-        self.assertEqual(storage.read_cohort(self.project_id, "c")["updated_at"], before)
+    async def test_a_matching_view_does_not_touch_the_store(self):
+        stored = await self.cohort()
+        before = (await storage.read_cohort(self.project_id, "c"))["updated_at"]
+        self.assertFalse(await storage.persist_cohort_refresh(self.project_id, stored, stored))
+        self.assertEqual((await storage.read_cohort(self.project_id, "c"))["updated_at"], before)
 
-    def test_marking_a_session_that_left_the_cohort_is_reported(self):
-        self.cohort()
+    async def test_marking_a_session_that_left_the_cohort_is_reported(self):
+        await self.cohort()
         store = analyze_store.connect()
         self.assertTrue(
-            analyze_store.update_session_status(store, self.project_id, "c", "s0", status="done")
+            await analyze_store.update_session_status(
+                store, self.project_id, "c", "s0", status="done"
+            )
         )
-        storage.forget_session(self.project_id, "s0")
+        await storage.forget_session(self.project_id, "s0")
         self.assertFalse(
-            analyze_store.update_session_status(store, self.project_id, "c", "s0", status="done"),
+            await analyze_store.update_session_status(
+                store, self.project_id, "c", "s0", status="done"
+            ),
             "a mark aimed at a non-member must report that it matched nothing",
         )
 
-    def test_concurrent_marks_under_threads_all_land(self):
-        self.cohort(n=30)
-        errors = []
+    async def test_concurrent_marks_all_land(self):
+        """Each writer reads its own copy of the cohort and marks one row.
 
-        def mark(i):
-            try:
-                copy = storage.read_cohort(self.project_id, "c")
-                storage.mark_cohort_session(
-                    self.project_id, copy, copy["sessions"][i], "done", analysis="analysis.json"
-                )
-            except Exception as exc:
-                errors.append(repr(exc))
+        The failure this guards is last-writer-wins: under JSON every mark
+        rewrote all 30 rows from the writer's stale snapshot, so marks landing
+        together silently dropped each other. Thirty overlapping coroutines is
+        the shape `run_cohort_job` actually produces.
+        """
+        await self.cohort(n=30)
 
-        threads = [threading.Thread(target=mark, args=(i,)) for i in range(30)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        async def mark(i):
+            copy = await storage.read_cohort(self.project_id, "c")
+            await storage.mark_cohort_session(
+                self.project_id, copy, copy["sessions"][i], "done", analysis="analysis.json"
+            )
+
+        results = await asyncio.gather(*(mark(i) for i in range(30)), return_exceptions=True)
+        errors = [repr(r) for r in results if isinstance(r, BaseException)]
         self.assertEqual(errors, [])
-        got = [s["status"] for s in storage.read_cohort(self.project_id, "c")["sessions"]]
+        got = [s["status"] for s in (await storage.read_cohort(self.project_id, "c"))["sessions"]]
         self.assertEqual(got, ["done"] * 30)
 
 
 class TestResume(StoreCase):
-    def test_resumable_lookup_finds_running_cohorts_with_a_job_name(self):
-        storage.write_cohort(
+    async def test_resumable_lookup_finds_running_cohorts_with_a_job_name(self):
+        await storage.write_cohort(
             self.project_id, cohort("cohort-run", status="running", batch={"name": "batches/J1"})
         )
-        storage.write_cohort(self.project_id, cohort("cohort-idle", status="idle"))
-        storage.write_cohort(self.project_id, cohort("cohort-done", status="done"))
+        await storage.write_cohort(self.project_id, cohort("cohort-idle", status="idle"))
+        await storage.write_cohort(self.project_id, cohort("cohort-done", status="done"))
         # Running but never submitted: nothing to resume.
-        storage.write_cohort(self.project_id, cohort("cohort-nojob", status="running"))
+        await storage.write_cohort(self.project_id, cohort("cohort-nojob", status="running"))
 
-        found = cohorts.cohorts_needing_batch_resume()
+        found = await cohorts.cohorts_needing_batch_resume()
         self.assertEqual([c["id"] for _, c in found], ["cohort-run"])
         self.assertEqual(found[0][0], self.project_id)
 
-    def test_resume_covers_project_pools(self):
-        storage.write_cohort(
+    async def test_resume_covers_project_pools(self):
+        await storage.write_cohort(
             self.acme_id, cohort("cohort-acme", status="running", batch={"name": "batches/J2"})
         )
-        found = cohorts.cohorts_needing_batch_resume()
+        found = await cohorts.cohorts_needing_batch_resume()
         self.assertEqual([(pid, c["id"]) for pid, c in found], [(self.acme_id, "cohort-acme")])
 
-    def test_pools_are_keyed_apart(self):
+    async def test_pools_are_keyed_apart(self):
         """Two projects can hold the same cohort id without colliding."""
-        storage.write_cohort(self.project_id, cohort("cohort-1", n=2, label="default"))
-        storage.write_cohort(self.acme_id, cohort("cohort-1", n=7, label="acme"))
-        self.assertEqual(storage.read_cohort(self.project_id, "cohort-1")["label"], "default")
-        self.assertEqual(len(storage.read_cohort(self.project_id, "cohort-1")["sessions"]), 2)
-        self.assertEqual(storage.read_cohort(self.acme_id, "cohort-1")["label"], "acme")
-        self.assertEqual(len(storage.read_cohort(self.acme_id, "cohort-1")["sessions"]), 7)
+        await storage.write_cohort(self.project_id, cohort("cohort-1", n=2, label="default"))
+        await storage.write_cohort(self.acme_id, cohort("cohort-1", n=7, label="acme"))
+        self.assertEqual(
+            (await storage.read_cohort(self.project_id, "cohort-1"))["label"], "default"
+        )
+        self.assertEqual(
+            len((await storage.read_cohort(self.project_id, "cohort-1"))["sessions"]), 2
+        )
+        self.assertEqual((await storage.read_cohort(self.acme_id, "cohort-1"))["label"], "acme")
+        self.assertEqual(len((await storage.read_cohort(self.acme_id, "cohort-1"))["sessions"]), 7)
 
 
 if __name__ == "__main__":

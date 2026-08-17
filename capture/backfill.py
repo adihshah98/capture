@@ -346,7 +346,7 @@ def backfill(verbose: bool = True) -> dict:
         index = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
 
     try:
-        with db.connection(admin=True) as conn:
+        with db.sync_connection(admin=True) as conn:
             for pool in legacy_pools():
                 token = None if pool == paths.DATA_DIR else pool.parent.name
                 entries = [e for e in pool.iterdir() if e.is_dir()] if pool.is_dir() else []

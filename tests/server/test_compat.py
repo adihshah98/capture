@@ -17,7 +17,7 @@ from capture.analyze.spec import CohortSpec
 
 
 @unittest.skipUnless(pgfixture.available(), pgfixture.UNAVAILABLE)
-class SamplingCase(unittest.TestCase):
+class SamplingCase(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         cls.admin_url, cls.app_url = pgfixture.fresh_database()
@@ -96,52 +96,53 @@ class SamplingCase(unittest.TestCase):
 
 
 class TestAnalyzeOnPublicSchema(SamplingCase):
-    def test_pool_facets_reads_this_project(self):
-        with db.connection(self.alpha) as conn:
-            facets = sampling.pool_facets(conn, str(self.alpha))
+    async def test_pool_facets_reads_this_project(self):
+        async with db.connection(self.alpha) as conn:
+            facets = await sampling.pool_facets(conn, str(self.alpha))
         self.assertIn("outcome", facets)
         flat = json.dumps(facets)
         self.assertIn("meta", flat)
         self.assertNotIn("other.test", flat)
 
-    def test_sample_cohort_rows_returns_this_project_only(self):
-        with db.connection(self.alpha) as conn:
-            rows = sampling.sample_cohort_rows(
+    async def test_sample_cohort_rows_returns_this_project_only(self):
+        async with db.connection(self.alpha) as conn:
+            rows = await sampling.sample_cohort_rows(
                 conn, str(self.alpha), CohortSpec(a_n=10, url_contains="")
             )
         ids = sorted(r["session_id"] for r in rows)
         self.assertEqual(ids, ["a-bought", "a-browsed"])
 
-    def test_a_purchase_is_classified_from_sessions_outcome(self):
-        with db.connection(self.alpha) as conn:
-            rows = sampling.sample_cohort_rows(
+    async def test_a_purchase_is_classified_from_sessions_outcome(self):
+        async with db.connection(self.alpha) as conn:
+            rows = await sampling.sample_cohort_rows(
                 conn, str(self.alpha), CohortSpec(a_n=10, url_contains="")
             )
             classified = {r["session_id"]: r["filter"] for r in rows}
             self.assertEqual(classified["a-bought"], "a")
             self.assertEqual(classified["a-browsed"], "a")
-            facts = sampling.classified_rows(conn, str(self.alpha), ["a-bought", "a-browsed"])
+            facts = await sampling.classified_rows(conn, str(self.alpha), ["a-bought", "a-browsed"])
         self.assertEqual(facts["a-bought"]["outcome"], "purchased")
         self.assertEqual(facts["a-browsed"]["outcome"], "rest")
 
-    def test_build_cohort_composes_a_group(self):
-        with db.connection(self.alpha) as conn:
-            cohort = cohorts.build_cohort(
+    async def test_build_cohort_composes_a_group(self):
+        async with db.connection(self.alpha) as conn:
+            cohort = await cohorts.build_cohort(
                 conn, str(self.alpha), CohortSpec(a_n=2, url_contains="")
             )
         ids = sorted(s["session_id"] for s in cohort["sessions"])
         self.assertEqual(ids, ["a-bought", "a-browsed"])
 
-    def test_clicks_column_orders_without_json_extract(self):
-        with db.connection(self.alpha) as conn:
-            rows = conn.execute(
+    async def test_clicks_column_orders_without_json_extract(self):
+        async with db.connection(self.alpha) as conn:
+            rows = await db.fetchall(
+                conn,
                 "SELECT s.session_id FROM sessions s WHERE s.project_id = %s"
                 " ORDER BY coalesce(s.clicks, 0) DESC",
                 (str(self.alpha),),
-            ).fetchall()
+            )
         self.assertEqual([r[0] for r in rows], ["a-bought", "a-browsed"])
 
-    def test_compat_schema_is_gone_after_migrate(self):
+    async def test_compat_schema_is_gone_after_migrate(self):
         with psycopg.connect(self.admin_url) as conn:
             row = conn.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'compat'").fetchone()
         self.assertIsNone(row)
@@ -152,21 +153,21 @@ class TestAnalyzeOnPublicSchema(SamplingCase):
 
 
 class TestSamplingKeepsTenantsApart(SamplingCase):
-    def test_connection_cannot_leak_another_project(self):
-        with db.connection(self.alpha) as conn:
-            rows = conn.execute("SELECT session_id FROM sessions").fetchall()
+    async def test_connection_cannot_leak_another_project(self):
+        async with db.connection(self.alpha) as conn:
+            rows = await db.fetchall(conn, "SELECT session_id FROM sessions")
         self.assertEqual(sorted(r[0] for r in rows), ["a-bought", "a-browsed"])
 
-    def test_naming_another_project_returns_nothing(self):
-        with db.connection(self.alpha) as conn:
-            rows = conn.execute(
-                "SELECT session_id FROM sessions WHERE project_id = %s", (str(self.beta),)
-            ).fetchall()
+    async def test_naming_another_project_returns_nothing(self):
+        async with db.connection(self.alpha) as conn:
+            rows = await db.fetchall(
+                conn, "SELECT session_id FROM sessions WHERE project_id = %s", (str(self.beta),)
+            )
         self.assertEqual(rows, [])
 
-    def test_analyze_cannot_sample_another_project(self):
-        with db.connection(self.alpha) as conn:
-            rows = sampling.sample_cohort_rows(
+    async def test_analyze_cannot_sample_another_project(self):
+        async with db.connection(self.alpha) as conn:
+            rows = await sampling.sample_cohort_rows(
                 conn, str(self.beta), CohortSpec(a_n=10, url_contains="")
             )
         self.assertEqual(rows, [])

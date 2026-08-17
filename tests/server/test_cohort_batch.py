@@ -1,6 +1,5 @@
 """Cohort Batch path: submit → poll → write analysis.json without sync Gemini."""
 
-import asyncio
 import json
 import sys
 import tempfile
@@ -16,7 +15,7 @@ import pgfixture
 from capture.analyze import cohort_state, cohorts, gemini, runtime, session, storage
 
 
-class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
+class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
@@ -56,8 +55,8 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
         (d / "1700000000000-abcd1234-abcdef.json").write_text("[]")
         return d
 
-    def test_run_cohort_job_uses_batch_and_keeps_other_cohorts(self):
-        older = storage.write_cohort(
+    async def test_run_cohort_job_uses_batch_and_keeps_other_cohorts(self):
+        older = await storage.write_cohort(
             self.project_id,
             {
                 "id": "cohort-old",
@@ -117,7 +116,7 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
                 {"session_id": b.name, "filter": "b", "status": "queued"},
             ],
         }
-        storage.write_cohort(self.project_id, cohort)
+        await storage.write_cohort(self.project_id, cohort)
         with (
             patch.object(session, "run_extractor", fake_extract),
             patch.object(gemini, "submit_prepared_gemini_batch", fake_submit),
@@ -125,17 +124,21 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
             patch.object(gemini, "parse_batch_results", fake_parse),
             patch.object(gemini, "call_gemini", boom),
         ):
-            final = asyncio.run(
-                cohorts.run_cohort_job(self.project_id, cohort, sessions_root=self.pool, force=True)
+            final = await cohorts.run_cohort_job(
+                self.project_id, cohort, sessions_root=self.pool, force=True
             )
 
         self.assertEqual(final["status"], "done")
         self.assertEqual(final["progress"]["done"], 2)
         self.assertNotIn("batch", final)
-        self.assertIn("What stands out", storage.read_analysis(self.project_id, a.name)["text"])
-        self.assertIn("What stands out", storage.read_analysis(self.project_id, b.name)["text"])
+        self.assertIn(
+            "What stands out", (await storage.read_analysis(self.project_id, a.name))["text"]
+        )
+        self.assertIn(
+            "What stands out", (await storage.read_analysis(self.project_id, b.name))["text"]
+        )
 
-        still = storage.read_cohort(self.project_id, older["id"])
+        still = await storage.read_cohort(self.project_id, older["id"])
         self.assertEqual(still["label"], "keep me")
         self.assertEqual(len(still["sessions"]), 1)
 
@@ -163,7 +166,7 @@ class TestCohortBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.assertEqual(out["s2"]["error"], "nope")
 
 
-class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase):
+class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     """Once a batch job exists it is billable, so only submission may fall back."""
 
     def setUp(self):
@@ -207,7 +210,7 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
         runtime._gate_loop = None
         self.tmp.cleanup()
 
-    def cohort(self, n=2) -> dict:
+    async def cohort(self, n=2) -> dict:
         sessions = []
         for i in range(n):
             sid = f"{chr(97 + i) * 3}" + "x" * 29
@@ -221,7 +224,7 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             "status": "idle",
             "sessions": sessions,
         }
-        storage.write_cohort(self.project_id, cohort)
+        await storage.write_cohort(self.project_id, cohort)
         return cohort
 
     def submits_as(self, job_name="batches/JOB1"):
@@ -233,7 +236,7 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
     def extractor_patch(self):
         return patch.object(session, "run_extractor", self._fake_extract)
 
-    def test_a_batch_left_in_flight_is_resumed_not_rerun(self):
+    async def test_a_batch_left_in_flight_is_resumed_not_rerun(self):
         # The expensive mistake: the job was created and is still running, so
         # re-sending the sessions interactively pays for the same work twice.
         async def never_finishes(name, *, poll_s=None, max_wait_s=None):
@@ -244,22 +247,20 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             self.submits_as(),
             patch.object(gemini, "wait_gemini_batch", never_finishes),
         ):
-            asyncio.run(
-                cohorts.run_cohort_job(
-                    self.project_id, dict(self.cohort()), sessions_root=self.pool
-                )
+            await cohorts.run_cohort_job(
+                self.project_id, dict(await self.cohort()), sessions_root=self.pool
             )
 
-        saved = storage.read_cohort(self.project_id, "cohort-1")
+        saved = await storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual(self.sync_calls, 0, "must not re-run a live batch")
         self.assertEqual((saved.get("batch") or {}).get("name"), "batches/JOB1")
         self.assertEqual(saved["status"], "running")
         self.assertEqual(
-            [c["id"] for _, c in cohorts.cohorts_needing_batch_resume()],
+            [c["id"] for _, c in await cohorts.cohorts_needing_batch_resume()],
             ["cohort-1"],
         )
 
-    def test_a_failure_reading_results_also_keeps_the_job(self):
+    async def test_a_failure_reading_results_also_keeps_the_job(self):
         # Same reasoning for a crash in parse/write: the job is fine, only our
         # collection of it failed.
         async def explodes(name, *, poll_s=None, max_wait_s=None):
@@ -270,17 +271,15 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             self.submits_as(),
             patch.object(gemini, "wait_gemini_batch", explodes),
         ):
-            asyncio.run(
-                cohorts.run_cohort_job(
-                    self.project_id, dict(self.cohort()), sessions_root=self.pool
-                )
+            await cohorts.run_cohort_job(
+                self.project_id, dict(await self.cohort()), sessions_root=self.pool
             )
 
-        saved = storage.read_cohort(self.project_id, "cohort-1")
+        saved = await storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual(self.sync_calls, 0)
         self.assertEqual((saved.get("batch") or {}).get("name"), "batches/JOB1")
 
-    def test_a_failed_submit_still_falls_back_to_sync(self):
+    async def test_a_failed_submit_still_falls_back_to_sync(self):
         # Nothing was created, so nothing has been paid for — the fallback is
         # the whole point and must survive.
         async def bad_submit(prepared, *, display_name, work_dir=None, project_id=None):
@@ -290,17 +289,15 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             self.extractor_patch(),
             patch.object(gemini, "submit_prepared_gemini_batch", bad_submit),
         ):
-            asyncio.run(
-                cohorts.run_cohort_job(
-                    self.project_id, dict(self.cohort()), sessions_root=self.pool
-                )
+            await cohorts.run_cohort_job(
+                self.project_id, dict(await self.cohort()), sessions_root=self.pool
             )
 
-        saved = storage.read_cohort(self.project_id, "cohort-1")
+        saved = await storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual(self.sync_calls, 1)
         self.assertIsNone(saved.get("batch"))
 
-    def test_a_genuinely_failed_batch_still_errors_its_sessions(self):
+    async def test_a_genuinely_failed_batch_still_errors_its_sessions(self):
         async def failed(name, *, poll_s=None, max_wait_s=None):
             return SimpleNamespace(
                 state=SimpleNamespace(name="JOB_STATE_FAILED"), error=None, dest=None
@@ -311,23 +308,21 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             self.submits_as(),
             patch.object(gemini, "wait_gemini_batch", failed),
         ):
-            asyncio.run(
-                cohorts.run_cohort_job(
-                    self.project_id, dict(self.cohort(n=1)), sessions_root=self.pool
-                )
+            await cohorts.run_cohort_job(
+                self.project_id, dict(await self.cohort(n=1)), sessions_root=self.pool
             )
 
-        saved = storage.read_cohort(self.project_id, "cohort-1")
+        saved = await storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual(self.sync_calls, 0)
         self.assertEqual(saved["sessions"][0]["status"], "error")
         self.assertIn("JOB_STATE_FAILED", saved["sessions"][0]["error"])
 
-    def test_a_resume_that_cannot_collect_leaves_the_cohort_resumable(self):
+    async def test_a_resume_that_cannot_collect_leaves_the_cohort_resumable(self):
         # resume_cohort_batch runs from an unawaited startup task, so raising
         # would strand the cohort as "running" with nothing watching it.
         sid = "aaa" + "x" * 29
         (self.pool / sid).mkdir()
-        storage.write_cohort(
+        await storage.write_cohort(
             self.project_id,
             {
                 "id": "cohort-1",
@@ -342,24 +337,22 @@ class TestBatchIsNeverPaidForTwice(pgfixture.CohortStoreMixin, unittest.TestCase
             raise gemini.BatchStillRunning("deadline")
 
         with patch.object(gemini, "wait_gemini_batch", never_finishes):
-            asyncio.run(
-                cohorts.resume_cohort_batch(
-                    self.project_id,
-                    storage.read_cohort(self.project_id, "cohort-1"),
-                    sessions_root=self.pool,
-                )
+            await cohorts.resume_cohort_batch(
+                self.project_id,
+                await storage.read_cohort(self.project_id, "cohort-1"),
+                sessions_root=self.pool,
             )
 
-        saved = storage.read_cohort(self.project_id, "cohort-1")
+        saved = await storage.read_cohort(self.project_id, "cohort-1")
         self.assertEqual((saved.get("batch") or {}).get("name"), "batches/JOB1")
         self.assertEqual(saved["status"], "running")
         self.assertEqual(
-            [c["id"] for _, c in cohorts.cohorts_needing_batch_resume()],
+            [c["id"] for _, c in await cohorts.cohorts_needing_batch_resume()],
             ["cohort-1"],
         )
 
 
-class TestWaitGeminiBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
+class TestWaitGeminiBatch(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     """The poll is bounded and tolerates blips, so neither hangs nor escalates."""
 
     def setUp(self):
@@ -392,37 +385,37 @@ class TestWaitGeminiBatch(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.genai.Client = Client
         return state
 
-    def test_a_transient_poll_failure_does_not_end_the_wait(self):
+    async def test_a_transient_poll_failure_does_not_end_the_wait(self):
         # Escalating here would drop into the fallback and re-bill the cohort.
         state = self.script([RuntimeError("503"), RuntimeError("503"), "JOB_STATE_SUCCEEDED"])
-        job = asyncio.run(gemini.wait_gemini_batch("j", poll_s=0.001))
+        job = await gemini.wait_gemini_batch("j", poll_s=0.001)
         self.assertEqual(job.state.name, "JOB_STATE_SUCCEEDED")
         self.assertEqual(state["calls"], 3)
 
-    def test_polling_that_keeps_failing_reports_the_job_as_still_running(self):
+    async def test_polling_that_keeps_failing_reports_the_job_as_still_running(self):
         self.script([RuntimeError("503")] * 20)
         with self.assertRaises(gemini.BatchStillRunning):
-            asyncio.run(gemini.wait_gemini_batch("j", poll_s=0.001))
+            await gemini.wait_gemini_batch("j", poll_s=0.001)
 
-    def test_a_stuck_job_gives_up_at_the_deadline(self):
+    async def test_a_stuck_job_gives_up_at_the_deadline(self):
         self.script(["JOB_STATE_PENDING"] * 500)
         with self.assertRaises(gemini.BatchStillRunning):
-            asyncio.run(gemini.wait_gemini_batch("j", poll_s=0.001, max_wait_s=0.05))
+            await gemini.wait_gemini_batch("j", poll_s=0.001, max_wait_s=0.05)
 
-    def test_zero_still_means_wait_forever(self):
+    async def test_zero_still_means_wait_forever(self):
         self.script(["JOB_STATE_PENDING", "JOB_STATE_SUCCEEDED"])
-        job = asyncio.run(gemini.wait_gemini_batch("j", poll_s=0.001, max_wait_s=0))
+        job = await gemini.wait_gemini_batch("j", poll_s=0.001, max_wait_s=0)
         self.assertEqual(job.state.name, "JOB_STATE_SUCCEEDED")
 
-    def test_terminal_states_return_the_job(self):
+    async def test_terminal_states_return_the_job(self):
         for name in ("JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_EXPIRED"):
             with self.subTest(state=name):
                 self.script([name])
-                job = asyncio.run(gemini.wait_gemini_batch("j", poll_s=0.001))
+                job = await gemini.wait_gemini_batch("j", poll_s=0.001)
                 self.assertEqual(job.state.name, name)
 
 
-class TestPersistableCohort(pgfixture.CohortStoreMixin, unittest.TestCase):
+class TestPersistableCohort(pgfixture.CohortStoreMixin, unittest.IsolatedAsyncioTestCase):
     """enrich_cohort_status is a read-time view; only part of it belongs on disk."""
 
     def setUp(self):
@@ -433,7 +426,7 @@ class TestPersistableCohort(pgfixture.CohortStoreMixin, unittest.TestCase):
         self.project_id = self._pg_project
         self.addCleanup(self.tmp.cleanup)
 
-    def store(self, **fields) -> dict:
+    async def store(self, **fields) -> dict:
         cohort = {
             "id": "cohort-1",
             "created_at": 1,
@@ -441,64 +434,66 @@ class TestPersistableCohort(pgfixture.CohortStoreMixin, unittest.TestCase):
             "sessions": [{"session_id": "s1", "status": "queued"}],
             **fields,
         }
-        storage.write_cohort(self.project_id, cohort)
-        return storage.read_cohort(self.project_id, "cohort-1")
+        await storage.write_cohort(self.project_id, cohort)
+        return await storage.read_cohort(self.project_id, "cohort-1")
 
-    def round_trip(self, stored: dict) -> tuple:
+    async def round_trip(self, stored: dict) -> tuple:
         """(response, persisted) for one enrich-then-write cycle."""
-        live = cohort_state.enrich_cohort_status(self.project_id, stored)
-        storage.write_cohort(self.project_id, cohort_state.persistable_cohort(live, stored))
-        return live, storage.read_cohort(self.project_id, "cohort-1")
+        live = await cohort_state.enrich_cohort_status(self.project_id, stored)
+        await storage.write_cohort(self.project_id, cohort_state.persistable_cohort(live, stored))
+        return live, await storage.read_cohort(self.project_id, "cohort-1")
 
-    def test_progress_is_returned_but_never_stored(self):
-        live, saved = self.round_trip(self.store())
+    async def test_progress_is_returned_but_never_stored(self):
+        live, saved = await self.round_trip(await self.store())
         self.assertEqual(live["progress"]["total"], 1)
         self.assertNotIn("progress", saved)
 
-    def test_a_guessed_selection_is_not_frozen_into_the_file(self):
+    async def test_a_guessed_selection_is_not_frozen_into_the_file(self):
         # No sampling fields at all: the backfill can only guess, and the guess
         # ("latest 0 for A") would be permanent once written, because enrich
         # only backfills a missing selection.
-        stored = self.store(a_n=0, b_n=0)
-        live, saved = self.round_trip(stored)
+        stored = await self.store(a_n=0, b_n=0)
+        live, saved = await self.round_trip(stored)
         self.assertIn("0 for A", live["selection"])
         self.assertIsNone(saved.get("selection"))
 
-    def test_a_real_selection_survives(self):
+    async def test_a_real_selection_survives(self):
         text = "Chosen as the latest 50 purchased + 50 non-purchase sessions on /x"
-        _, saved = self.round_trip(self.store(selection=text))
+        _, saved = await self.round_trip(await self.store(selection=text))
         self.assertEqual(saved["selection"], text)
 
-    def test_refreshed_status_is_still_persisted(self):
+    async def test_refreshed_status_is_still_persisted(self):
         # The whole reason callers write after enriching: a crashed runner
         # leaves rows claiming "running" that only a re-read corrects.
         session_dir = self.pool / "s1"
         session_dir.mkdir()
-        storage.write_analysis(
+        await storage.write_analysis(
             self.project_id, session_dir.name, {"status": "done", "text": "write-up"}
         )
-        stored = self.store(sessions=[{"session_id": "s1", "status": "running"}])
-        _, saved = self.round_trip(stored)
+        stored = await self.store(sessions=[{"session_id": "s1", "status": "running"}])
+        _, saved = await self.round_trip(stored)
         self.assertEqual(saved["status"], "done")
         self.assertEqual(saved["sessions"][0]["status"], "done")
 
-    def test_write_ups_are_still_kept_out_of_the_file(self):
+    async def test_write_ups_are_still_kept_out_of_the_file(self):
         session_dir = self.pool / "s1"
         session_dir.mkdir()
-        storage.write_analysis(
+        await storage.write_analysis(
             self.project_id, session_dir.name, {"status": "done", "text": "write-up", "model": "m"}
         )
-        stored = self.store()
-        enriched = cohort_state.attach_cohort_insights(
-            self.project_id, cohort_state.enrich_cohort_status(self.project_id, stored)
+        stored = await self.store()
+        enriched = await cohort_state.attach_cohort_insights(
+            self.project_id, await cohort_state.enrich_cohort_status(self.project_id, stored)
         )
-        storage.write_cohort(self.project_id, cohort_state.persistable_cohort(enriched, stored))
-        saved = storage.read_cohort(self.project_id, "cohort-1")
+        await storage.write_cohort(
+            self.project_id, cohort_state.persistable_cohort(enriched, stored)
+        )
+        saved = await storage.read_cohort(self.project_id, "cohort-1")
         self.assertNotIn("text", saved["sessions"][0])
         self.assertNotIn("progress", saved)
 
-    def test_without_a_stored_cohort_it_only_drops_the_derived_view(self):
-        live = cohort_state.enrich_cohort_status(self.project_id, self.store())
+    async def test_without_a_stored_cohort_it_only_drops_the_derived_view(self):
+        live = await cohort_state.enrich_cohort_status(self.project_id, await self.store())
         out = cohort_state.persistable_cohort(live)
         self.assertNotIn("progress", out)
         self.assertIn("selection", out)

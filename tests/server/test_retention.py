@@ -70,13 +70,13 @@ class TestSweepClearsBothBackends(unittest.TestCase):
         cls.paths.DATA_ROOT, cls.config.RETENTION_DAYS = data_root, retention
         cls.projects.invalidate()
 
-    def setUp(self):
+    async def setUp(self):
         self.fake = FakeS3()
         self.storage._client = self.fake
         with psycopg.connect(self.admin_url, autocommit=True) as conn:
             conn.execute("DELETE FROM sessions")
 
-    def seed(self, session_id: str, last_seen_ms: int):
+    async def seed(self, session_id: str, last_seen_ms: int):
         from capture.fsutil import atomic_write_bytes
 
         name = chunk_name(1000)
@@ -90,44 +90,44 @@ class TestSweepClearsBothBackends(unittest.TestCase):
             )
         return name
 
-    def rows(self):
+    async def rows(self):
         with psycopg.connect(self.admin_url) as conn:
             return [r[0] for r in conn.execute("SELECT session_id FROM sessions")]
 
-    def test_an_expired_session_leaves_nothing_in_the_bucket(self):
+    async def test_an_expired_session_leaves_nothing_in_the_bucket(self):
         import time
 
         old = int((time.time() - 30 * 86400) * 1000)
-        name = self.seed("stale", old)
+        name = await self.seed("stale", old)
         self.fake.objects["sessions/cap_r/stale/.analysis/digest.json"] = b"{}"
 
         removed = self.retention.sweep_expired_sessions()
 
         self.assertEqual(removed, 1)
-        self.assertEqual(self.rows(), [])
+        self.assertEqual(await self.rows(), [])
         self.assertEqual(self.fake.objects, {}, "chunks were orphaned in the bucket")
         self.assertFalse((self.storage.local_dir("cap_r", "stale") / name).exists())
 
-    def test_a_live_session_is_untouched(self):
+    async def test_a_live_session_is_untouched(self):
         import time
 
-        name = self.seed("fresh", int(time.time() * 1000) - 3600_000)
+        name = await self.seed("fresh", int(time.time() * 1000) - 3600_000)
 
         self.assertEqual(self.retention.sweep_expired_sessions(), 0)
-        self.assertEqual(self.rows(), ["fresh"])
+        self.assertEqual(await self.rows(), ["fresh"])
         self.assertEqual(len(self.fake.objects), 1)
         self.assertTrue((self.storage.local_dir("cap_r", "fresh") / name).exists())
 
-    def test_retention_disabled_removes_nothing(self):
+    async def test_retention_disabled_removes_nothing(self):
         import time
 
-        self.seed("stale", int((time.time() - 30 * 86400) * 1000))
+        await self.seed("stale", int((time.time() - 30 * 86400) * 1000))
         self.config.RETENTION_DAYS = 0
         try:
             self.assertEqual(self.retention.sweep_expired_sessions(), 0)
         finally:
             self.config.RETENTION_DAYS = 7
-        self.assertEqual(self.rows(), ["stale"])
+        self.assertEqual(await self.rows(), ["stale"])
         self.assertEqual(len(self.fake.objects), 1)
 
 
