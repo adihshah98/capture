@@ -10,7 +10,10 @@
       "Bash(ipcs -m)",
       "Bash(python3 -m pytest tests/server/test_ingest_concurrency.py -q)",
       "Bash(python3 -m pytest tests/server -q)",
-      "Bash(python3 -m pytest tests/server/test_cuts.py::TestCutPromptContent::test_is_written_for_a_marketing_audience \"tests/server/test_api_cuts.py::TestCutSlices::test_stamped_rows_carry_the_values_the_picker_counts\" -q)"
+      "Bash(python3 -m pytest tests/server/test_cuts.py::TestCutPromptContent::test_is_written_for_a_marketing_audience \"tests/server/test_api_cuts.py::TestCutSlices::test_stamped_rows_carry_the_values_the_picker_counts\" -q)",
+      "Bash(grep -iE '\\\\.\\(png|jpe?g|gif|svg|webp\\)$')",
+      "Bash(python3 -I -)",
+      "Bash(file docs/images/*)"
     ]
   }
 }

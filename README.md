@@ -1,333 +1,308 @@
-# Capture — self-hosted session replay
+# Capture
 
-Self-hosted session recording and replay built on [rrweb](https://github.com/rrweb-io/rrweb):
-watch real user sessions on your sites as DOM-accurate replays.
+**Session replay that tells a brand *why* visitors didn't buy, and which campaign sent them.**
 
-The client SDK is JavaScript (rrweb runs in the browser); the server is Python
-(FastAPI). Node is only needed at build time to bundle the client.
+Capture records real shopper sessions on a brand's storefront, replays them as
+pixel-accurate DOM reconstructions, and then does what replay tools usually
+leave to an analyst. It watches the sessions headlessly, writes up each one, and
+turns a sample of them into findings a marketing or UX team can act on. Every
+finding comes with exact percentages and links back to the moment in the
+recording that proves it.
+
+It is multi-tenant and self-hosted. One deployment serves many brands, and
+Postgres row-level security keeps each brand's recordings separate.
+
+---
+
+
+
+## Demo 
+
+Video: [https://youtu.be/MpstHOxRkeQ](https://youtu.be/MpstHOxRkeQ)
+
+Screenshots: 
+
+**You don't have to watch the recording.** Every session is tied to the ad
+campaign that sent the visitor and to whether they bought. Capture writes up
+each one: what the visitor read, what they lingered on, and what convinced
+them. A 2.5-minute replay becomes a paragraph you can skim in seconds.
+
+![Session replay with timeline and AI analysis](docs/images/screenshot-1.png)
+
+**Know which parts of your page sell.** Capture analyzes dozens of buyers at
+once and tells you what actually moved them, for example: "63% of purchasers
+engaged deeply with the science content" and "57% engaged with the 30-night
+guarantee." Each claim links to the exact second in every recording that backs
+it, and comes with a concrete change to make to your ads or landing page.
+
+![Cohort analysis showing what held purchasers' attention](docs/images/screenshot-2.png)
+
+**Find the friction that's costing you sales.** Capture surfaces the problems
+nobody reported: a welcome popup that keeps reappearing mid-purchase, a large
+pack abandoned on price, and shoppers confused about whether they were
+subscribing. Each problem comes with a fix. Capture also flags the limits of
+its own sample, so you know how far a finding goes. Ask follow-up questions in
+plain English, such as "what did the ones who left have in common?"
+
+![Cohort analysis showing what stopped visitors](docs/images/screenshot-3.png)
+
+## The problem
+
+Direct-to-consumer brands spend most of their budget buying traffic: Meta ads,
+paid search, influencer links. Their analytics tell them *what* happened:
+conversion fell 12% on mobile, or the new campaign's landing page bounces at
+70%. They do not tell them *why*.
+
+Session replay tools close part of that gap. You can watch the visitor
+hesitate on the size selector, scroll past the guarantee, and leave. But a
+brand records thousands of sessions a day, and nobody watches thousands of
+videos. Teams end up watching a handful, anecdote wins over evidence, and the
+replays sit unwatched.
+
+## What Capture does about it
+
+
+| For the team     | What they get                                                                                                                                                                                                                                         |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Marketers**    | Behaviour tied to the campaign that bought the click. A session that arrived from `utm_campaign=spring_sale` is read against the expectation the ad set, so the write-up says whether the landing page kept the ad's promise.                         |
+| **UX / product** | Where the interface got in the way. The analysis separates "the offer didn't land" from "the information was there but the shopper couldn't find it when they needed it".                                                                             |
+| **Growth / CRO** | A/B cohorts (purchased vs. abandoned at checkout, mobile vs. desktop, Meta vs. Google) compared side by side, with splits the system *measured* rather than ones the model guessed.                                                                   |
+| **Everyone**     | Plain-language insights like *"44% (4 of 9) switched off the default 90-night supply after reading the guarantee; test 30-night as the default."* Each one cites the sessions behind it (`S3 [01:10]`), and a click opens that replay at that second. |
+
+
+
+
+### The workflow
+
+1. **Record.** The brand pastes one snippet (or installs it through GTM or
+  Shopify). The recorder masks every form input by default and loads only
+   after the page has finished loading, so Capture can't slow down or break
+   the storefront even when Capture itself is down.
+2. **Replay.** Anyone on the brand's team (signed in through WorkOS, scoped to
+  their own organisation) can search, filter and watch sessions. Purchased,
+   reached checkout, and rage-click badges come from a Shopify checkout pixel.
+3. **Analyse one session.** *Analyze with AI* reconstructs the session in a
+  headless browser, samples frames during active time only, and returns a
+   consumer read, decision journey, objections and UX recommendations.
+4. **Analyse a cohort.** Pick two groups, for example "mobile visitors from
+  Meta who reached checkout" against "who purchased". Capture samples up to
+   500 sessions, writes up each one through the Gemini Batch API (about 50%
+   cheaper), and keeps a durable job that survives restarts.
+5. **Cut and ask.** Slice the cohort by device, landing page, source or
+  campaign to get a cached, cited write-up for that slice. Then ask follow-up
+   questions in a streaming chat that answers only from the evidence in that
+   slice.
+
+---
+
+
+
+## Technical highlights
+
+Capture is about 15k lines of Python and JavaScript. The parts below are the
+ones that took real engineering. [ARCHITECTURE.md](ARCHITECTURE.md) covers the
+whole system, and [docs/deep-dive/](docs/deep-dive/README.md) records the
+constraints behind each subsystem.
+
+**Tenant isolation is enforced by the database.** Every tenant table has
+`FORCE ROW LEVEL SECURITY` with a policy keyed on a per-connection
+`app.project_id`. A query that forgets its `WHERE project_id = …` returns
+nothing rather than another brand's recordings. CI runs against a real
+Postgres 18 with a flag that stops the isolation tests from quietly skipping.
+
+**The headless extractor reuses the replay player.** rrweb events are DOM
+mutations, not a description of the page, so parsing them can't tell you what
+the visitor saw. The analyser launches Playwright and drives the *same*
+`CapturePlayer` the replay UI uses. That keeps frozen animations and
+re-applied scroll offsets identical between what an analyst watches and what
+the model reads. Frames are sampled per second of *active* time and dead air
+is skipped, so a 20-minute session with 90 seconds of interaction costs 90
+frames. Each frame gets its `[MM:SS]` text label before the image.
+
+**The model interprets and Python computes the numbers.** Asked to count
+across dozens of write-ups, LLMs invent plausible shares. Capture computes
+every cross-tab (source × outcome, page × outcome, device × outcome, and
+others) in Python and hands the model exact figures to quote. Three gates
+(minimum cell size, minimum coverage, minimum lift) suppress noise. Splits that
+fail a gate are still listed under *Examined and not reported*, so the model
+doesn't read silence as uniformity.
+
+**Batch processing that doesn't double-bill.** Cohort write-ups go through
+Gemini Batch. Requests are streamed to a JSONL file instead of built in memory,
+a change that came from a real out-of-memory incident. Only *submission* may
+fall back to the synchronous API. Once a batch exists, its name is persisted
+as the recovery token, and a server restart resumes polling instead of paying
+for the cohort twice. Results are matched by key, never by order.
+
+**Caches keyed on the prompt's content.** A cut's cache key includes a SHA-256
+of the prompt that produced it. Editing a prompt invalidates exactly the
+answers that prompt generated, with no version number for anyone to remember
+to bump.
+
+**Job status is derived on read.** A cohort's stored status goes stale the
+moment a process dies mid-run. Terminal states are recomputed from per-session
+rows instead of trusted from the record, so a crash leaves nothing reporting
+"running" with no task behind it.
+
+**Async all the way to Postgres.** The server runs on psycopg's
+`AsyncConnectionPool`. A test enforces that the sync pool is never reached
+from a coroutine. The thread executor is sized to the database pool, and pool
+exhaustion returns `503 Retry-After`, which the recorder retries, instead of a
+`500`, which it would drop.
+
+**Replay bytes skip the origin server.** Chunks are immutable objects in S3.
+The API answers a chunk request with a short-lived presigned redirect, so a
+long session streams straight from S3 into the player while it plays.
+
+**A recorder built for someone else's storefront.** It sends gzipped batches
+via `CompressionStream` and flushes on time, count or byte size, with a
+`keepalive` flush on `pagehide`. It drops background mutations while the
+visitor is idle and takes a fresh snapshot when they return. Visibility
+tracking separates *walked away* from *sat there hesitating*. Optional
+trigger-gated recording keeps a bounded rolling buffer and starts sending only
+when a checkout URL or an exception fires. It honours Global Privacy Control
+and has a consent gate.
+
+**A tested and gated delivery pipeline.** About 800 tests. Server tests boot a
+real uvicorn subprocess, so they cover middleware order and environment
+parsing as deployed. A `unit` tier runs in about a second and fails any test
+that opens a database connection. Every change goes through ruff, mypy and
+pip-audit in CI. Deploys build an immutable release directory, health-check it
+on a spare port, and switch a symlink only after it passes. Rolling back means
+pointing the symlink at an earlier release.
+
+---
+
+
+
+## Stack
+
+
+| Layer             | Technology                                                                     |
+| ----------------- | ------------------------------------------------------------------------------ |
+| Recorder          | rrweb, vanilla JS bundled by esbuild                                           |
+| API server        | Python 3.11, FastAPI, uvicorn, psycopg 3 (async pool)                          |
+| Database          | PostgreSQL 16+ with row-level security (RDS in production)                     |
+| Recording storage | S3, with presigned reads; local disk in development                            |
+| Analysis          | Node and Playwright (headless Chromium), Google Gemini (interactive and Batch) |
+| Auth              | WorkOS AuthKit (per-organisation logins) or HTTP Basic                         |
+| Hosting           | EC2 behind CloudFront                                                          |
+
+
+---
+
+
 
 ## Quick start
 
 ```bash
-npm install                                  # build-time deps (esbuild, rrweb)
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/pip install -r requirements-dev.txt # ruff, mypy, pytest — for lint and the fast tests
-npm run dev        # builds bundles + starts the server on :3000
-npm test           # client + server tests (needs no dev dependencies)
+npm install                                   # esbuild, rrweb, playwright
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+cp .env.example .env                          # add GEMINI_API_KEY to enable analysis
+npm run dev                                   # build bundles, start on :3000 with auth off
 ```
 
-`npm test` runs `tests/client` through Node's built-in runner and `tests/server`
-through `unittest`. The server tests boot real uvicorn processes against
-a throwaway `CAPTURE_DATA_DIR`, so they exercise what ships — middleware order,
-env parsing, status codes — and never touch your recordings.
+- Demo page (instrumented): [http://localhost:3000/](http://localhost:3000/)
+- Replay and insights UI: [http://localhost:3000/replay.html](http://localhost:3000/replay.html)
+- Trigger-gated recording demo: [http://localhost:3000/demo-triggers.html](http://localhost:3000/demo-triggers.html)
 
-Two shorter loops, both needing `requirements-dev.txt`:
+Without `CAPTURE_S3_BUCKET`, chunks are written under `data/`. Postgres
+connection settings and production setup are in
+[docs/rds-setup.md](docs/rds-setup.md).
+
+### Tests and lint
 
 ```bash
-npm run test:fast  # tests/server, the ones needing no database — ~1s
-npm run lint       # ruff check, ruff format --check, mypy
+npm test             # build, then client tests (node --test) and server tests (needs Postgres)
+npm run test:fast    # the database-free unit tier, about 1s
+npm run lint         # ruff check, ruff format --check, mypy
+npm run test:coverage
+.venv/bin/pre-commit install   # catch formatting before CI does
 ```
 
-`npm run test:fast` runs what `tests/conftest.py` marks `unit`, and that marker is
-enforced: a unit test that opens a database connection fails. Everything else
-needs Postgres and takes about two and a half minutes. `capture/analyze/` is
-excluded from ruff and mypy — it belongs to the analysis refactor.
+---
 
-Install the pre-commit hook once and formatting stops reaching CI:
+
+
+## Onboarding a brand
 
 ```bash
-.venv/bin/pre-commit install
+python -m capture.cli add-project "Acme"                # prints the token and the snippet
+python -m capture.cli set-domains cap_xxx acme.com      # optional: only accept ingest from acme.com
+python -m capture.cli set-org cap_xxx org_yyy           # tie the project to the brand's WorkOS organisation
+python -m capture.cli invite teammate@acme.com cap_xxx  # emails a login link
 ```
 
-- **Demo page** (instrumented): http://localhost:3000/
-- **Replay UI**: http://localhost:3000/replay.html
+Send the brand [docs/integration.md](docs/integration.md). It covers the
+snippet, GTM, the Shopify theme and checkout pixel, CSP, privacy defaults, and
+how to verify the install.
 
-To instrument any page served by this server, add one tag:
+Project tokens are public, because they appear in page source. They can only
+*send* recordings, never read them. Ingest is protected by the domain
+allowlist, a per-project storage quota, a free-disk floor and a gzip-bomb
+ceiling.
 
-```html
-<script async src="/capture.js"></script>
-```
+## Configuration
 
-## Instrumenting a brand's site
+Settings are read from the environment, and from `.env` in development. The
+most important ones:
 
-The snippet is self-configuring: it derives the capture server's location
-from its own `src` and reads the project token from `data-token`, so an
-external site's entire integration is one tag.
 
-1. Create a project (a brand) on the server:
+| Variable                                                             | Purpose                                                                                                                      |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `CAPTURE_DATABASE_URL` / `CAPTURE_DB_POOL_MAX`                       | Postgres connection and per-pool size                                                                                        |
+| `CAPTURE_S3_BUCKET`                                                  | Store chunks in S3 instead of on local disk                                                                                  |
+| `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `CAPTURE_OPERATORS`            | Per-organisation logins; operators can see every project                                                                     |
+| `REPLAY_PASSWORD`                                                    | Single-operator HTTP Basic fallback. With no auth configured, the read side returns 503 instead of serving recordings openly |
+| `GEMINI_API_KEY`, `GEMINI_MODEL`                                     | Turn on AI analysis                                                                                                          |
+| `ANALYZE_FPS`, `ANALYZE_MAX_FRAMES`, `ANALYZE_BATCH`                 | Frame sampling density, frame cap, and Batch vs. synchronous calls for cohorts                                               |
+| `RETENTION_DAYS`                                                     | Daily sweep of expired sessions (default 30; `0` keeps them forever)                                                         |
+| `MAX_PROJECT_BYTES`, `MIN_FREE_DISK_BYTES`, `MAX_DECOMPRESSED_BYTES` | Ingest abuse limits                                                                                                          |
+| `CAPTURE_READ_ONLY`                                                  | Serve a mirror of a database without writing to it                                                                           |
 
-   ```bash
-   python -m capture.cli add-project "Acme Brand"
-   # project 'Acme Brand' created — token: cap_xxxxxxxxxxxxxxxxxxxxxxxx
-   ```
 
-2. Send the brand [docs/integration.md](docs/integration.md) — the complete
-   brand-facing guide — along with their token and your server address.
-   Their side is the snippet `add-project` prints — an inline block that
-   fetches nothing until their page has loaded, so this server being down
-   can never affect their site. The guide covers privacy defaults, GTM, CSP
-   and verification.
+The recorder is configured remotely per project (sample rate, triggers,
+masking selectors), so recording behaviour can change across every site
+without editing any brand's page. `window.CAPTURE_CONFIG` on the page always
+wins. The full list of keys is in [docs/integration.md](docs/integration.md).
 
-That's it — recordings land under `data/projects/<token>/sessions/` and the
-replay UI grows a project selector. Operator notes:
-
-- **Creating the first project switches ingest to token-required**: batches
-  without a known token are rejected with 401 (so strangers can't fill your
-  disk). With no projects configured the server is single-tenant and tokens
-  are ignored — the quick-start demo needs no setup.
-- Tokens identify, they don't authenticate — they're visible in page
-  source, and that's fine: they only grant the ability to *send*
-  recordings, never to read them.
-- Per-project remote config: `data/projects/<token>/config.json` (falls back
-  to the global `data/config.json`), so each brand can have its own sample
-  rate, triggers, etc.
-- Optional root-domain allowlist, enforced server-side at ingest:
-  `python -m capture.cli set-domains cap_xxx brand.com` rejects batches (403)
-  whose Origin/Referer isn't that root or one of its subdomains, so the
-  token can't be used from other sites. Run it with no domains to clear.
-  Best-effort — headers are spoofable outside a browser.
-- Protect the replay side in production:
-
-  ```bash
-  REPLAY_PASSWORD=... .venv/bin/uvicorn capture.server:app --port 3000
-  ```
-
-  `/replay.html` and `/api/*` require the password (HTTP Basic, any
-  username). With no password set they return 503 rather than serving
-  recordings openly; `REPLAY_AUTH_DISABLED=1` opts out of that for local
-  development, and `npm run dev` sets it for you. `/ingest`, `/config` and
-  the bundles stay open — the snippet runs on other people's pages. Serve
-  everything over HTTPS (any reverse proxy in front of uvicorn); browsers
-  block plain-HTTP ingest from HTTPS pages.
-
-## Giving brands their own logins (WorkOS)
-
-`REPLAY_PASSWORD` is single-operator: whoever holds it sees every project.
-To let each brand's team watch **only their own** recordings, switch the read
-side to per-user logins backed by [WorkOS AuthKit](https://workos.com/docs/authkit)
-(free tier covers this comfortably):
-
-1. In the WorkOS dashboard: create an application, enable AuthKit, and add
-   `https://capture.yourdomain.com/auth/callback` as a redirect URI.
-2. Create one WorkOS **Organization** per brand.
-3. On the server, set the environment and restart:
-
-   ```bash
-   WORKOS_API_KEY=sk_...          # API key — also signs session cookies
-   WORKOS_CLIENT_ID=client_...
-   CAPTURE_OPERATORS=you@example.com   # comma-separated; these emails see every project
-   ```
-
-4. Tie each project to its brand's organization, then invite that brand's
-   users (they get an email link and land on their project after first
-   login):
-
-   ```bash
-   python -m capture.cli set-org cap_xxxxxxxx org_yyyyyyyy
-   python -m capture.cli invite teammate@brand.com cap_xxxxxxxx
-   ```
-
-With both `WORKOS_*` vars set, `/replay.html` redirects to a hosted login
-instead of prompting for the Basic password; sessions are 7-day HMAC-signed
-cookies (rotate `SESSION_SECRET` or the API key to log everyone out). A
-logged-in user sees exactly the projects whose `org_id` matches one of their
-organizations — the project selector, session lists, chunks, and the Delete
-button all scope to that. Membership is looked up live (cached for
-`ORG_CACHE_TTL_S`, default 60s), so adding or removing someone in WorkOS
-takes effect within a minute — no re-login needed. Operators see everything,
-including the legacy no-project pool. Unset the `WORKOS_*` vars to fall back
-to `REPLAY_PASSWORD`.
-The write side (`/ingest`, `/config`, bundles) is unaffected — the snippet
-still runs on brand pages with no login.
-
-If a CDN fronts the server, it must forward cookies and query strings to the
-origin for `/replay.html`, `/api/*`, `/login`, and `/auth/*` (with caching
-disabled on those paths, which is the safe default for the read side anyway).
-
-Optional config, before the tag (inline values win over the derived ones):
-
-```html
-<script>
-  window.CAPTURE_CONFIG = {
-    endpoint: '/ingest',          // where batches are POSTed
-    token: null,                  // project token (usually via data-token)
-    recorderUrl: '/recorder.bundle.js',
-    remoteConfig: true,           // fetch settings from the server first
-    configUrl: '/config',
-    remoteConfigTtlMs: 60 * 60 * 1000,
-    flushIntervalMs: 5000,
-    maxBatchSize: 50,
-    maxBatchBytes: 900 * 1024,    // flush on payload size, not just count
-    idleThresholdMs: 5 * 60 * 1000, // drop background events past this idle time
-
-    // Ingestion controls (all optional):
-    sampleRate: 1,                // keep this fraction of sessions (sticky per session)
-    triggers: {                   // omit to record unconditionally
-      urls: ['/checkout'],        // regexes matched against location.href (SPA-aware)
-      onException: true,          // uncaught error / unhandled rejection
-    },
-    maxBufferBytes: 2 * 1024 * 1024, // pre-trigger rolling buffer bound
-    minDurationMs: 0,             // sessions shorter than this are never sent
-
-    // Privacy (inputs are always masked; these add page text and URLs):
-    maskTextSelector: null,       // CSS selector whose text becomes asterisks
-    blockSelector: null,          // CSS selector not recorded at all
-    redactUrlParams: [...],       // query/fragment params stripped from URLs
-
-    // Consent (inline only — a remote value arrives too late to gate storage):
-    requireConsent: false,        // touch nothing until grantConsent() is called
-    respectGlobalPrivacyControl: true, // honour navigator.globalPrivacyControl
-  };
-</script>
-```
-
-## Architecture
-
-```
-capture/        all the Python; one FastAPI app, deployed as one unit
-  server.py       HTTP: ingest, replay, projects, cohort + cut endpoints
-  db.py           Postgres pool; projects.py, sessionstore.py  identity + index
-  analyze/        session analysis: prompts/, slices, stats, storage, store
-src/            all the browser JS
-  recorder/       what runs on the brand's site
-  analyze/        the headless extractor (node, drives the replay player)
-  replay/         the replay UI
-web/            hand-written HTML (source)
-public/         generated by `npm run build`; gitignored, served to browsers
-migrations/     SQL, applied in order      tests/  docs/  data/
-```
-
-Run it with `uvicorn capture.server:app`; the CLIs are `python -m capture.server`
-and `python -m capture.backfill`.
-
-| Component | What it does |
-|---|---|
-| `public/capture.js` (~1 KB) | Fallback loader for sites that can't run an inline script; the documented snippet injects `recorder.bundle.js` directly and never fetches this |
-| `projects` / `project_tokens` tables + `?token=` on ingest/config | Per-brand projects: token-gated ingest, storage isolated by Postgres row level security, per-project config. Tokens rotate without touching data |
-| `REPLAY_PASSWORD` (HTTP Basic on `/replay.html` + `/api/*`) | Keeps recordings readable only to you; unset means the read side is refused, not open |
-| `WORKOS_API_KEY` + `WORKOS_CLIENT_ID` (per-user logins) | Replaces the Basic password with WorkOS AuthKit; each project's `org_id` scopes which brand team can read it |
-| `src/recorder.js` → `recorder.bundle.js` | rrweb `record()`, session/window ids, batching, gzip, keepalive flush |
-| `server.py` — `POST /ingest?compression=gzip-js` | FastAPI endpoint receiving gzipped JSON event batches |
-| `GET /config` ← `data/config.json` | Remote recording settings, fetched before recording starts |
-| `POST /order?session_id&token` | Checkout outcome from a Shopify custom pixel (checkout pages run no theme code); stored as `order.json` beside the session's chunks and shown as a Purchased / Reached checkout badge in the session list |
-| `data/sessions/<id>/<ts>-<rand>.json` | Immutable chunk per batch |
-| `data/sessions/<id>/visitor.json` | Per-session metadata from the first batch: anonymous visitor id (groups return visits) and entry URL |
-| `GET /api/sessions?limit&cursor&filter&q` | Paged session list, newest first, served from Postgres and scoped to one project by row level security. Filtering (`checkout`, `purchased`, `rage`) and search happen server-side. Returns `{sessions, total, cursor}`; follow `cursor` until it is null |
-| `GET /api/sessions/:id`, `/:id/chunks`, `/:id/chunks/:name` | Single session's metadata (used by deep links to sessions below the loaded pages), chunk manifest, single immutable chunk |
-| `GET /healthz` | 200 when storage is writable, disk is above the floor and the bundles exist; 503 otherwise. Unauthenticated and boolean-only, so `deploy.sh` and uptime checks can use it |
-| `web/replay.html` + `replay.bundle.js` | rrweb-player + synced Timeline panel |
-
-## Client behavior
-
-- **Remote config** — before recording starts, the client fetches `/config`
-  (served from `data/config.json`) and caches it in `localStorage` for 1 h, so
-  recording behavior — sample rate, triggers, idle threshold —
-  can change fleet-wide by editing one server file, no page redeploys. Merge
-  precedence: built-in defaults < remote config < inline `window.CAPTURE_CONFIG`
-  (the page always wins). A missing/invalid config file or unreachable endpoint
-  degrades gracefully to local settings. Inspect the effective merge with
-  `window.capture.config()`.
-- **Session identity** — a session id in `localStorage`, rotated after 30 min idle or
-  24 h max; a per-tab window id in `sessionStorage`. On rotation the recorder takes a
-  fresh full snapshot so every session is independently replayable. A visitor id in
-  `localStorage` never rotates, so the session list can group return visits from the
-  same browser — deliberately pseudonymous: no identify(), no cross-device linking,
-  and opt-out removes it.
-- **Batching + compression** — events buffer in memory and flush every 5 s, at 50
-  events, or at ~0.9 MB of payload (a single full snapshot can dwarf dozens of small
-  events), gzipped with `CompressionStream` and POSTed with `fetch`. On `pagehide` /
-  tab-hidden a final flush uses `keepalive` so it survives navigation. Failed flushes
-  are re-buffered (bounded at 1000 events).
-- **Idle detection** — after 5 min without real interaction (mouse, scroll, input,
-  touch) the recorder goes idle: background noise (animation/timer mutations,
-  plugin events) is dropped instead of recorded, marked by a `capture-idle` event.
-  Interaction wakes it with a `capture-idle-end` marker plus a fresh full snapshot
-  so replay resumes from current reality. Only real interaction extends the
-  session's lifetime — a tab left open on an animating page still rotates.
-- **Presence** — every tab records a `capture-visibility` marker for its starting
-  state and each later change between `focused`, `unfocused` (page on screen but the
-  window is not) and `hidden` (another tab, another app, phone locked). This is what
-  separates a visitor who walked away from one who sat on the page hesitating: the
-  timeline labels each idle gap accordingly instead of calling both "idle".
-- **Privacy (on by default)** — `maskAllInputs: true` (all input text becomes `*`
-  before leaving the browser), `class="capture-block"` redacts an element entirely,
-  `class="capture-mask"` masks text content. Verified: raw form values never appear
-  in stored chunks.
-- **Sampling** — mousemove throttled to 50 ms, scroll to 100 ms, input `last`-value
-  only; full snapshot checkout every 5 min so replay can seek without reading the
-  whole stream.
-- **Lazy replay loading** — the player fetches the chunk manifest, starts
-  playback from the first chunk (every session opens with a full snapshot), and
-  streams the remaining chunks in via `player.addEvent()` while you watch — the
-  server never assembles a whole session in memory, and long sessions start
-  playing immediately. Chunks are immutable, so they're served with
-  `max-age=86400` and scrubbing re-visits hit the browser cache.
-- **Multi-tab replay** — each browser tab records its own independent rrweb
-  stream (own window id, own full snapshot) into the shared session; the ingest
-  server encodes the window id into chunk filenames so the manifest groups
-  chunks per tab without opening a single file. Multi-tab sessions get a tab
-  picker in the player (largest stream plays first); single-tab and legacy
-  sessions look exactly as before.
-- **Activity-density seekbar** — a histogram of user interactions (clicks,
-  scrolls, inputs) painted above the player's progress bar, so the interesting
-  moments of a session are visible before you scrub; click-through, per tab,
-  lightly smoothed.
-- **Playhead-synced timeline** — the Timeline panel tracks the replay
-  position: rows the playhead hasn't reached yet are dimmed, the latest-fired
-  row is highlighted and kept scrolled into view, and clicking any row seeks
-  the player to that moment.
-- **Ingestion controls** — `sampleRate` rolls a sticky per-session
-  keep/skip decision at session creation, so a session is wholly recorded or never
-  leaves the browser. With `triggers` configured, the recorder starts in a
-  `buffering` state: events accumulate in a bounded in-memory rolling buffer
-  (`maxBufferBytes`, replayability-safe — it restarts from a fresh full snapshot
-  rather than trimming past one) and nothing is sent until a trigger fires — a URL
-  regex match (SPA navigations included), an uncaught exception, or a manual
-  `window.capture.trigger('reason')`. `minDurationMs` adds a second gate — quick
-  bounces are never sent, and combined with triggers every configured gate must
-  pass before activation. Activation flushes the buffered lead-up, stamps
-  a `capture-trigger` custom event into the stream, and persists the decision on the
-  session so later page loads stay active. Untriggered sessions are discarded on
-  unload. `window.capture.status()` reports `disabled | buffering | active`.
-  Try it: **/demo-triggers.html** buffers until you fire one of its three triggers.
-
-## Commands
+## Deployment
 
 ```bash
-npm run build   # esbuild: recorder.bundle.js, replay.bundle.js(+css), capture.js
-npm start       # server only (uvicorn on :3000)
-npm run dev     # build + server
+scripts/deploy-staging.sh   # same flow, staging host
+scripts/deploy.sh           # build, ship, preflight on a spare port, migrate, switch symlink, health-check
 ```
 
-## Scaling it beyond one box
+`GET /healthz` reports whether storage is writable, how much disk is free,
+whether the bundles exist, and whether the analysis runtime is present.
 
-The wire format is stable, so the upgrade path is swapping storage, not clients:
-put `/ingest` behind a queue (Kafka/SQS), write chunks to S3 instead of disk, and
-index session metadata in a database (ClickHouse/Postgres). The player already
-streams chunks lazily, so swapping the chunk endpoint for signed S3 URLs changes
-nothing client-side.
+## Data handling
 
-Retention is built in: a daily sweep deletes sessions whose newest chunk is older
-than `RETENTION_DAYS` (default 30; `RETENTION_DAYS=0` keeps everything forever).
+- Every input is masked in the browser before it leaves the page.
+`capture-block` and `capture-mask` classes, or selectors, extend masking to
+page content.
+- Visitor ids are pseudonymous and per browser. There is no identify call and
+no cross-device linking.
+- Erasure: the *Delete* button on a session, or
+`python -m capture.cli remove-project <token> --purge`. Retention runs daily.
 
-Deletion on demand, for erasure requests that can't wait for retention:
 
-```bash
-python -m capture.cli list-projects                  # tokens, names, session counts, size
-python -m capture.cli remove-project <token>         # revoke the token, keep the recordings
-python -m capture.cli remove-project <token> --purge # revoke and erase them
+
+## Repository map
+
+```
+capture/          Python server: one FastAPI app
+  api/              routes: ingest, sessions, cohorts, auth, meta
+  analyze/          the analysis pipeline (sampling, Gemini, cohorts, cuts, stats)
+  analysis_port.py  the only door from the web layer into analyze/
+src/
+  recorder/         runs on the brand's site
+  replay/           the replay and insights UI
+  analyze/          the headless extractor (Node + Playwright)
+web/              HTML sources (built into public/)
+migrations/       ordered SQL migrations
+tests/            client (node --test) and server (unittest/pytest) tests
+docs/             integration guide, RDS setup, design reviews, deep dives
 ```
 
-Individual sessions have a **Delete** button in the replay UI (two clicks to
-confirm), backed by `DELETE /api/sessions/<id>`. Like the rest of `/api` it sits
-behind `REPLAY_PASSWORD`, and `DELETE` is deliberately absent from the CORS
-allowlist so no other origin can call it. All of these are irreversible.
-
-Ingest is bounded, because project tokens are public and anyone can post with
-one:
-
-| Variable | Default | Effect |
-|---|---|---|
-| `MAX_PROJECT_BYTES` | 2 GB | Per-project storage cap; over it `/ingest` returns 429 and the recorder drops the batch. `0` disables. |
-| `MIN_FREE_DISK_BYTES` | 1 GB | Free-space floor for the box; below it `/ingest` returns 507 and the recorder retries. `0` disables. |
-| `MAX_DECOMPRESSED_BYTES` | 32 MB | Ceiling on gzip expansion, so a small bomb can't exhaust memory. |
